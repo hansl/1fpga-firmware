@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "baseUrl": ".",
+    "module": "ESNext",
+    "outDir": "dist",
+    "rootDirs": [
+      "src",
+      "codegen"
+    ],
+    "strict": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "moduleResolution": "Bundler",
+    "paths": {
+      "$schemas:*": [
+        "codegen/schemas/*"
+      ],
+      "@:*": [
+        "types/*"
+      ]
+    }
+  }
+}
