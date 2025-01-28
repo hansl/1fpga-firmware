@@ -999,7 +999,7 @@ impl Config {
             return Ok(Default::default());
         }
 
-        let json = ini::parse(&s).unwrap().to_json_string(
+        let json = ini::parse(&s)?.to_json_string(
             |name, value: &str| match name {
                 "mouse_throttle"
                 | "video_info"
