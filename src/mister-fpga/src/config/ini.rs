@@ -1,6 +1,13 @@
 //! The goal of this module is to load the configuration from an INI file, then
 //! convert it to a JSON file. This way we can use serde_json which is a better
 //! supported library to deserialize stuff.
+//!
+//! MiSTer.ini differs from the standard INI format as:
+//!   1. it allows "root" key-value pairs before any section.
+//!   2. it allows multiple sections with the same name.
+//!   3. it allows multiple keys with the same name in a section.
+//!   4. it allows empty lines/sections containing comments.
+//!   5. it allows category names on multiple lines.
 use std::collections::BTreeMap;
 use thiserror::Error;
 
@@ -8,9 +15,6 @@ use thiserror::Error;
 pub enum Error {
     #[error("INI parse error: {0}")]
     ParseError(String),
-
-    #[error("Deserialization error: {0}")]
-    Message(String),
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -157,15 +161,38 @@ impl<'a> Ini<'a> {
     }
 }
 
-pub fn parse(input: &str) -> Result<Ini, Error> {
+pub fn parse(mut input: &str) -> Result<Ini, Error> {
     let mut root_kv = Vec::new();
     let mut sections = Vec::new();
     let mut current_section: Option<(&str, Section)> = None;
 
-    for l in input.lines() {
+    fn split_section_header(name: &str) -> impl Iterator<Item = &str> {
+        name.split('+').map(str::trim)
+    }
+
+    while !input.is_empty() {
+        let i = input.find('\n').unwrap_or(input.len());
+
         // Remove comments
-        let l = l.split(';').next().unwrap_or(l).trim();
-        if let Some((key, value)) = l.split_once('=') {
+        let line = &input[..i];
+        let line = line.split(';').next().unwrap_or(line).trim();
+        if line.is_empty() {
+            input = &input[i..].strip_prefix('\n').unwrap_or("");
+        } else if let Some(l) = input.strip_prefix('[') {
+            // Find the `]` in the rest of the input.
+            let Some((name, after_category)) = l.split_once(']') else {
+                return Err(Error::ParseError("Category not closed: ".to_string() + l));
+            };
+            input = &after_category[1..];
+
+            if let Some(s) = current_section.take() {
+                // Split the section name and clone it if necessary.
+                sections.extend(split_section_header(&s.0).map(|name| (name, s.1.clone())));
+            }
+
+            let name = name.trim();
+            current_section = Some((name, Section::new()));
+        } else if let Some((key, value)) = line.split_once('=') {
             if let Some(section) = current_section.as_mut() {
                 section.1.push(key.trim(), value.trim());
             } else {
@@ -174,21 +201,14 @@ pub fn parse(input: &str) -> Result<Ini, Error> {
                     value: value.trim(),
                 });
             }
-        } else if let Some(l) = l.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
-            if let Some(s) = current_section.take() {
-                sections.push(s);
-            }
-            let name = l.trim();
-            current_section = Some((name, Section::new()));
+            input = &input[i..];
         } else {
-            if l.trim() == "" {
-                continue;
-            }
-            Err(Error::ParseError("Invalid line: ".to_string() + l))?;
+            return Err(Error::ParseError("Invalid line: ".to_string() + line));
         }
     }
+
     if let Some(s) = current_section.take() {
-        sections.push(s);
+        sections.extend(split_section_header(&s.0).map(|name| (name, s.1.clone())));
     }
 
     Ok(Ini {
