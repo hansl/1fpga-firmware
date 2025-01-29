@@ -22,6 +22,9 @@ strip = true
 debug = false
 
 [profile.dev]
+
+[profile.release-debug]
+inherits = "dev"
 overflow-checks = false
 debug = 0
 panic = "abort"
@@ -55,7 +58,8 @@ senior = { path = "src/senior" }
 taser = { path = "src/taser" }
 
 [workspace.dependencies.sdl3]
-git = "https://github.com/hansl/sdl3-rs.git"
-branch = "1fpga-firmware"
+#git = "https://github.com/hansl/sdl3-rs.git"
+#branch = "1fpga-firmware"
+version = "0.14.2"
 features = ["static-link", "build-from-source-static", "build-from-source-unix-console"]
 

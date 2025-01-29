@@ -86,8 +86,6 @@ fn main() {
 
     fpga.osd_enable();
 
-    let options = Config::base().into_inner();
-
     let mut core = MisterFpgaCore::new(fpga.clone()).expect("Could not create the core");
 
     core.init().unwrap();

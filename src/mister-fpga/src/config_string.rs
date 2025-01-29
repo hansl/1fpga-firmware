@@ -500,10 +500,10 @@ impl FromStr for Config {
         let (rest, (name, settings, menu)) =
             parser::parse_config_menu(cfg_string.into()).map_err(|e| e.to_string())?;
 
-        if !rest.fragment().is_empty() {
+        if !rest.is_empty() {
             return Err(format!(
                 "Did not parse config string to the end. Rest: '{}'",
-                rest.fragment()
+                rest
             ));
         }
 
