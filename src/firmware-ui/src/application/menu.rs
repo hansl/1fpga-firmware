@@ -173,9 +173,7 @@ pub fn text_menu<'a, C, R: MenuReturn + Copy, E: Debug>(
 
         for f in items_items.iter_mut() {
             let label = f.inner().title();
-            let is_visible = if filter.is_empty() {
-                true
-            } else if label.is_empty() {
+            let is_visible = if filter.is_empty() || label.is_empty() {
                 true
             } else {
                 label.to_lowercase().contains(&filter.to_lowercase())
@@ -266,19 +264,17 @@ pub fn text_menu<'a, C, R: MenuReturn + Copy, E: Debug>(
                 if let Some(action) = menu.interact(ev.clone()) {
                     match action {
                         SdlMenuAction::Back => {
-                            return R::back().map(|b| Ok((Some(*&b), menu.state().clone())))
+                            return R::back().map(|b| Ok((Some(b), menu.state())))
                         }
                         SdlMenuAction::Select(result) => {
-                            return Some(Ok((Some(result), menu.state().clone())));
+                            return Some(Ok((Some(result), menu.state())));
                         }
                         SdlMenuAction::ChangeSort => {
-                            return R::sort().map(|r| Ok((Some(r), menu.state().clone())));
+                            return R::sort().map(|r| Ok((Some(r), menu.state())));
                         }
                         SdlMenuAction::ShowOptions => {
                             if let SdlMenuAction::Select(r) = menu.selected_value() {
-                                return r
-                                    .into_details()
-                                    .map(|r| Ok((Some(r), menu.state().clone())));
+                                return r.into_details().map(|r| Ok((Some(r), menu.state())));
                             }
                         }
                         SdlMenuAction::KeyPress(Keycode::Backspace)
@@ -286,7 +282,7 @@ pub fn text_menu<'a, C, R: MenuReturn + Copy, E: Debug>(
                             filter.pop();
 
                             info!("filter: {}", filter);
-                            return Some(Ok((None, menu.state().clone())));
+                            return Some(Ok((None, menu.state())));
                         }
                         SdlMenuAction::TextInput(text) => {
                             for c in text.iter() {
@@ -295,7 +291,7 @@ pub fn text_menu<'a, C, R: MenuReturn + Copy, E: Debug>(
                                 }
                                 filter.push(*c);
                             }
-                            return Some(Ok((None, menu.state().clone())));
+                            return Some(Ok((None, menu.state())));
                         }
                         _ => {}
                     }

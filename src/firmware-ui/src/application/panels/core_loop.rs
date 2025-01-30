@@ -128,10 +128,8 @@ fn core_loop<C, E: Debug>(
             }
         }
 
-        if i % 10 == 0 {
-            if core.should_quit() {
-                return Some(Ok(()));
-            }
+        if i % 10 == 0 && core.should_quit() {
+            return Some(Ok(()));
         }
 
         None

@@ -63,7 +63,7 @@ impl Edid {
 }
 
 fn is_edid_valid(edid: &[u8]) -> bool {
-    &edid[..8] == &[0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00]
+    edid[..8] == [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00]
 }
 
 #[cfg(target_os = "linux")]
@@ -636,9 +636,11 @@ impl CustomVideoMode {
 
 impl From<DefaultVideoMode> for CustomVideoMode {
     fn from(mode: DefaultVideoMode) -> Self {
-        let mut v = CustomVideoMode::default();
-        v.param = mode.into();
-        v.f_pix = mode.f_pix();
+        let mut v = CustomVideoMode {
+            param: mode.into(),
+            f_pix: mode.f_pix(),
+            ..Default::default()
+        };
         v.set_pll(v.f_pix);
         v
     }

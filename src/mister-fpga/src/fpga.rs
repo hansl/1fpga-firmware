@@ -197,13 +197,13 @@ impl MisterFpga {
     pub fn core_interface_type(&self) -> Option<CoreInterfaceType> {
         let manager = self.regs();
 
-        CoreInterfaceType::from_repr((manager.gpi() >> 16 & 1) as u8)
+        CoreInterfaceType::from_repr(((manager.gpi() >> 16) & 1) as u8)
     }
 
     pub fn core_io_version(&self) -> Option<u8> {
         let manager = self.regs();
 
-        let version = manager.gpi() >> 18 & 0b00000011;
+        let version = (manager.gpi() >> 18) & 0b00000011;
         if version == 0 {
             error!("FPGA core IO version mismatch");
             None

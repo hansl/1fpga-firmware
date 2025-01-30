@@ -21,7 +21,7 @@ pub struct TextMenuOptions<'a, R: MenuReturn + Copy> {
     pub(super) suffix: &'a [(&'a str, &'a str, R)],
 }
 
-impl<'a, R: MenuReturn + Copy> Default for TextMenuOptions<'a, R> {
+impl<R: MenuReturn + Copy> Default for TextMenuOptions<'_, R> {
     fn default() -> Self {
         Self {
             show_back_menu: true,

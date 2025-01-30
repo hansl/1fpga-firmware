@@ -109,13 +109,13 @@ impl<'a> menu::IntoTextMenuItem<'a, MenuAction> for TextMenuItem {
         } else if self.select.is_some() {
             menu::TextMenuItem::navigation_item(
                 self.label.as_str(),
-                self.marker.as_ref().map(|m| m.as_str()).unwrap_or_default(),
+                self.marker.as_deref().unwrap_or_default(),
                 MenuAction::Select(self.index),
             )
         } else {
             menu::TextMenuItem::unselectable_with_marker(
                 self.label.as_str(),
-                self.marker.as_ref().map(|m| m.as_str()).unwrap_or_default(),
+                self.marker.as_deref().unwrap_or_default(),
             )
         }
     }
@@ -216,7 +216,7 @@ fn text_menu_(
                 menu_options,
                 &mut (host_defined.command_map_mut(), &mut context),
                 |app, id, (command_map, context)| -> JsResult<()> {
-                    maybe_call_command(app, id, *command_map, *context)
+                    maybe_call_command(app, id, command_map, context)
                 },
             )?;
             state = new_state;
@@ -362,7 +362,7 @@ fn alert_(
     );
 
     JsPromise::resolve(
-        result.map_or(JsValue::null(), |n| JsValue::from(n)),
+        result.map_or(JsValue::null(), JsValue::from),
         context,
     )
 }
@@ -404,7 +404,7 @@ fn prompt_(
         512,
         app,
     )
-    .map(|r| JsString::from(r));
+    .map(JsString::from);
     JsPromise::resolve(result.map_or(JsValue::null(), JsValue::from), context)
 }
 

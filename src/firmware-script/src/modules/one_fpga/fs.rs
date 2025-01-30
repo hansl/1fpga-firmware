@@ -139,7 +139,7 @@ fn is_file(file: JsString, context: &mut Context) -> JsPromise {
             };
             resolvers.resolve.call(
                 &JsValue::undefined(),
-                &[JsValue::from(is_file).into()],
+                &[JsValue::from(is_file)],
                 context,
             )
         },
@@ -158,7 +158,7 @@ fn is_dir(file: JsString, context: &mut Context) -> JsPromise {
             };
             resolvers.resolve.call(
                 &JsValue::undefined(),
-                &[JsValue::from(is_dir).into()],
+                &[JsValue::from(is_dir)],
                 context,
             )
         },
@@ -262,7 +262,7 @@ fn file_size(paths: Either<String, Vec<String>>, context: &mut Context) -> JsPro
                 Either::Left(path) => {
                     let path = PathBuf::from(path);
                     let size = std::fs::metadata(&path).unwrap().len();
-                    JsValue::from(size).into()
+                    JsValue::from(size)
                 }
                 Either::Right(paths) => {
                     let hashes = paths
@@ -270,7 +270,7 @@ fn file_size(paths: Either<String, Vec<String>>, context: &mut Context) -> JsPro
                         .map(|path| {
                             let path = PathBuf::from(path);
                             let size = std::fs::metadata(&path).unwrap().len();
-                            JsValue::from(size).into()
+                            JsValue::from(size)
                         })
                         .collect::<Vec<JsValue>>();
                     JsArray::from_iter(hashes, context).into()

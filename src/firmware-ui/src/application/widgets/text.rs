@@ -34,7 +34,7 @@ impl<'s> FontRendererView<'s> {
     }
 }
 
-impl<'s> Dimensions for FontRendererView<'s> {
+impl Dimensions for FontRendererView<'_> {
     fn bounding_box(&self) -> Rectangle {
         self.renderer
             .get_rendered_dimensions(self.text, self.top_left, self.vertical_position)
@@ -44,7 +44,7 @@ impl<'s> Dimensions for FontRendererView<'s> {
     }
 }
 
-impl<'s> Transform for FontRendererView<'s> {
+impl Transform for FontRendererView<'_> {
     fn translate(&self, by: Point) -> Self {
         Self {
             top_left: self.top_left + by,
@@ -59,7 +59,7 @@ impl<'s> Transform for FontRendererView<'s> {
     }
 }
 
-impl<'s> Drawable for FontRendererView<'s> {
+impl Drawable for FontRendererView<'_> {
     type Color = BinaryColor;
     type Output = ();
 
@@ -79,7 +79,7 @@ impl<'s> Drawable for FontRendererView<'s> {
                     .expect("No bounding box")
                     .size
                     .width as i32;
-                let x = self.top_left.x + width - (text_width / 2) as i32;
+                let x = self.top_left.x + width - (text_width / 2);
                 Point::new(x, self.top_left.y)
             }
             HorizontalAlignment::Right => {
@@ -92,7 +92,7 @@ impl<'s> Drawable for FontRendererView<'s> {
                     .expect("No bounding box")
                     .size
                     .width as i32;
-                let x = self.top_left.x + width - text_width as i32;
+                let x = self.top_left.x + width - text_width;
                 Point::new(x, self.top_left.y)
             }
         };

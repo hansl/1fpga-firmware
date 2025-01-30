@@ -84,7 +84,7 @@ pub(crate) enum UserIoCommands {
     /// Enable/disable Gamma correction
     UserIoSetGamma = 0x32,
 
-    /// Get the info line from the core to show.
+    // /// Get the info line from the core to show.
     // UserIoGetInfo = 0x36,
 
     // Set a custom aspect ratio.
@@ -294,12 +294,12 @@ impl SpiCommand for UserIoRtc {
         // MSM6242B layout, with 4 bits per digit of sec, min, hour, day, month, year (2 digits),
         // and the weekday.
         let rtc = [
-            ((self.0.second() % 10) | (self.0.second() / 10) << 4) as u8,
-            ((self.0.minute() % 10) | (self.0.minute() / 10) << 4) as u8,
-            ((self.0.hour() % 10) | (self.0.hour() / 10) << 4) as u8,
-            ((self.0.day() % 10) | (self.0.day() / 10) << 4) as u8,
-            ((self.0.month() % 10) | (self.0.month() / 10) << 4) as u8,
-            ((self.0.year() % 10) | ((self.0.year() / 10) % 10) << 4) as u8,
+            ((self.0.second() % 10) | ((self.0.second() / 10) << 4)) as u8,
+            ((self.0.minute() % 10) | ((self.0.minute() / 10) << 4)) as u8,
+            ((self.0.hour() % 10) | ((self.0.hour() / 10) << 4)) as u8,
+            ((self.0.day() % 10) | ((self.0.day() / 10) << 4)) as u8,
+            ((self.0.month() % 10) | ((self.0.month() / 10) << 4)) as u8,
+            ((self.0.year() % 10) | (((self.0.year() / 10) % 10) << 4)) as u8,
             self.0.weekday().num_days_from_sunday() as u8,
             0x40,
         ];
@@ -399,8 +399,8 @@ impl SpiCommand for SetSdConf {
         let mut command = spi.command(UserIoCommands::UserIoSetSdConf);
 
         if self.wide {
-            command.write_buffer_w(unsafe { transmute::<_, &[u16; 8]>(&self.csd) });
-            command.write_buffer_w(unsafe { transmute::<_, &[u16; 8]>(&self.cid) });
+            command.write_buffer_w(unsafe { transmute::<&[u8; 16], &[u16; 8]>(&self.csd) });
+            command.write_buffer_w(unsafe { transmute::<&[u8; 16], &[u16; 8]>(&self.cid) });
         } else {
             command.write_buffer_b(&self.csd);
             command.write_buffer_b(&self.cid);

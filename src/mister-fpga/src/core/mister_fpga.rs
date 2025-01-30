@@ -770,7 +770,7 @@ impl Core for MisterFpgaCore {
             .find(|info| info.setting_id() == id)
             .cloned()
         {
-            self.load_file(&Path::new(&path), Some(info))
+            self.load_file(Path::new(&path), Some(info))
                 .map_err(Error::Message)?;
             self.end_send_file()?;
             self.poll_mounts()?;

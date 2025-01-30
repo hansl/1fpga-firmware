@@ -147,7 +147,7 @@ pub fn prompt(
                 },
                 Event::TextInput { text, .. } => {
                     if result.len() < max_length as usize {
-                        result.push_str(&text);
+                        result.push_str(text);
                     }
                 }
                 Event::ControllerButtonDown { button, .. } => match button {

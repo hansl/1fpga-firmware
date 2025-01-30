@@ -24,8 +24,8 @@ pub struct NetworkInterface {
 
 fn opt_addr_to_ip_addr(addr: Option<SockaddrStorage>) -> Option<IpAddr> {
     addr.and_then(|addr| match addr.family() {
-        Some(AddressFamily::Inet) => Some(IpAddr::V4(addr.as_sockaddr_in().unwrap().ip().into())),
-        Some(AddressFamily::Inet6) => Some(IpAddr::V6(addr.as_sockaddr_in6().unwrap().ip().into())),
+        Some(AddressFamily::Inet) => Some(IpAddr::V4(addr.as_sockaddr_in().unwrap().ip())),
+        Some(AddressFamily::Inet6) => Some(IpAddr::V6(addr.as_sockaddr_in6().unwrap().ip())),
         _ => None,
     })
 }
@@ -119,7 +119,7 @@ impl NetworkInterface {
 fn interfaces_(ctx: &mut Context) -> JsResult<JsPromise> {
     let addrs = nix::ifaddrs::getifaddrs().map_err(JsError::from_rust)?;
     let result = addrs
-        .map(|addr| NetworkInterface::from(addr))
+        .map(NetworkInterface::from)
         .filter(|i| i.family.is_some() || i.address.is_some())
         .collect::<Vec<_>>();
 
@@ -171,7 +171,7 @@ fn download_(url: String, destination: Option<String>) -> JsResult<JsString> {
                 }
             })
         })
-        .unwrap_or_else(|| url.split('/').last().unwrap().to_string());
+        .unwrap_or_else(|| url.split('/').next_back().unwrap().to_string());
 
     let path = if let Some(dir) = destination {
         PathBuf::from(dir).join(file_name)

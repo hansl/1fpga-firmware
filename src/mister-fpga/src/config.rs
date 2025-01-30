@@ -943,16 +943,6 @@ impl Config {
         self.mister
     }
 
-    pub fn into_inner_with_overrides(self, overrides: &[&str]) -> MisterConfig {
-        let mut mister = self.mister;
-        for o in overrides {
-            if let Some(override_config) = self.overrides.get(&o.to_string()) {
-                mister.merge(override_config.clone());
-            }
-        }
-        mister
-    }
-
     pub fn base() -> Self {
         let path = Self::root().join("MiSTer.ini");
         Self::load(&path).unwrap_or_else(|_| {
