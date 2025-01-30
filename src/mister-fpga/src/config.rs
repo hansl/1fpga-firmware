@@ -930,6 +930,7 @@ pub struct Config {
 impl Config {
     fn root() -> PathBuf {
         #[cfg(test)]
+        #[allow(static_mut_refs)]
         {
             unsafe { testing::ROOT.clone().unwrap() }
         }
