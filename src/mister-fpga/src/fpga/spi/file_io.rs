@@ -58,8 +58,8 @@ impl SpiCommand for FileExtension<'_> {
         ];
 
         spi.command(Commands::FileInfo)
-            .write((ext[0] as u16) << 8 | ext[1] as u16)
-            .write((ext[2] as u16) << 8 | ext[3] as u16);
+            .write(((ext[0] as u16) << 8) | ext[1] as u16)
+            .write(((ext[2] as u16) << 8) | ext[3] as u16);
 
         Ok(())
     }

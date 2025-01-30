@@ -27,7 +27,7 @@ pub enum SqlValue {
 impl SqlValue {
     pub fn into_js_value(self, context: &mut Context) -> JsResult<JsValue> {
         Ok(match self {
-            SqlValue::String(s) => JsString::from(s).into(),
+            SqlValue::String(s) => s.into(),
             SqlValue::Number(f) => f.into(),
             SqlValue::Integer(i) => i.into(),
             SqlValue::Null => JsValue::null(),
@@ -86,7 +86,7 @@ impl From<SqlValue> for Value {
     fn from(value: SqlValue) -> Self {
         match value {
             SqlValue::Binary(b) => Value::Blob(b),
-            SqlValue::Integer(i) => Value::Integer(i as i64),
+            SqlValue::Integer(i) => Value::Integer(i),
             SqlValue::Number(f) => Value::Real(f),
             SqlValue::String(s) => Value::Text(s.to_std_string_escaped()),
             SqlValue::Null => Value::Null,
@@ -234,7 +234,7 @@ impl JsDbInner {
         JsPromise::new(
             move |fns, context| {
                 let connection = self.connection(tx)?;
-                let statement = build_query_(&*connection, query, bindings, context)?;
+                let statement = build_query_(connection, query, bindings, context)?;
                 let rows = create_row_object_array(statement, context)?;
                 let result = JsObject::with_null_proto();
                 result.set(JsString::from("rows"), rows, true, context)?;
@@ -255,10 +255,10 @@ impl JsDbInner {
         context: &mut Context,
     ) -> JsResult<JsValue> {
         let connection = self.connection(tx)?;
-        let statement = build_query_(&*connection, query, bindings, context)?;
-        let result = first_row(statement, context);
+        let statement = build_query_(connection, query, bindings, context)?;
+        
 
-        result
+        first_row(statement, context)
     }
 
     pub fn execute(
@@ -269,7 +269,7 @@ impl JsDbInner {
         context: &mut Context,
     ) -> JsResult<usize> {
         let connection = self.connection(tx)?;
-        let mut statement = build_query_(&*connection, query, bindings, context)?;
+        let mut statement = build_query_(connection, query, bindings, context)?;
         let count = statement
             .raw_execute()
             .map_err(|e| js_error!(Error: "SQL Error: {}", e))?;
@@ -279,10 +279,10 @@ impl JsDbInner {
 
     pub fn execute_raw(&self, tx: Option<u32>, query: String) -> JsResult<()> {
         let connection = self.connection(tx)?;
-        let result = connection
+        
+        connection
             .execute_batch(&query)
-            .map_err(|e| js_error!("SQL Error: {}", e));
-        result
+            .map_err(|e| js_error!("SQL Error: {}", e))
     }
 
     pub fn execute_many(

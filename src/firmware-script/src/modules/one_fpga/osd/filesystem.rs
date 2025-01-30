@@ -77,7 +77,7 @@ pub fn select(
                         options,
                         &mut (command_map, &mut context),
                         |app, id, (command_map, context)| -> JsResult<()> {
-                            maybe_call_command(app, id, *command_map, *context)
+                            maybe_call_command(app, id, command_map, context)
                         },
                     )
                     .map_err(|e| e.to_string())

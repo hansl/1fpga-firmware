@@ -73,7 +73,7 @@ impl<'a> RegionMemoryMapper<'a> {
     }
 }
 
-impl<'a> MemoryMapper for RegionMemoryMapper<'a> {
+impl MemoryMapper for RegionMemoryMapper<'_> {
     fn create(_address: usize, _size: usize) -> Result<Self, &'static str> {
         unimplemented!()
     }

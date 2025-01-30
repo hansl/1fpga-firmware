@@ -91,7 +91,7 @@ impl<'a, S: SpiCommandExt> SpiCommandGuard<'a, S> {
         let mut low: u16 = 0;
         self.write_read(word1, &mut low)
             .write_read(word2, &mut high);
-        *out = (high as u32) << 16 | (low as u32);
+        *out = ((high as u32) << 16) | (low as u32);
         self
     }
 
@@ -192,7 +192,7 @@ impl<'a, S: SpiCommandExt> SpiCommandGuard<'a, S> {
     }
 }
 
-impl<'a, S: SpiCommandExt> Drop for SpiCommandGuard<'a, S> {
+impl<S: SpiCommandExt> Drop for SpiCommandGuard<'_, S> {
     fn drop(&mut self) {
         self.spi.disable(self.feature);
     }

@@ -149,7 +149,7 @@ impl JsImage {
         &self,
         app: &mut OneFpgaApp,
         options: Option<SendToBackgroundOptions>,
-    ) -> () {
+    ) {
         let Some(mut maybe_core) = app.platform_mut().core_manager_mut().get_current_core() else {
             return;
         };
@@ -165,7 +165,7 @@ impl JsImage {
         let image = self.inner.as_ref();
         let position = options
             .and_then(|o| o.position)
-            .unwrap_or(Position::default());
+            .unwrap_or_default();
         let clear = options.and_then(|o| o.clear).unwrap_or(false);
 
         let (width, height) = (image.width() as i64, image.height() as i64);

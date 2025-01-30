@@ -294,9 +294,9 @@ where
     }
 }
 
-impl<'a, R> embedded_menu::items::Marker for TextMenuItem<'a, R> where R: MenuReturn + Copy {}
+impl<R> embedded_menu::items::Marker for TextMenuItem<'_, R> where R: MenuReturn + Copy {}
 
-impl<'a, R> View for TextMenuItem<'a, R>
+impl<R> View for TextMenuItem<'_, R>
 where
     R: MenuReturn + Copy,
 {
@@ -319,7 +319,7 @@ where
     }
 }
 
-impl<'a, R> MenuListItem<SdlMenuAction<R>> for TextMenuItem<'a, R>
+impl<R> MenuListItem<SdlMenuAction<R>> for TextMenuItem<'_, R>
 where
     R: MenuReturn + Copy,
 {

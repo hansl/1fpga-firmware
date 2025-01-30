@@ -40,6 +40,12 @@ impl Display for InputPassword {
     }
 }
 
+impl Default for InputPassword {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InputPassword {
     pub fn new() -> Self {
         Self(Vec::new())
