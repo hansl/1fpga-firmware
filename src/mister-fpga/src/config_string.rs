@@ -100,7 +100,7 @@ impl LoadFileInfo {
     pub fn setting_id(&self) -> SettingId {
         self.label.as_ref().map_or_else(
             || SettingId::new(self.index as u32),
-            |l| SettingId::from_label(&l),
+            |l| SettingId::from_label(l),
         )
     }
 }
@@ -333,9 +333,9 @@ impl ConfigMenu {
 
     pub fn setting_id(&self) -> Option<SettingId> {
         match self {
-            ConfigMenu::Page { label, .. } => Some(SettingId::from_label(&label)),
-            ConfigMenu::Option { label, .. } => Some(SettingId::from_label(&label)),
-            ConfigMenu::Trigger { label, .. } => Some(SettingId::from_label(&label)),
+            ConfigMenu::Page { label, .. } => Some(SettingId::from_label(label)),
+            ConfigMenu::Option { label, .. } => Some(SettingId::from_label(label)),
+            ConfigMenu::Trigger { label, .. } => Some(SettingId::from_label(label)),
             ConfigMenu::PageItem(_, sub) => sub.setting_id(),
             ConfigMenu::HideIf(_, sub)
             | ConfigMenu::DisableIf(_, sub)
@@ -354,7 +354,7 @@ impl ConfigMenu {
             // TODO: add those.
             // ConfigMenu::Cheat(name) => name.as_ref().map(|x| x.as_str()),
             ConfigMenu::LoadFileAndRemember(info) | ConfigMenu::LoadFile(info) => {
-                info.label.as_ref().map(|l| l.as_str())
+                info.label.as_deref()
             }
             ConfigMenu::Option { label, .. } => Some(label.as_str()),
             ConfigMenu::Trigger { label, .. } => Some(label.as_str()),

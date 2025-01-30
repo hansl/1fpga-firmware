@@ -22,8 +22,7 @@ fn verify_inner_(path: String, signature: JsUint8Array, context: &mut Context) -
         .map_err(JsError::from_rust)?;
 
     Ok(public_key
-        .verify(buffer.as_ref(), &signature)
-        .map_or(false, |_| true))
+        .verify(buffer.as_ref(), &signature).is_ok_and(|_| true))
 }
 
 fn verify_signature_(path: String, signature: JsUint8Array, context: &mut Context) -> JsPromise {

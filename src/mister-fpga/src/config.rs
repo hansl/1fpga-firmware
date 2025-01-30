@@ -945,7 +945,7 @@ impl Config {
     pub fn into_inner_with_overrides(self, overrides: &[&str]) -> MisterConfig {
         let mut mister = self.mister;
         for o in overrides {
-            if let Some(override_config) = self.overrides.get(&o.to_string()) {
+            if let Some(override_config) = self.overrides.get(o) {
                 mister.merge(override_config.clone());
             }
         }

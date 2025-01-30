@@ -39,7 +39,7 @@ impl<'l> Button<'l> {
     }
 }
 
-impl<'l> Button<'l> {
+impl Button<'_> {
     pub fn focus(&mut self) {
         self.focused = true;
     }
@@ -48,13 +48,13 @@ impl<'l> Button<'l> {
     }
 }
 
-impl<'l> Dimensions for Button<'l> {
+impl Dimensions for Button<'_> {
     fn bounding_box(&self) -> Rectangle {
         self.rectangle.bounding_box()
     }
 }
 
-impl<'l> Transform for Button<'l> {
+impl Transform for Button<'_> {
     fn translate(&self, by: Point) -> Self {
         Self {
             rectangle: self.rectangle.translate(by),
@@ -68,7 +68,7 @@ impl<'l> Transform for Button<'l> {
     }
 }
 
-impl<'l> Drawable for Button<'l> {
+impl Drawable for Button<'_> {
     type Color = BinaryColor;
     type Output = ();
 

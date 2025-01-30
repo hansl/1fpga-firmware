@@ -455,7 +455,7 @@ fn parse_header_(header: &mut FceHeader, line: String) -> Result<(), FceError> {
             "subtitle" => {
                 let (frame, subtitle) = value
                     .split_once(' ')
-                    .ok_or_else(|| FceError::MissingSubtitleFrameNumber)?;
+                    .ok_or(FceError::MissingSubtitleFrameNumber)?;
                 header.subtitles.insert(
                     frame.parse().map_err(FceError::InvalidFrameNumber)?,
                     subtitle.to_string(),

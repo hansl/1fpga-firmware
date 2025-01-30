@@ -34,7 +34,7 @@ impl<'l> ControllerButton<'l, BinaryColor> {
     }
 }
 
-impl<'l, C> Dimensions for ControllerButton<'l, C>
+impl<C> Dimensions for ControllerButton<'_, C>
 where
     C: PixelColor,
 {
@@ -43,7 +43,7 @@ where
     }
 }
 
-impl<'l, C> Transform for ControllerButton<'l, C>
+impl<C> Transform for ControllerButton<'_, C>
 where
     C: PixelColor,
 {
@@ -60,7 +60,7 @@ where
     }
 }
 
-impl<'l, C> Drawable for ControllerButton<'l, C>
+impl<C> Drawable for ControllerButton<'_, C>
 where
     C: PixelColor,
 {

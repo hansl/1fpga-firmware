@@ -9,9 +9,9 @@ use tracing::{debug, error, trace};
 
 struct JsDatetimeFormat(DateTimeFormat);
 
-impl Into<JsValue> for JsDatetimeFormat {
-    fn into(self) -> JsValue {
-        JsValue::String(match self.0 {
+impl From<JsDatetimeFormat> for JsValue {
+    fn from(val: JsDatetimeFormat) -> Self {
+        JsValue::String(match val.0 {
             DateTimeFormat::Default => js_string!("default"),
             DateTimeFormat::Short => js_string!("short"),
             DateTimeFormat::TimeOnly => js_string!("timeOnly"),
@@ -44,19 +44,19 @@ enum FontSize {
     Large,
 }
 
-impl Into<MenuStyleFontSize> for FontSize {
-    fn into(self) -> MenuStyleFontSize {
-        match self {
-            Self::Small => MenuStyleFontSize::Small,
-            Self::Medium => MenuStyleFontSize::Medium,
-            Self::Large => MenuStyleFontSize::Large,
+impl From<FontSize> for MenuStyleFontSize {
+    fn from(val: FontSize) -> Self {
+        match val {
+            FontSize::Small => MenuStyleFontSize::Small,
+            FontSize::Medium => MenuStyleFontSize::Medium,
+            FontSize::Large => MenuStyleFontSize::Large,
         }
     }
 }
 
-impl Into<FontSize> for MenuStyleFontSize {
-    fn into(self) -> FontSize {
-        match self {
+impl From<MenuStyleFontSize> for FontSize {
+    fn from(val: MenuStyleFontSize) -> Self {
+        match val {
             MenuStyleFontSize::Small => FontSize::Small,
             MenuStyleFontSize::Medium => FontSize::Medium,
             MenuStyleFontSize::Large => FontSize::Large,
@@ -64,12 +64,12 @@ impl Into<FontSize> for MenuStyleFontSize {
     }
 }
 
-impl Into<JsValue> for FontSize {
-    fn into(self) -> JsValue {
-        JsValue::String(match self {
-            Self::Small => js_string!("small"),
-            Self::Medium => js_string!("medium"),
-            Self::Large => js_string!("large"),
+impl From<FontSize> for JsValue {
+    fn from(val: FontSize) -> Self {
+        JsValue::String(match val {
+            FontSize::Small => js_string!("small"),
+            FontSize::Medium => js_string!("medium"),
+            FontSize::Large => js_string!("large"),
         })
     }
 }
@@ -150,7 +150,7 @@ fn set_date_time_inner_(datetime: &str) -> JsResult<()> {
     .map_err(|e| js_error!("Invalid date and time: {}", e))?;
 
     let status = std::process::Command::new("date")
-        .args(&["-s", datetime])
+        .args(["-s", datetime])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -189,7 +189,7 @@ fn update_date_time_(tz: Option<String>, update_tz: Option<bool>) {
 
     std::thread::spawn(move || {
         // Ignore errors.
-        if let Some(dt) = ping_ntp(tz).ok() {
+        if let Ok(dt) = ping_ntp(tz) {
             if let Some(true) = update_tz {
                 if let Err(e) = set_time_zone_(dt.timezone) {
                     error!(?e, "Could not set timezone");
