@@ -143,6 +143,12 @@ declare module "1fpga:core" {
   ) => void | Promise<void>;
 
   /**
+   * Callback for when the core exits and return to the main menu.
+   * @param error If !undefined, an error occurred while running the core.
+   */
+  export type QuitListener = (error?: any) => void | Promise<void>;
+
+  /**
    * The result of the OSD, whether to quit the core or not.
    */
   export type OsdResult = boolean;
@@ -233,6 +239,13 @@ declare module "1fpga:core" {
      * @param listener The event listener.
      */
     on(event: "saveState", listener: SaveStateListener): void;
+
+    /**
+     * Specialization of the `on` method for the `quit` event.
+     * @param event The event name.
+     * @param listener The event listener.
+     */
+    on(event: "quit", listener: SaveStateListener): void;
   }
 
   /**

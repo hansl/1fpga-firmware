@@ -15,7 +15,7 @@ struct SchemaScope {
 }
 
 fn validate_(value: JsValue, schema: JsObject, context: &mut Context) -> JsResult<bool> {
-    let schema = JsValue::Object(schema);
+    let schema = JsValue::from(schema);
     let binding = context
         .get_data::<SchemaScope>()
         .ok_or(js_error!("Context missing schema scope"))?;
@@ -73,7 +73,7 @@ fn add_schema_(schema: JsObject, context: &mut Context) -> JsResult<JsString> {
 
     let id = scope
         .borrow_mut()
-        .compile(JsValue::Object(schema).to_json(context)?, false)
+        .compile(JsValue::from(schema).to_json(context)?, false)
         .map_err(JsError::from_rust)?;
 
     Ok(JsString::from(id.as_str()))

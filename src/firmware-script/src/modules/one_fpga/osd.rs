@@ -3,8 +3,8 @@ use crate::HostData;
 use boa_engine::object::builtins::{JsArray, JsPromise};
 use boa_engine::value::TryFromJs;
 use boa_engine::{
-    js_string, Context, Finalize, JsData, JsError, JsNativeError, JsObject, JsResult, JsString,
-    JsValue, Module, Trace, TryIntoJsResult,
+    js_string, Context, Finalize, JsData, JsNativeError, JsObject, JsResult, JsString, JsValue,
+    JsVariant, Module, Trace, TryIntoJsResult,
 };
 use boa_interop::{ContextData, IntoJsFunctionCopied, IntoJsModule};
 use either::Either;
@@ -51,9 +51,9 @@ pub struct TextMenuItem {
 
 impl TryFromJs for TextMenuItem {
     fn try_from_js(value: &JsValue, context: &mut Context) -> JsResult<Self> {
-        let object = match value {
-            JsValue::Object(o) => o,
-            JsValue::String(s) => {
+        let object = match value.variant() {
+            JsVariant::Object(o) => o,
+            JsVariant::String(s) => {
                 return Ok(Self {
                     label: s.to_std_string().unwrap(),
                     marker: None,
@@ -126,14 +126,14 @@ impl TextMenuItem {
         let object = JsObject::with_null_proto();
         object.set(
             js_string!("label"),
-            JsValue::String(self.label.clone().into()),
+            JsString::from(self.label.as_str()),
             false,
             context,
         )?;
         if let Some(ref marker) = self.marker {
             object.set(
                 js_string!("marker"),
-                JsValue::String(marker.clone().into()),
+                JsString::from(marker.as_str()),
                 false,
                 context,
             )?;
@@ -239,7 +239,7 @@ fn text_menu_(
                         context,
                     )?;
                     while let Some(p) = result.as_promise() {
-                        result = p.await_blocking(context).map_err(JsError::from_opaque)?;
+                        result = p.await_blocking(context)?;
                     }
 
                     if let Ok(new_item) = TryFromJs::try_from_js(&js_item, context) {
@@ -250,7 +250,7 @@ fn text_menu_(
                 } else {
                     let result = callable.call(&JsValue::undefined(), &[], context)?;
                     if let Some(p) = result.as_promise() {
-                        p.await_blocking(context).map_err(JsError::from_opaque)?
+                        p.await_blocking(context)?
                     } else {
                         result
                     }
@@ -289,7 +289,7 @@ fn text_menu_(
                 if let Some(maybe_callable) = options.sort.clone() {
                     if let Some(mut result) = call_callable(None, maybe_callable, context)? {
                         if let Some(p) = result.as_promise() {
-                            result = p.await_blocking(context).map_err(JsError::from_opaque)?;
+                            result = p.await_blocking(context)?;
                         }
 
                         // In sort, we try to replace partial options with the result of the callable.
@@ -361,10 +361,7 @@ fn alert_(
         &choices.iter().map(String::as_str).collect::<Vec<_>>(),
     );
 
-    JsPromise::resolve(
-        result.map_or(JsValue::null(), JsValue::from),
-        context,
-    )
+    JsPromise::resolve(result.map_or(JsValue::null(), JsValue::from), context)
 }
 
 #[derive(Clone, Debug, Trace, Finalize, JsData, boa_macros::TryFromJs)]

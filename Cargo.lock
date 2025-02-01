@@ -357,8 +357,8 @@ dependencies = [
 
 [[package]]
 name = "boa_ast"
-version = "0.19.0"
-source = "git+https://github.com/boa-dev/boa.git?rev=334fb3674db7137afe6af56d97711917f1ecf3d3#334fb3674db7137afe6af56d97711917f1ecf3d3"
+version = "0.20.0"
+source = "git+https://github.com/hansl/boa.git?branch=1fpga#210241c306bdbca53e8ee319c2db9c93c9f0eef3"
 dependencies = [
  "bitflags 2.8.0",
  "boa_interner",
@@ -371,8 +371,8 @@ dependencies = [
 
 [[package]]
 name = "boa_engine"
-version = "0.19.0"
-source = "git+https://github.com/boa-dev/boa.git?rev=334fb3674db7137afe6af56d97711917f1ecf3d3#334fb3674db7137afe6af56d97711917f1ecf3d3"
+version = "0.20.0"
+source = "git+https://github.com/hansl/boa.git?branch=1fpga#210241c306bdbca53e8ee319c2db9c93c9f0eef3"
 dependencies = [
  "arrayvec 0.7.6",
  "bitflags 2.8.0",
@@ -385,10 +385,12 @@ dependencies = [
  "boa_string",
  "bytemuck",
  "cfg-if",
+ "cow-utils",
  "dashmap",
  "either",
- "fast-float",
- "hashbrown 0.14.5",
+ "fast-float2",
+ "futures-lite",
+ "hashbrown 0.15.2",
  "icu_normalizer",
  "indexmap 2.7.1",
  "intrusive-collections",
@@ -398,7 +400,6 @@ dependencies = [
  "num-traits",
  "num_enum",
  "once_cell",
- "pollster",
  "portable-atomic",
  "rand 0.8.5",
  "regress",
@@ -410,30 +411,30 @@ dependencies = [
  "static_assertions",
  "tap",
  "thin-vec",
- "thiserror 1.0.69",
+ "thiserror 2.0.11",
  "time",
 ]
 
 [[package]]
 name = "boa_gc"
-version = "0.19.0"
-source = "git+https://github.com/boa-dev/boa.git?rev=334fb3674db7137afe6af56d97711917f1ecf3d3#334fb3674db7137afe6af56d97711917f1ecf3d3"
+version = "0.20.0"
+source = "git+https://github.com/hansl/boa.git?branch=1fpga#210241c306bdbca53e8ee319c2db9c93c9f0eef3"
 dependencies = [
  "boa_macros",
  "boa_profiler",
  "boa_string",
- "hashbrown 0.14.5",
+ "hashbrown 0.15.2",
  "thin-vec",
 ]
 
 [[package]]
 name = "boa_interner"
-version = "0.19.0"
-source = "git+https://github.com/boa-dev/boa.git?rev=334fb3674db7137afe6af56d97711917f1ecf3d3#334fb3674db7137afe6af56d97711917f1ecf3d3"
+version = "0.20.0"
+source = "git+https://github.com/hansl/boa.git?branch=1fpga#210241c306bdbca53e8ee319c2db9c93c9f0eef3"
 dependencies = [
  "boa_gc",
  "boa_macros",
- "hashbrown 0.14.5",
+ "hashbrown 0.15.2",
  "indexmap 2.7.1",
  "once_cell",
  "phf",
@@ -443,8 +444,8 @@ dependencies = [
 
 [[package]]
 name = "boa_interop"
-version = "0.19.0"
-source = "git+https://github.com/boa-dev/boa.git?rev=334fb3674db7137afe6af56d97711917f1ecf3d3#334fb3674db7137afe6af56d97711917f1ecf3d3"
+version = "0.20.0"
+source = "git+https://github.com/hansl/boa.git?branch=1fpga#210241c306bdbca53e8ee319c2db9c93c9f0eef3"
 dependencies = [
  "boa_engine",
  "boa_gc",
@@ -454,9 +455,10 @@ dependencies = [
 
 [[package]]
 name = "boa_macros"
-version = "0.19.0"
-source = "git+https://github.com/boa-dev/boa.git?rev=334fb3674db7137afe6af56d97711917f1ecf3d3#334fb3674db7137afe6af56d97711917f1ecf3d3"
+version = "0.20.0"
+source = "git+https://github.com/hansl/boa.git?branch=1fpga#210241c306bdbca53e8ee319c2db9c93c9f0eef3"
 dependencies = [
+ "cow-utils",
  "proc-macro2",
  "quote",
  "syn 2.0.96",
@@ -465,15 +467,15 @@ dependencies = [
 
 [[package]]
 name = "boa_parser"
-version = "0.19.0"
-source = "git+https://github.com/boa-dev/boa.git?rev=334fb3674db7137afe6af56d97711917f1ecf3d3#334fb3674db7137afe6af56d97711917f1ecf3d3"
+version = "0.20.0"
+source = "git+https://github.com/hansl/boa.git?branch=1fpga#210241c306bdbca53e8ee319c2db9c93c9f0eef3"
 dependencies = [
  "bitflags 2.8.0",
  "boa_ast",
  "boa_interner",
  "boa_macros",
  "boa_profiler",
- "fast-float",
+ "fast-float2",
  "icu_properties",
  "num-bigint",
  "num-traits",
@@ -483,13 +485,13 @@ dependencies = [
 
 [[package]]
 name = "boa_profiler"
-version = "0.19.0"
-source = "git+https://github.com/boa-dev/boa.git?rev=334fb3674db7137afe6af56d97711917f1ecf3d3#334fb3674db7137afe6af56d97711917f1ecf3d3"
+version = "0.20.0"
+source = "git+https://github.com/hansl/boa.git?branch=1fpga#210241c306bdbca53e8ee319c2db9c93c9f0eef3"
 
 [[package]]
 name = "boa_runtime"
-version = "0.19.0"
-source = "git+https://github.com/boa-dev/boa.git?rev=334fb3674db7137afe6af56d97711917f1ecf3d3#334fb3674db7137afe6af56d97711917f1ecf3d3"
+version = "0.20.0"
+source = "git+https://github.com/hansl/boa.git?branch=1fpga#210241c306bdbca53e8ee319c2db9c93c9f0eef3"
 dependencies = [
  "boa_engine",
  "boa_gc",
@@ -500,12 +502,14 @@ dependencies = [
 
 [[package]]
 name = "boa_string"
-version = "0.19.0"
-source = "git+https://github.com/boa-dev/boa.git?rev=334fb3674db7137afe6af56d97711917f1ecf3d3#334fb3674db7137afe6af56d97711917f1ecf3d3"
+version = "0.20.0"
+source = "git+https://github.com/hansl/boa.git?branch=1fpga#210241c306bdbca53e8ee319c2db9c93c9f0eef3"
 dependencies = [
- "fast-float",
+ "fast-float2",
+ "itoa",
  "paste",
  "rustc-hash",
+ "ryu-js",
  "sptr",
  "static_assertions",
 ]
@@ -605,9 +609,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.2.10"
+version = "1.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13208fcbb66eaeffe09b99fffbe1af420f00a7b35aa99ad683dfc1aa76145229"
+checksum = "e4730490333d58093109dc02c23174c3f4d490998c3fed3cc8e82d57afedb9cf"
 dependencies = [
  "jobserver",
  "libc",
@@ -772,6 +776,12 @@ dependencies = [
  "num_cpus",
  "winapi",
 ]
+
+[[package]]
+name = "cow-utils"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "417bef24afe1460300965a25ff4a24b8b45ad011948302ec221e8a0a81eb2c79"
 
 [[package]]
 name = "cpufeatures"
@@ -971,11 +981,12 @@ dependencies = [
 
 [[package]]
 name = "dashmap"
-version = "5.5.3"
+version = "6.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "978747c1d849a7d2ee5e8adc0159961c48fb7e5db2f06af6723b80123bb53856"
+checksum = "5041cc499144891f3790297212f32a74fb938e5136a14943f338ef9e0ae276cf"
 dependencies = [
  "cfg-if",
+ "crossbeam-utils",
  "hashbrown 0.14.5",
  "lock_api",
  "once_cell",
@@ -1398,10 +1409,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "fast-float"
-version = "0.2.0"
+name = "fast-float2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95765f67b4b18863968b4a1bd5bb576f732b29a4a28c7cd84c09fa3e2875f33c"
+checksum = "f8eb564c5c7423d25c886fb561d1e4ee69f72354d16918afa32c08811f6b6a55"
 
 [[package]]
 name = "faster-hex"
@@ -1667,6 +1678,19 @@ name = "futures-io"
 version = "0.3.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e5c1b78ca4aae1ac06c48a526a655760685149f0d465d21f37abfe57ce075c6"
+
+[[package]]
+name = "futures-lite"
+version = "2.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5edaec856126859abb19ed65f39e90fea3a9574b9707f13539acf4abf7eb532"
+dependencies = [
+ "fastrand",
+ "futures-core",
+ "futures-io",
+ "parking",
+ "pin-project-lite",
+]
 
 [[package]]
 name = "futures-macro"
@@ -3415,6 +3439,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b15813163c1d831bf4a13c3610c05c0d03b39feb07f7e09fa234dac9b15aaf39"
 
 [[package]]
+name = "parking"
+version = "2.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f38d5652c16fde515bb1ecef450ab0f6a219d619a7274976324d5e377f7dceba"
+
+[[package]]
 name = "parking_lot"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3629,12 +3659,6 @@ dependencies = [
  "flate2",
  "miniz_oxide",
 ]
-
-[[package]]
-name = "pollster"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22686f4785f02a4fcc856d3b3bb19bf6c8160d103f7a99cc258bddd0251dc7f2"
 
 [[package]]
 name = "portable-atomic"
@@ -5414,9 +5438,9 @@ dependencies = [
 
 [[package]]
 name = "webpki-roots"
-version = "0.26.7"
+version = "0.26.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d642ff16b7e79272ae451b7322067cdc17cadf68c23264be9d94a32319efe7e"
+checksum = "2210b291f7ea53617fbafcc4939f10914214ec15aace5ba62293a668f322c5c9"
 dependencies = [
  "rustls-pki-types",
 ]
