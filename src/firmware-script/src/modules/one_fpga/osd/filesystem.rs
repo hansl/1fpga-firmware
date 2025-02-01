@@ -87,10 +87,10 @@ pub fn select(
             let result = result.try_into_js_result(context);
 
             match result {
-                Ok(v) => fns.resolve.call(&JsValue::Undefined, &[v], context),
+                Ok(v) => fns.resolve.call(&JsValue::undefined(), &[v], context),
                 Err(e) => fns
                     .reject
-                    .call(&JsValue::Undefined, &[e.to_opaque(context)], context),
+                    .call(&JsValue::undefined(), &[e.to_opaque(context)], context),
             }
         },
         context,

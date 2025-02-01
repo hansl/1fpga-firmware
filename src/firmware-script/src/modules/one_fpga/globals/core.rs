@@ -3,9 +3,9 @@ use crate::modules::one_fpga::globals::classes::JsImage;
 use crate::HostData;
 use boa_engine::object::builtins::{JsFunction, JsUint8Array};
 use boa_engine::value::TryFromJs;
-use boa_engine::{js_error, Context, JsError, JsResult, JsString, JsValue};
+use boa_engine::{js_error, Context, JsError, JsResult, JsString, JsValue, TryIntoJsResult};
 use boa_interop::{js_class, ContextData, JsClass};
-use boa_macros::{js_str, Finalize, JsData, Trace};
+use boa_macros::{Finalize, JsData, Trace};
 use enum_map::{Enum, EnumMap};
 use firmware_ui::application::panels::core_loop::run_core_loop;
 use firmware_ui::application::OneFpgaApp;
@@ -14,24 +14,27 @@ use one_fpga::core::SettingId;
 use one_fpga::{Core, OneFpgaCore};
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::str::FromStr;
 use tracing::{error, info};
 
 #[derive(Debug, Clone, Trace, Finalize, TryFromJs)]
 struct LoopOptions {}
 
-#[derive(Debug, Clone, Enum)]
+#[derive(Debug, Clone, Enum, strum::EnumString, strum::EnumIter, strum::Display)]
+#[strum(serialize_all = "camelCase")]
 enum Events {
+    /// Fired when the core should save its savestate.
     SaveState,
+    /// Called when the core exits.
+    Quit,
 }
 
 impl TryFromJs for Events {
     fn try_from_js(value: &JsValue, context: &mut Context) -> JsResult<Self> {
         let string = JsString::try_from_js(value, context)?;
-        if string == js_str!("saveState") {
-            Ok(Self::SaveState)
-        } else {
-            Err(js_error!(TypeError: "Unknown event type: {}", string.to_std_string_escaped()))
-        }
+        Self::from_str(string.to_std_string_lossy().as_str()).map_err(
+            |_e| js_error!(TypeError: "Unknown event type: {}", string.to_std_string_escaped()),
+        )
     }
 }
 
@@ -69,36 +72,54 @@ impl JsCore {
         let events = self.events.clone();
         info!("Running loop: {:?}", options);
 
-        run_core_loop(
+        let cx = RefCell::new(context);
+
+        let result = run_core_loop(
             app,
             &mut core,
-            &mut (command_map, context),
-            |app, _core, id, (command_map, context)| -> JsResult<()> {
-                maybe_call_command(app, id, command_map, context)
+            |app, _core, id| -> JsResult<()> {
+                maybe_call_command(app, id, command_map, *cx.borrow_mut())
             },
-            |_app, _core, screenshot, slot, savestate, (_, context)| {
+            |_app, _core, screenshot, slot, savestate| {
                 for handler in events.borrow()[Events::SaveState].iter() {
-                    let ss = JsUint8Array::from_iter(savestate.iter().copied(), context)?;
-                    let image =
-                        screenshot.and_then(|i| JsImage::new(i.clone()).into_object(context).ok());
+                    let ss = JsUint8Array::from_iter(savestate.iter().copied(), *cx.borrow_mut())?;
+                    let image = screenshot
+                        .and_then(|i| JsImage::new(i.clone()).into_object(*cx.borrow_mut()).ok());
                     let result = handler.call(
                         &JsValue::undefined(),
                         &[
                             ss.into(),
-                            image.map(JsValue::Object).unwrap_or(JsValue::undefined()),
+                            image.map(JsValue::from).unwrap_or(JsValue::undefined()),
                             JsValue::from(slot),
                         ],
-                        context,
+                        *cx.borrow_mut(),
                     )?;
 
                     if let Some(p) = result.as_promise() {
-                        p.await_blocking(context).map_err(JsError::from_opaque)?;
+                        p.await_blocking(*cx.borrow_mut())?;
                     }
                 }
 
                 Ok(())
             },
-        )
+        );
+
+        let js_result = result
+            .clone()
+            .try_into_js_result(*cx.borrow_mut())
+            .unwrap_or_else(|e| {
+                error!(?e, "Error converting result to JS");
+                JsValue::undefined()
+            });
+        self.events.borrow()[Events::Quit].iter().for_each(|f| {
+            let _ = f.call(
+                &JsValue::undefined(),
+                &[js_result.clone()],
+                *cx.borrow_mut(),
+            );
+        });
+
+        result
     }
 
     fn show_osd(
@@ -125,12 +146,7 @@ impl JsCore {
 
         let mut v = handler.call(&JsValue::undefined(), &[], context)?;
         if let Some(p) = v.as_promise() {
-            match p.await_blocking(context) {
-                Ok(new_v) => {
-                    v = new_v;
-                }
-                Err(e) => return Err(JsError::from_opaque(e)),
-            }
+            v = p.await_blocking(context)?;
         }
 
         if v.to_boolean() {

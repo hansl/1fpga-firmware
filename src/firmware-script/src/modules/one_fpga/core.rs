@@ -79,10 +79,7 @@ fn load_(
         .launch(core_options)
         .unwrap();
 
-    Ok(JsValue::Object(JsCore::from_data(
-        JsCore::new(core),
-        context,
-    )?))
+    Ok(JsCore::from_data(JsCore::new(core), context)?.into())
 }
 
 pub fn create_module(context: &mut Context) -> JsResult<(JsString, Module)> {

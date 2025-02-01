@@ -19,7 +19,7 @@ impl JsJsonSchema {
         context: &mut Context,
     ) -> JsResult<bool> {
         let mut scope = Scope::new();
-        let object = JsValue::Object(schema).to_json(context)?;
+        let object = JsValue::from(schema).to_json(context)?;
         let schema = scope
             .compile_and_return(object, false)
             .map_err(|e| js_error!("{}", e))?;
