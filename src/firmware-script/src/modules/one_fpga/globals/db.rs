@@ -2,7 +2,7 @@ use boa_engine::builtins::typed_array::TypedArray;
 use boa_engine::class::Class;
 use boa_engine::object::builtins::{JsArray, JsPromise, JsUint8Array};
 use boa_engine::value::TryFromJs;
-use boa_engine::{js_error, Context, JsObject, JsResult, JsString, JsValue};
+use boa_engine::{js_error, Context, JsObject, JsResult, JsString, JsValue, JsVariant};
 use boa_interop::{js_class, JsClass};
 use boa_macros::{Finalize, JsData, Trace};
 use ouroboros::self_referencing;
@@ -53,17 +53,17 @@ impl FromSql for SqlValue {
 
 impl TryFromJs for SqlValue {
     fn try_from_js(value: &JsValue, context: &mut Context) -> JsResult<Self> {
-        match value {
-            JsValue::Null => Ok(Self::Null),
-            JsValue::Boolean(b) => Ok(Self::Integer(*b as i64)),
-            JsValue::String(s) => Ok(Self::String(s.clone())),
-            JsValue::Rational(r) => Ok(Self::Number(*r)),
-            JsValue::Integer(i) => Ok(Self::Integer(*i as i64)),
-            JsValue::Object(o) if o.is::<TypedArray>() => {
+        match value.variant() {
+            JsVariant::Null => Ok(Self::Null),
+            JsVariant::Boolean(b) => Ok(Self::Integer(b as i64)),
+            JsVariant::String(s) => Ok(Self::String(s.clone())),
+            JsVariant::Float64(r) => Ok(Self::Number(r)),
+            JsVariant::Integer32(i) => Ok(Self::Integer(i as i64)),
+            JsVariant::Object(o) if o.is::<TypedArray>() => {
                 let array = JsUint8Array::from_object(o.clone())?;
                 Ok(Self::Binary(array.iter(context).collect()))
             }
-            o => Ok(Self::Json(o.to_json(context)?)),
+            _ => Ok(Self::Json(value.to_json(context)?)),
         }
     }
 }
@@ -256,7 +256,6 @@ impl JsDbInner {
     ) -> JsResult<JsValue> {
         let connection = self.connection(tx)?;
         let statement = build_query_(connection, query, bindings, context)?;
-        
 
         first_row(statement, context)
     }
@@ -279,7 +278,7 @@ impl JsDbInner {
 
     pub fn execute_raw(&self, tx: Option<u32>, query: String) -> JsResult<()> {
         let connection = self.connection(tx)?;
-        
+
         connection
             .execute_batch(&query)
             .map_err(|e| js_error!("SQL Error: {}", e))

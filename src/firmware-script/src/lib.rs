@@ -2,7 +2,7 @@ use crate::console::TracingLogger;
 use crate::module_loader::OneFpgaModuleLoader;
 use crate::modules::CommandMap;
 use boa_engine::property::Attribute;
-use boa_engine::{js_string, Context, JsError, JsObject, JsResult, JsValue, Module, Source};
+use boa_engine::{js_string, Context, JsObject, JsResult, JsValue, Module, Source};
 use boa_macros::{js_str, Finalize, JsData, Trace};
 use boa_runtime::RegisterOptions;
 use firmware_ui::application::OneFpgaApp;
@@ -143,7 +143,6 @@ pub fn run(
         .load_link_evaluate(&mut context)
         .await_blocking(&mut context)
     {
-        let e = JsError::from_opaque(e);
         if let Ok(e) = e.try_native(&mut context) {
             error!(error = ?e, "Native error");
         } else {
@@ -179,8 +178,8 @@ pub fn run(
                 result = v;
             }
             Err(e) => {
-                error!("Javascript Error: {}", e.display());
-                return Err(JsError::from_opaque(e).try_native(&mut context)?.into());
+                error!("Javascript Error: {}", e);
+                return Err(e.try_native(&mut context)?.into());
             }
         }
     }

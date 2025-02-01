@@ -11,12 +11,13 @@ struct JsDatetimeFormat(DateTimeFormat);
 
 impl From<JsDatetimeFormat> for JsValue {
     fn from(val: JsDatetimeFormat) -> Self {
-        JsValue::String(match val.0 {
+        match val.0 {
             DateTimeFormat::Default => js_string!("default"),
             DateTimeFormat::Short => js_string!("short"),
             DateTimeFormat::TimeOnly => js_string!("timeOnly"),
             DateTimeFormat::Hidden => js_string!("hidden"),
-        })
+        }
+        .into()
     }
 }
 
@@ -66,11 +67,12 @@ impl From<MenuStyleFontSize> for FontSize {
 
 impl From<FontSize> for JsValue {
     fn from(val: FontSize) -> Self {
-        JsValue::String(match val {
+        match val {
             FontSize::Small => js_string!("small"),
             FontSize::Medium => js_string!("medium"),
             FontSize::Large => js_string!("large"),
-        })
+        }
+        .into()
     }
 }
 

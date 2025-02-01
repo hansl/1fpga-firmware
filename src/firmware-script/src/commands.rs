@@ -29,14 +29,16 @@ fn call_command_inner(
         });
 
     let core = core.map_or(JsValue::undefined(), |c| {
-        JsValue::Object(JsCore::from_data(JsCore::new(c.clone()), context).unwrap())
+        JsCore::from_data(JsCore::new(c.clone()), context)
+            .unwrap()
+            .into()
     });
     let result = command.call(&JsValue::undefined(), &[core], context)?;
 
     // If the command returns a promise, wait for it to resolve (or reject).
     if let Some(p) = result.as_promise() {
         debug!("Waiting for promise to resolve...");
-        p.await_blocking(context).map_err(JsError::from_opaque)?;
+        p.await_blocking(context)?;
     }
     Ok(())
 }
@@ -44,7 +46,7 @@ fn call_command_inner(
 pub fn maybe_call_command(
     app: &mut OneFpgaApp,
     id: CommandId,
-    command_map: &mut CommandMap,
+    command_map: &CommandMap,
     context: &mut Context,
 ) -> Result<(), JsError> {
     let start = Instant::now();
