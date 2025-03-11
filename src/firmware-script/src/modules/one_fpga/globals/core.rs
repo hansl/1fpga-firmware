@@ -7,7 +7,7 @@ use boa_engine::{js_error, Context, JsError, JsResult, JsString, JsValue, TryInt
 use boa_interop::{js_class, ContextData, JsClass};
 use boa_macros::{Finalize, JsData, Trace};
 use enum_map::{Enum, EnumMap};
-use firmware_ui::application::panels::core_loop::run_core_loop;
+use firmware_ui::application::panels::core_loop::{run_core_loop, CoreEvent};
 use firmware_ui::application::OneFpgaApp;
 use mister_fpga::core::{AsMisterCore, MisterFpgaCore};
 use one_fpga::core::SettingId;
@@ -74,35 +74,44 @@ impl JsCore {
 
         let cx = RefCell::new(context);
 
-        let result = run_core_loop(
-            app,
-            &mut core,
-            |app, _core, id| -> JsResult<()> {
-                maybe_call_command(app, id, command_map, *cx.borrow_mut())
-            },
-            |_app, _core, screenshot, slot, savestate| {
-                for handler in events.borrow()[Events::SaveState].iter() {
-                    let ss = JsUint8Array::from_iter(savestate.iter().copied(), *cx.borrow_mut())?;
-                    let image = screenshot
-                        .and_then(|i| JsImage::new(i.clone()).into_object(*cx.borrow_mut()).ok());
-                    let result = handler.call(
-                        &JsValue::undefined(),
-                        &[
-                            ss.into(),
-                            image.map(JsValue::from).unwrap_or(JsValue::undefined()),
-                            JsValue::from(slot),
-                        ],
-                        *cx.borrow_mut(),
-                    )?;
+        let result = run_core_loop(app, &mut core, |_app, _core, ev| {
+            match ev {
+                CoreEvent::Noop => {
+                    context.run_jobs()?;
+                }
+                CoreEvent::Shortcut { id } => {
+                    maybe_call_command(app, id, command_map, *cx.borrow_mut())?;
+                }
+                CoreEvent::SaveState {
+                    screenshot,
+                    slot,
+                    savestate,
+                } => {
+                    for handler in events.borrow()[Events::SaveState].iter() {
+                        let ss =
+                            JsUint8Array::from_iter(savestate.iter().copied(), *cx.borrow_mut())?;
+                        let image = screenshot.and_then(|i| {
+                            JsImage::new(i.clone()).into_object(*cx.borrow_mut()).ok()
+                        });
+                        let result = handler.call(
+                            &JsValue::undefined(),
+                            &[
+                                ss.into(),
+                                image.map(JsValue::from).unwrap_or(JsValue::undefined()),
+                                JsValue::from(slot),
+                            ],
+                            *cx.borrow_mut(),
+                        )?;
 
-                    if let Some(p) = result.as_promise() {
-                        p.await_blocking(*cx.borrow_mut())?;
+                        if let Some(p) = result.as_promise() {
+                            p.await_blocking(*cx.borrow_mut())?;
+                        }
                     }
                 }
-
-                Ok(())
-            },
-        );
+                Quit => {}
+            }
+            Ok(())
+        });
 
         let js_result = result
             .clone()

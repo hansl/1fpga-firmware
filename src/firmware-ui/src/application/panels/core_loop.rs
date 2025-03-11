@@ -7,24 +7,35 @@ use std::fmt::Debug;
 use std::time::Instant;
 use tracing::{debug, error, info, trace};
 
+pub enum CoreEvent<'a> {
+    /// No event. This can be used once in a while to perform external tasks and checks.
+    Noop,
+
+    /// A shortcut was used.
+    Shortcut { id: CommandId },
+
+    /// A savestate was saved.
+    SaveState {
+        screenshot: Option<&'a DynamicImage>,
+        slot: usize,
+        savestate: &'a [u8],
+    },
+
+    /// The core will quit.
+    Quit,
+}
+
 fn core_loop<E: Debug>(
     app: &mut OneFpgaApp,
     core: &mut OneFpgaCore,
-    mut shortcut_handler: impl FnMut(&mut OneFpgaApp, &mut OneFpgaCore, CommandId) -> Result<(), E>,
-    mut savestate_handler: impl FnMut(
-        &mut OneFpgaApp,
-        &mut OneFpgaCore,
-        Option<&DynamicImage>,
-        usize,
-        &[u8],
-    ) -> Result<(), E>,
+    event_handler: impl FnMut(&mut OneFpgaApp, &mut OneFpgaCore, CoreEvent) -> Result<(), E>,
 ) -> Result<(), E> {
     let mut should_check_savestates = matches!(core.save_state(0), Ok(Some(_)));
     let mut i = 0;
 
     // This is a special loop that forwards everything to the core,
     // except for the menu button(s).
-    app.event_loop(move |app, state| {
+    let result = app.event_loop(move |app, state| {
         i += 1;
 
         for ev in state.events() {
@@ -62,7 +73,7 @@ fn core_loop<E: Debug>(
 
         // Check if any action needs to be taken.
         for id in state.shortcuts() {
-            if let Err(e) = shortcut_handler(app, core, id) {
+            if let Err(e) = event_handler(app, core, CoreEvent::Shortcut { id }) {
                 return Some(Err(e));
             }
         }
@@ -99,9 +110,15 @@ fn core_loop<E: Debug>(
                                     break;
                                 }
 
-                                if let Err(err) =
-                                    savestate_handler(app, core, screenshot.as_ref(), i, &buffer)
-                                {
+                                if let Err(err) = event_handler(
+                                    app,
+                                    core,
+                                    CoreEvent::SaveState {
+                                        screenshot: screenshot.as_ref(),
+                                        slot: i,
+                                        savestate: &buffer,
+                                    },
+                                ) {
                                     error!(?err, "Error saving savestate. Will stop trying.");
                                     should_check_savestates = false;
                                     break;
@@ -121,21 +138,18 @@ fn core_loop<E: Debug>(
         }
 
         None
-    })
+    });
+
+    event_handler(app, core, CoreEvent::Quit)?;
+
+    result
 }
 
 /// Run the core loop and send events to the core.
 pub fn run_core_loop<E: Debug>(
     app: &mut OneFpgaApp,
     core: &mut OneFpgaCore,
-    shortcut_handler: impl FnMut(&mut OneFpgaApp, &mut OneFpgaCore, CommandId) -> Result<(), E>,
-    savestate_handler: impl FnMut(
-        &mut OneFpgaApp,
-        &mut OneFpgaCore,
-        Option<&DynamicImage>,
-        usize,
-        &[u8],
-    ) -> Result<(), E>,
+    event_handler: impl FnMut(&mut OneFpgaApp, &mut OneFpgaCore, CoreEvent) -> Result<(), E>,
 ) -> Result<(), E> {
     debug!("Starting core loop...");
 
@@ -143,7 +157,7 @@ pub fn run_core_loop<E: Debug>(
     app.hide_toolbar();
     app.platform_mut().core_manager_mut().hide_osd();
 
-    let result = core_loop(app, core, shortcut_handler, savestate_handler);
+    let result = core_loop(app, core, event_handler);
 
     debug!("Core loop ended");
     info!("Loading Main Menu");
