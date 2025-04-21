@@ -1,27 +1,27 @@
-import { createView, isOnline, register } from "@/hooks";
-import { OsdAlert, OsdTextMenu } from "@/components/osd";
+import { createView, register } from "@/hooks";
+import { OsdAlert, OsdPrompt, OsdShow, OsdTextMenu } from "@/components/osd";
 
-export async function alert(
-  { messageOrOptions, orMessage }:
-    {
-      messageOrOptions:
-        | string
-        | {
+export async function alert({
+  messageOrOptions,
+  orMessage,
+}: {
+  messageOrOptions:
+    | string
+    | {
         title?: string;
         message: string;
         choices?: string[];
-      },
-      orMessage: string
-    },
-): Promise<void | null | number> {
+      };
+  orMessage: string;
+}): Promise<void | null | number> {
   // Resolve which version of alert was called.
   const { message, title, choices } =
     typeof messageOrOptions !== "string"
       ? messageOrOptions
       : {
-        message: orMessage ?? messageOrOptions,
-        title: orMessage === undefined ? undefined : orMessage,
-      };
+          message: orMessage ?? messageOrOptions,
+          title: orMessage === undefined ? undefined : orMessage,
+        };
 
   let { promise, resolve } = Promise.withResolvers<number | null>();
   createView("osd", () => (
@@ -46,11 +46,58 @@ async function textMenu({ options }: any) {
   return await promise;
 }
 
+async function prompt({
+  messageOrOptions,
+}: {
+  messageOrOptions:
+    | string
+    | {
+        title?: string;
+        message: string;
+        default?: string;
+      };
+}) {
+  const {
+    title,
+    default: defaultValue,
+    message,
+  } = typeof messageOrOptions === "string"
+    ? { message: messageOrOptions }
+    : messageOrOptions;
+
+  const { promise, resolve } = Promise.withResolvers<string | undefined>();
+  createView("osd", () => (
+    <OsdPrompt
+      title={title}
+      default={defaultValue}
+      message={message}
+      resolve={resolve}
+    />
+  ));
+
+  return await promise;
+}
+
+export async function show({
+  messageOrTitle,
+  message,
+}: {
+  messageOrTitle: string;
+  message?: string;
+}) {
+  let title = undefined;
+  if (message !== undefined) {
+    title = messageOrTitle;
+  } else {
+    message = messageOrTitle;
+  }
+
+  createView("osd", () => <OsdShow title={title} message={message} />);
+}
+
 export function registerHandlers() {
   register("osd.textMenu", textMenu);
   register("osd.alert", alert);
-
-  register("net.isOnline", async () => {
-    return isOnline();
-  });
+  register("osd.prompt", prompt);
+  register("osd.show", show);
 }

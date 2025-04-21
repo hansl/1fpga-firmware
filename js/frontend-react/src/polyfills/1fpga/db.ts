@@ -17,10 +17,17 @@ export type Row = { [field: string]: SqlValue };
  * @returns The database object.
  */
 export async function load(name: string): Promise<Db> {
+  return loadPath(`1fpga/${name}.sqlite`);
+}
+
+export async function loadPath(path: string): Promise<Db> {
   async function send(body: any): Promise<any> {
-    const r = await fetch(`/api/db/${name.replace(/[^a-zA-Z0-9_.-]/g, "$")}`, {
+    const r = await fetch(`/api/db`, {
       method: "POST",
-      body: JSON.stringify(body),
+      body: JSON.stringify({
+        ...body,
+        db: path,
+      }),
     });
 
     if (r.ok) {
@@ -60,9 +67,7 @@ export async function load(name: string): Promise<Db> {
       return 0;
     },
     async executeMany(query: string, bindings: SqlValue[][]): Promise<number> {
-      for (const b of bindings) {
-        await send({ query, bindings: b, mode: "run" });
-      }
+      await send({ query, bindings, mode: "many" });
       return 0;
     },
     async executeRaw(query: string): Promise<void> {

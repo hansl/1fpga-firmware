@@ -9,6 +9,7 @@ export async function fetchJson(url: string): Promise<any> {
     throw new Error("Not online.");
   }
 
+  console.log(":: fetchJson", url);
   const result = await fetch("/api/net/fetch", {
     method: "POST",
     body: JSON.stringify({
@@ -31,6 +32,7 @@ export async function download(
     throw new Error("Not online.");
   }
 
+  console.log(":: download", url, destination);
   const result = await fetch("/api/net/download", {
     method: "POST",
     body: JSON.stringify({

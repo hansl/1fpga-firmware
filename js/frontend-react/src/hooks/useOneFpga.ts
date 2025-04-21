@@ -97,7 +97,6 @@ async function startInner() {
         }
 
         const result = await handler(e.data);
-        console.log("startInner response:", { kind: "response", id, result });
         worker.postMessage({ kind: "response", id, result });
         return;
       }

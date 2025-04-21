@@ -29,9 +29,9 @@ addEventListener("message", (e) => {
 export async function postMessageAndWait(data: any) {
   const { promise, resolve, reject } = Promise.withResolvers<any>();
   const id = responses.push({ resolve, reject }) - 1;
-  console.log("postMessageAndWait", { ...data, id });
+
   postMessage({ ...data, id });
+
   const result = await promise;
-  console.log("postMessageAndWait (result)", result);
   return result;
 }

@@ -1,22 +1,15 @@
-import { connect } from "../database";
+import { connect } from "./database";
 
 export const GET = () => {
   return new Response(null, { status: 403 });
 };
 
 // Define the POST request handler function
-export const POST = async (
-  req: Request,
-  { params }: { params: Promise<{ dbName: string }> },
-) => {
-  const dbName = (await params).dbName;
-  if (!dbName) {
-    throw new Error(`${dbName} invalid DB name`);
-  }
-
+export const POST = async (req: Request) => {
   try {
-    const db = await connect(dbName);
-    const { query, bindings, mode } = await req.json();
+    const reqJson = await req.json();
+    const { db: path, query, bindings, mode } = reqJson;
+    const db = await connect(path);
 
     if (!query) {
       return new Response("No query specified", {
@@ -35,6 +28,17 @@ export const POST = async (
 
       case "run": {
         await db.run(query.toString(), ...(bindings ?? []));
+
+        return new Response("null", {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        });
+      }
+
+      case "many": {
+        for (const b of bindings ?? []) {
+          await db.run(query.toString(), ...(b ?? []));
+        }
 
         return new Response("null", {
           headers: { "Content-Type": "application/json" },

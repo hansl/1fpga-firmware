@@ -326,6 +326,10 @@ pub struct JsDb {
 impl JsDb {
     pub fn new(name: &str) -> JsResult<Self> {
         let path = db_root().join(format!("{}.sqlite", name));
+        Self::load_file(&path)
+    }
+
+    pub fn load_file(path: &str) -> JsResult<Self> {
         trace!("Opening database at {:?}", path);
         let connection = Connection::open(path).map_err(|e| js_error!("SQL Error: {}", e))?;
 

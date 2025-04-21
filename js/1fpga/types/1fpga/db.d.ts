@@ -20,13 +20,18 @@ declare module "1fpga:db" {
 
   /**
    * Gets a database object for the given database name. This will create the database if it
-   * does not exist. Applies migrations if specified.
+   * does not exist.
    * @param name The name of the database.
    * @returns The database object.
    */
-  export function load(
-    name: string,
-  ): Promise<Db>;
+  export function load(name: string): Promise<Db>;
+
+  /**
+   * Creates a SQLite database from a file on disk. If the file does not exist,
+   * this will create it. If it does exist, loads it as a SQLite file.
+   * @param path The absolute path of the file to load.
+   */
+  export function loadPath(path: string): Promise<Db>;
 
   /**
    * Resets the database. This will delete all tables and data in the database.

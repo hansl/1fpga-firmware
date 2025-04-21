@@ -107,11 +107,34 @@ export async function selectFile(
 
 export const hideOsd = () => {};
 export const inputTester = () => {};
-export const prompt = () => {};
+
+export async function prompt(
+  messageOrOptions:
+    | string
+    | {
+        title?: string;
+        message: string;
+        default?: string;
+      },
+): Promise<undefined | string> {
+  return await postMessageAndWait({
+    kind: "osd.prompt",
+    messageOrOptions,
+  });
+}
+
 export const promptPassword = () => {};
 export const promptShortcut = () => {};
 export const qrCode = () => {};
-export const show = () => {};
+
+export async function show(messageOrTitle: string, message?: string) {
+  postMessage({
+    kind: "osd.show",
+    messageOrTitle,
+    message,
+  });
+}
+
 export const showOsd = () => {};
 
 export async function textMenu<R>(options: TextMenuOptions<R>): Promise<R> {
@@ -158,7 +181,6 @@ export async function textMenu<R>(options: TextMenuOptions<R>): Promise<R> {
       kind: "osd.textMenu",
       options: newOptions,
     });
-    console.log(`result: ${result}`);
 
     if (result in fnCallbacks) {
       const fn = fnCallbacks[result];

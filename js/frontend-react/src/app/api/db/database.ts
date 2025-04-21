@@ -7,15 +7,15 @@ import * as filesystem from "@/utils/server/filesystem";
 const DB_MAP = new Map<string, Database>();
 
 async function pathOf(name: string): Promise<string> {
-  const filename = await filesystem.pathOf(`${name}.sqlite`);
+  const filename = await filesystem.pathOf(name);
   await fs.promises.mkdir(path.dirname(filename), { recursive: true });
 
   return filename;
 }
 
-export async function connect(name: string): Promise<Database> {
-  if (!DB_MAP.has(name)) {
-    const filename = await pathOf(name);
+export async function connect(p: string): Promise<Database> {
+  if (!DB_MAP.has(p)) {
+    const filename = await pathOf(p);
     await fs.promises.mkdir(path.dirname(filename), { recursive: true });
 
     // If the database instance is not initialized, open the database connection
@@ -23,13 +23,13 @@ export async function connect(name: string): Promise<Database> {
       filename,
       driver: sqlite3.Database,
     });
-    DB_MAP.set(name, db);
+    DB_MAP.set(p, db);
   }
 
   return (
-    DB_MAP.get(name) ??
+    DB_MAP.get(p) ??
     (() => {
-      throw Error(`Database ${name} not found`);
+      throw Error(`Database ${p} not found`);
     })()
   );
 }

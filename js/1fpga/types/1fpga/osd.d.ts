@@ -104,10 +104,6 @@ declare module "1fpga:osd" {
    * @returns The user input, or `undefined` if the user canceled the operation.
    */
   export function prompt(message: string): Promise<undefined | string>;
-  export function prompt(
-    title: string,
-    message: string,
-  ): Promise<undefined | string>;
   export function prompt(options: {
     title?: string;
     message: string;

@@ -26,6 +26,10 @@ export function createGlobalStore<T>(
   localStorageKey?: string,
 ): GlobalStore<T> {
   let value: T = defaultValue;
+  if (typeof localStorage === "undefined") {
+    localStorageKey = undefined;
+  }
+
   if (localStorageKey) {
     const maybeValue = localStorage.getItem(localStorageKey);
     if (maybeValue !== null) {

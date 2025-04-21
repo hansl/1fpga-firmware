@@ -23,7 +23,7 @@ export enum WellKnownCatalogs {
   OneFpgaBeta = "https://catalog.1fpga.cloud/beta.json",
 
   // Only exists in development mode.
-  LocalTest = "http://catalog.local:8081/catalog.json",
+  LocalTest = "http://catalog.local:8080/catalog.json",
 }
 
 const CATALOG_CACHE: { [url: string]: RemoteCatalog } = {};
@@ -56,8 +56,7 @@ export class RemoteSystems {
     public readonly url: string,
     public readonly schema: SystemsSchema,
     public readonly catalog: RemoteCatalog,
-  ) {
-  }
+  ) {}
 
   public async fetchSystem(key: string, deep = false) {
     if (!this.systems_[key]) {
@@ -100,8 +99,7 @@ export class RemoteCores {
     public readonly url: string,
     public readonly schema: CoresSchema,
     public readonly catalog: RemoteCatalog,
-  ) {
-  }
+  ) {}
 
   public async fetchCore(key: string, _deep = false) {
     if (!this.cores_[key]) {
@@ -147,8 +145,7 @@ export class RemoteCore {
     public readonly url: string,
     public readonly schema: CoreSchema,
     public readonly cores: RemoteCores,
-  ) {
-  }
+  ) {}
 
   get catalog() {
     return this.cores.catalog;
@@ -236,8 +233,7 @@ export class RemoteSystem {
     public readonly url: string,
     public readonly schema: SystemSchema,
     private systems_: RemoteSystems,
-  ) {
-  }
+  ) {}
 
   get catalog(): RemoteCatalog {
     return this.systems_.catalog;
@@ -349,8 +345,7 @@ export class RemoteCatalog {
   private constructor(
     public readonly url: string,
     public readonly schema: CatalogSchema,
-  ) {
-  }
+  ) {}
 
   public get name(): string {
     return this.schema.name;

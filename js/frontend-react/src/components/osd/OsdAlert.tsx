@@ -4,6 +4,7 @@ import { Textarea } from "@/components/ui-kit/textarea";
 import { Button } from "@/components/ui-kit/button";
 import { Sidebar, SidebarItem } from "@/components/ui-kit/sidebar";
 import { PropertyList } from "@/components";
+import { Text } from "@/components/ui-kit/text";
 
 export interface OsdAlertProps {
   title?: string;
@@ -24,7 +25,8 @@ export function OsdAlert({ title, message, choices, resolve }: OsdAlertProps) {
 
       <PropertyList
         properties={{
-          Title: title,
+          title,
+          choices,
         }}
       />
 
@@ -55,6 +57,31 @@ export function OsdAlert({ title, message, choices, resolve }: OsdAlertProps) {
           OK
         </Button>
       )}
+    </>
+  );
+}
+
+export function OsdShow({
+  title,
+  message,
+}: {
+  title?: string;
+  message: string;
+}) {
+  return (
+    <>
+      <Heading>Show</Heading>
+      <Divider className="mt-4" />
+
+      <Subheading className="mt-8 text-xl!">Title</Subheading>
+      <Text className="mt-4 text-xl!">{title ?? ""}</Text>
+
+      <Subheading className="mt-8 text-xl!">Message</Subheading>
+      <Textarea
+        className="mt-4 text-xl! h-64"
+        disabled={true}
+        value={message}
+      />
     </>
   );
 }

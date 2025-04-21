@@ -113,11 +113,7 @@ export function OsdTextMenu<R>({
       <Heading>Text Menu</Heading>
       <Divider className="mt-4" />
 
-      <PropertyList
-        properties={{
-          Title: options.title,
-        }}
-      />
+      <PropertyList properties={options} />
 
       <Subheading className="mt-8 text-xl!">Menu Items</Subheading>
       <Sidebar className="min-h-5 mt-4 pl-1 border-l-2 border-white/5 [--gutter:--spacing(6)] lg:[--gutter:--spacing(10)]">
