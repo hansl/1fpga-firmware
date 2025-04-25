@@ -25,6 +25,7 @@ import {
 import { usePathname, useRouter } from "next/navigation";
 import { useOneFpga } from "@/hooks";
 import GearIcon from "next/dist/client/components/react-dev-overlay/ui/icons/gear-icon";
+import { SiDiscord, SiDiscourse } from "@icons-pack/react-simple-icons";
 
 function IsOneFpgaRunning({
   fallback = null,
@@ -91,9 +92,13 @@ export function ApplicationLayout({ children }: { children: ReactNode }) {
 
             <SidebarSection>
               <SidebarHeading>External Links</SidebarHeading>
-              <SidebarItem href="https://forums.1fpga.com">
-                <ChatBubbleLeftRightIcon />
+              <SidebarItem href="https://forums.1fpga.com" target="_blank">
+                <SiDiscourse size={20} color="currentColor" aria-hidden={true} data-slot="icon" />
                 <SidebarLabel>Forums</SidebarLabel>
+              </SidebarItem>
+              <SidebarItem href="https://discord.gg/MXqP6cSHVS" target="_blank">
+                <SiDiscord size={20} color="currentColor" aria-hidden={true} data-slot="icon" />
+                <SidebarLabel>Discord</SidebarLabel>
               </SidebarItem>
             </SidebarSection>
           </SidebarBody>

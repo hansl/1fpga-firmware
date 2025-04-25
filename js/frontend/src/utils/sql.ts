@@ -8,6 +8,7 @@ async function applyMigrations(
   _name: string,
   latest: string,
 ) {
+  const initial = latest === "";
   const migrations = (await import("1fpga:migrations")).migrations;
   const allMigrations: [string, MigrationDetails][] =
     Object.getOwnPropertyNames(migrations)
@@ -38,7 +39,7 @@ async function applyMigrations(
     try {
       await sql1.db.executeRaw(sql);
       if (apply) {
-        await apply(sql1);
+        await apply(sql1, { initial });
       }
     } catch (e) {
       await sql1.rollback();
@@ -103,7 +104,11 @@ let db: oneFpgaDb.Db | null = null;
 
 export async function resetDb(): Promise<void> {
   console.warn("Clearing the database. Be careful!");
+  db = null;
   await oneFpgaDb.reset("1fpga");
+}
+
+export async function closeAllDb(): Promise<void> {
   db = null;
 }
 
@@ -138,6 +143,24 @@ const driver: SqlTagDriver<undefined, never> = {
 };
 
 export const sql = new SqlTag(driver);
+
+export const sqlOf = (database: oneFpgaDb.Db) => {
+  return new SqlTag<undefined, never>({
+    cursor(): AsyncIterable<any> {
+      throw new Error("Method not implemented.");
+    },
+    escapeIdentifier(identifier: string): string {
+      return `"${identifier.replace(/"/g, '""')}"`;
+    },
+    parameterizeValue(value: any, paramIndex: number): string {
+      return "?";
+    },
+    async query(sql: string, params: any[]): Promise<[any[], undefined]> {
+      let result = await database.query(sql, params);
+      return [result.rows, undefined];
+    },
+  })
+}
 
 export interface SqlTransactionTag extends SqlTag<undefined, never> {
   commit(): Promise<void>;

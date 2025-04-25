@@ -8,6 +8,7 @@ async function main(): Promise<void> {
   queueMicrotask(() => postMessage({ kind: "started" }));
   await main();
   console.log(":: done");
+  postMessage({ kind: "stopped" });
 }
 
 addEventListener("message", (event: MessageEvent) => {

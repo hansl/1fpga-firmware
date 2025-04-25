@@ -25,6 +25,13 @@ declare module "1fpga:fs" {
    */
   export function mkdir(path: string, all?: boolean): Promise<void>;
 
+  /**
+   * Delete a directory.
+   * @param path
+   * @param recursive
+   */
+  export function rmdir(path: string, recursive?: boolean): Promise<void>;
+
   export function isDir(path: string): Promise<boolean>;
 
   export function findAllFiles(

@@ -1,6 +1,8 @@
 // The root file being executed by 1FPGA by default.
+import { settings } from "@1fpga/schemas";
 import rev from "consts:revision";
 import production from "consts:revision";
+import * as fs from "1fpga:fs";
 import * as osd from "1fpga:osd";
 import * as video from "1fpga:video";
 import {
@@ -11,7 +13,6 @@ import {
   GlobalSettings,
   Screenshot,
   StartOnKind,
-  StartOnSetting,
   User,
   UserSettings,
 } from "./services";
@@ -25,7 +26,7 @@ import { settingsMenu } from "@/ui/settings";
 import { login } from "@/ui/login";
 import { downloadCenterMenu } from "@/ui/downloads";
 import { about } from "@/ui/about";
-import { resetDb } from "@/utils";
+import { resetAll, resetDb } from "@/utils";
 
 // Polyfill for events.
 globalThis.performance = <any>{
@@ -40,7 +41,14 @@ async function debugMenu() {
       {
         label: "Reset All...",
         select: async () => {
-          await osd.alert("Reset everything");
+          const should = await osd.alert({
+            title: "Reset everything",
+            message: "Are you sure?",
+            choices: ["No", "Yes"],
+          });
+          if (should === 1) {
+            await resetAll();
+          }
         },
       },
       {
@@ -55,7 +63,7 @@ async function debugMenu() {
 
 async function mainMenu(
   user: User,
-  startOn: StartOnSetting,
+  startOn: settings.StartOnSetting,
   settings: UserSettings,
 ) {
   let quit = false;
@@ -268,7 +276,7 @@ async function mainInner(): Promise<boolean> {
           choices: ["Restart", "Quit"],
         });
         if (choice === 1) {
-          return false;
+          return true;
         }
       }
     }
@@ -279,6 +287,9 @@ export async function main() {
   console.log(`Build: "${rev}" (${production ? "production" : "development"})`);
   console.log("1FPGA started. ONE_FPGA =", JSON.stringify(ONE_FPGA));
   let quit = false;
+
+  // Log the last time this was started.
+  await fs.writeFile("1fpga.start", new Date().toISOString());
 
   const start = Date.now();
   const resolution = video.getResolution();

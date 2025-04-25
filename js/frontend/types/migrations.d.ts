@@ -9,7 +9,7 @@ export interface MigrationDetails {
    * Function to be executed
    * after the SQL is executed.
    */
-  apply: (db: SqlTag<unknown, unknown>) => Promise<void>;
+  apply: (db: SqlTag<unknown, unknown>, options: { initial: boolean }) => Promise<void>;
 }
 
 export interface Migration {

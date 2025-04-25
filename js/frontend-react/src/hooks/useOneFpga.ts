@@ -1,5 +1,7 @@
 import { createGlobalStore } from "@/utils/client";
 import { registerHandlers } from "@/hooks/handlers";
+import { createView } from "@/hooks/useView";
+import { useRouter } from "next/navigation";
 
 export enum OneFpgaWorkerState {
   Stopped = 0,
@@ -74,6 +76,9 @@ async function startInner() {
           (w) => w && { ...w, state: OneFpgaWorkerState.Started },
         );
         return;
+      case "stopped":
+        await stop();
+        return;
       case "response": {
         if (id !== undefined) {
           const o = responses[id];
@@ -142,14 +147,19 @@ async function stop() {
   }
   workerStore.set((w) => ({ ...w, state: OneFpgaWorkerState.Stopping }));
 
+  createView("osd", () => undefined);
   worker.worker?.terminate();
+
+  responses = [];
+  handlerRegistry = {};
+
   workerStore.set((w) => ({
     ...w,
     worker: null,
     state: OneFpgaWorkerState.Stopped,
   }));
-  responses = [];
-  handlerRegistry = {};
+
+  location.replace("/");
 }
 
 export function useOneFpga() {

@@ -1,7 +1,5 @@
 import * as osd from "1fpga:osd";
-import type {
-  Games as GamesSchema,
-} from "schemas:catalog/games_db";
+import * as db from "1fpga:db";
 import { RemoteSystem } from "./catalog";
 import { fetchDbAndValidate } from "@/utils/fetch_db";
 
@@ -19,16 +17,20 @@ export class RemoteGamesDb {
 
     // Dynamic loading to allow for code splitting.
     const db = await fetchDbAndValidate(
-      nameOfGamesDb(system.catalog.name, system.uniqueName),
       u,
+      undefined,
+      {
+        path: `/media/fat/1fpga/catalogs/${system.catalog.name}/${system.name}`
+      }
     );
+    console.log('done');
 
-    return new RemoteGamesDb(u, json, system);
+    return new RemoteGamesDb(u, db, system);
   }
 
   private constructor(
     public readonly url: string,
-    private readonly db: db.Db<>,
+    private readonly db: db.Db,
     public readonly system: RemoteSystem,
   ) {
   }

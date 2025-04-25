@@ -111,7 +111,7 @@ export class System {
     const db = await remoteSystem.downloadGameDatabase();
     if (db) {
       osd.show("Installing game database...", `System "${this.name}"`);
-      await GamesIdentification.createBatch(db.games, this, catalog);
+      // await GamesIdentification.createBatch(db.games, this, catalog);
     }
   }
 }

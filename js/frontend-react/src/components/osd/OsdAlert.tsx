@@ -1,10 +1,10 @@
 import { Heading, Subheading } from "@/components/ui-kit/heading";
 import { Divider } from "@/components/ui-kit/divider";
-import { Textarea } from "@/components/ui-kit/textarea";
 import { Button } from "@/components/ui-kit/button";
 import { Sidebar, SidebarItem } from "@/components/ui-kit/sidebar";
 import { PropertyList } from "@/components";
 import { Text } from "@/components/ui-kit/text";
+import { Textarea } from "@/components/ui-kit/textarea";
 
 export interface OsdAlertProps {
   title?: string;
@@ -31,11 +31,7 @@ export function OsdAlert({ title, message, choices, resolve }: OsdAlertProps) {
       />
 
       <Subheading className="mt-8 text-xl!">Message</Subheading>
-      <Textarea
-        className="mt-4 text-xl! h-64"
-        disabled={true}
-        value={message}
-      />
+      <Text className="ml-2 mt-4 text-lg!">{message}</Text>
 
       <Subheading className="mt-8 text-xl!">Choices</Subheading>
       {choices ? (
@@ -48,12 +44,12 @@ export function OsdAlert({ title, message, choices, resolve }: OsdAlertProps) {
             ))}
           </Sidebar>
 
-          <Button className="mt-4 ml-4" onClick={() => select(null)}>
+          <Button className="mt-4 ml-2" onClick={() => select(null)}>
             Back
           </Button>
         </>
       ) : (
-        <Button className="mt-4 ml-4" onClick={() => select(null)}>
+        <Button className="mt-4 ml-2" onClick={() => select(null)}>
           OK
         </Button>
       )}
@@ -77,11 +73,7 @@ export function OsdShow({
       <Text className="mt-4 text-xl!">{title ?? ""}</Text>
 
       <Subheading className="mt-8 text-xl!">Message</Subheading>
-      <Textarea
-        className="mt-4 text-xl! h-64"
-        disabled={true}
-        value={message}
-      />
+      <Text className="ml-2 mt-4 text-lg!">{message}</Text>
     </>
   );
 }

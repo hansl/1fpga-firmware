@@ -1,6 +1,5 @@
 import { System } from "./system";
 import { Catalog } from "./catalog";
-import { RemoteGameSchema } from "../remote";
 import { sql, transaction } from "@/utils";
 import { partitionAndProgress } from "@/ui/progress";
 import { oneLine } from "common-tags";
@@ -113,7 +112,7 @@ export class GamesIdentification {
   }
 
   public static async createBatch(
-    remotes: RemoteGameSchema[],
+    remotes: any[],
     system: System,
     catalog: Catalog,
   ) {
@@ -179,8 +178,8 @@ export class GamesIdentification {
           }
 
           // Insert all its sources. Partition them into multiple runs.
-          const sources = remote.sources.flatMap((source) => [
-            ...(source.files?.map((file) => [
+          const sources = remote.sources.flatMap((source: any) => [
+            ...(source.files?.map((file: any) => [
               games_id,
               catalog.id,
               file.extension,

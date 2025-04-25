@@ -14,6 +14,7 @@ mod net;
 mod osd;
 mod schema;
 mod settings;
+mod system;
 mod upgrade;
 mod utils;
 mod video;
@@ -36,6 +37,7 @@ pub(super) fn register_modules(
         net::create_module,
         schema::create_module,
         settings::create_module,
+        system::create_module,
         osd::create_module,
         upgrade::create_module,
         utils::create_module,

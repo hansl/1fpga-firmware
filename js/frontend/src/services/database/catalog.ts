@@ -4,7 +4,7 @@ import { RemoteCatalog, WellKnownCatalogs } from "../remote";
 import { System } from "./system";
 import { Core } from "@/services/database/core";
 
-export interface CatalogRow extends Row {
+interface CatalogRow extends Row {
   id: number;
   name: string;
   url: string;
@@ -18,6 +18,48 @@ export interface CatalogRow extends Row {
 export interface ListCatalogsOptions {
   updatePending?: boolean;
   url?: string;
+}
+
+export interface ICatalog {
+   readonly id: number;
+   readonly name: string;
+   readonly url: string;
+   readonly latestUpdateAt: Date | null;
+   readonly lastUpdated: string;
+   readonly version: string;
+   readonly priority: number;
+   readonly updatePending: boolean;
+}
+
+function rowIntoCatalog({ url,priority,version,name,latest_update_at,last_updated,update_pending,id }: CatalogRow): ICatalog {
+  return {
+    id,
+    name,
+    url,
+    latestUpdateAt: latest_update_at ? new Date(latest_update_at) : null,
+    lastUpdated: last_updated,
+    version,
+    priority,
+    updatePending: update_pending,
+  };
+}
+
+export async function listCatalogs(options: ListCatalogsOptions): Promise<ICatalog[]> {
+  const rows = await sql<CatalogRow>`SELECT *
+                                     FROM catalogs
+                                     WHERE ${sql.and(
+                                       true,
+                                       options.url
+                                         ? sql`url =
+                                         ${options.url}`
+                                         : undefined,
+                                       options.updatePending
+                                         ? sql`update_pending =
+                                         ${options.updatePending}`
+                                         : undefined,
+                                     )}
+  `;
+  return rows.map(rowIntoCatalog).sort((a, b) => a.priority - b.priority);
 }
 
 /**

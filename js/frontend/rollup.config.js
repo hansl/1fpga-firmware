@@ -110,16 +110,19 @@ export default {
     "1fpga:schema",
     "1fpga:settings",
     "1fpga:storage",
+    "1fpga:system",
     "1fpga:osd",
     "1fpga:upgrade",
     "1fpga:utils",
     "1fpga:video",
   ],
   onLog(level, log, handler) {
-    if (level === "warn") {
-      handler("error", log); // turn other warnings into errors
+    if (log.code === "CIRCULAR_DEPENDENCY") {
+      // Show as warning.
+      handler("warn", log);
     } else {
-      handler(level, log); // otherwise, just print the log
+      // Warnings are errors.
+      handler("error", log);
     }
   },
 };

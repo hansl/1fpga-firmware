@@ -5,7 +5,7 @@ let loggedInUser: User | null = null;
 
 export const DEFAULT_USERNAME = "admin";
 
-export interface UserRow {
+interface UserRow {
   id: number;
   username: string;
   password: string | null;
@@ -13,6 +13,9 @@ export interface UserRow {
   admin: number;
 }
 
+/**
+ * Represents a user.
+ */
 export class User {
   /**
    * Log out the currently logged-in user.

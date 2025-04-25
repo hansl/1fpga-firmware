@@ -1,10 +1,8 @@
+import { settings } from "@1fpga/schemas";
 import { DbStorage } from "../storage";
 import { User } from "../user";
-import type { StartOn as StartOnSchema } from "schemas:settings/start-on";
 import { getOrFail } from "@/services/settings/utils";
 import { GameSortOrder } from "@/services/database/games";
-
-export type StartOnSetting = StartOnSchema;
 
 /**
  * The possible values for the `startOn` setting.
@@ -34,21 +32,21 @@ export class UserSettings {
     return new UserSettings(storage);
   }
 
-  private constructor(private readonly storage_: DbStorage) {
-  }
+  private constructor(private readonly storage_: DbStorage) {}
 
-  public async startOn(): Promise<StartOnSetting> {
+  public async startOn(): Promise<settings.StartOnSetting> {
+    const schema = settings.startOnSetting;
     return await getOrFail(
       this.storage_,
       START_ON_KEY,
       {
         kind: StartOnKind.MainMenu,
       },
-      (await import("schemas:settings/start-on")).validate,
+      (v): v is settings.StartOnSetting => schema.safeParse(v).success,
     );
   }
 
-  public async setStartOn(value: StartOnSetting): Promise<void> {
+  public async setStartOn(value: settings.StartOnSetting): Promise<void> {
     await this.storage_.set(START_ON_KEY, value);
   }
 

@@ -1,18 +1,18 @@
 import * as db from "1fpga:db";
 import * as net from "1fpga:net";
-import osd from "1fpga:osd";
+import * as osd from "1fpga:osd";
 
 export async function fetchDbAndValidate<T>(
-  name: string,
   url: string,
   validate?: (db: db.Db) => boolean | Promise<boolean>,
   options?: {
+    path?: string,
     allowRetry?: boolean;
   },
 ): Promise<db.Db> {
   while (true) {
     try {
-      const p = await net.download(url, `/media/fat/1fpga/catalogs/${name.replace(/[^a-zA-Z0-9._@-]/g, "_")}`);
+      const p = await net.download(url, options?.path);
 
       let database = await db.loadPath(p);
       if (validate) {
@@ -21,6 +21,8 @@ export async function fetchDbAndValidate<T>(
         } else {
           throw new Error(`Database did not validate.`);
         }
+      } else {
+        return database;
       }
     } catch (e) {
       if (!(options?.allowRetry ?? true)) {
