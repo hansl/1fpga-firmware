@@ -33,13 +33,17 @@ async function applyMigrations(
   const sql1 = await transaction();
   for (const [name, up] of allMigrations) {
     console.debug(`Applying ${name}...`);
-    const { sql, apply } = up;
+    const { sql, pre, post } = up;
 
     // Start a transaction so everything is in a single transaction.
     try {
+      let context: unknown = undefined;
+      if (pre) {
+        context = await pre(sql1, { initial });
+      }
       await sql1.db.executeRaw(sql);
-      if (apply) {
-        await apply(sql1, { initial });
+      if (post) {
+        await post(sql1, { initial, context });
       }
     } catch (e) {
       await sql1.rollback();
@@ -72,9 +76,9 @@ async function createMigrationTable(
 ): Promise<void> {
   await sql`CREATE TABLE __1fpga_settings
             (
-                id    INTEGER PRIMARY KEY,
-                key   TEXT NOT NULL UNIQUE,
-                value TEXT NOT NULL
+              id    INTEGER PRIMARY KEY,
+              key   TEXT NOT NULL UNIQUE,
+              value TEXT NOT NULL
             )`;
 
   await applyMigrations(db, name, "");
@@ -159,8 +163,8 @@ export const sqlOf = (database: oneFpgaDb.Db) => {
       let result = await database.query(sql, params);
       return [result.rows, undefined];
     },
-  })
-}
+  });
+};
 
 export interface SqlTransactionTag extends SqlTag<undefined, never> {
   commit(): Promise<void>;

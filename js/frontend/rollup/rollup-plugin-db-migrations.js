@@ -18,7 +18,6 @@ function simplifySql(sql) {
 }
 
 export default function (baseDir = process.cwd()) {
-  const root = path.resolve(`${baseDir}/codegen`);
   return {
     name: "1fpga-codegen",
     async load(id) {
@@ -28,9 +27,9 @@ export default function (baseDir = process.cwd()) {
         for (const file of files) {
           const content = fs.readFileSync(file, "utf8");
           const version = path.basename(path.dirname(file));
-          let applyUpPath = path.join(path.dirname(file), "apply.ts");
-          if (!fs.existsSync(applyUpPath)) {
-            applyUpPath = undefined;
+          let migrationUpPath = path.join(path.dirname(file), "migration.ts");
+          if (!fs.existsSync(migrationUpPath)) {
+            migrationUpPath = undefined;
           }
 
           output += stripIndent`
@@ -38,10 +37,15 @@ export default function (baseDir = process.cwd()) {
               up: {
                 sql: ${JSON.stringify(simplifySql(content))},
                 ${
-                  applyUpPath
-                    ? `apply: async (a, b, c, d, e) => {
-                  await (await import(${JSON.stringify(applyUpPath)})).up(a, b, c, d, e);
-                },`
+                  migrationUpPath
+                    ? `
+                      post: async (a, b, c, d, e) => {
+                        await ((await import(${JSON.stringify(migrationUpPath)})).post?.(a, b, c, d, e));
+                      },
+                      pre: async (a, b, c, d, e) => {
+                        await ((await import(${JSON.stringify(migrationUpPath)})).pre?.(a, b, c, d, e));
+                      }
+                    `
                     : ""
                 }
               },
