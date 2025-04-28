@@ -220,8 +220,6 @@ export class GlobalSettings {
         return;
     }
 
-    console.log("Should check for updates:", should);
-
     if (should) {
       await Catalog.checkForUpdates();
     }

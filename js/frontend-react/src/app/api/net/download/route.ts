@@ -27,5 +27,5 @@ export async function POST(req: Request) {
   await fs.mkdir(path.dirname(canonDest), { recursive: true });
   await fs.writeFile(canonDest, Buffer.from(bytes));
 
-  return new Response(dst, { status: 200 });
+  return new Response(dst);
 }

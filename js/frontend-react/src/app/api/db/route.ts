@@ -11,28 +11,24 @@ export const POST = async (req: Request) => {
     const { db: path, query, bindings, mode } = reqJson;
     const db = await connect(path);
 
-    if (!query) {
+    if (query === undefined) {
       return new Response("No query specified", {
         status: 400,
       });
+    } else if (query === "") {
+      return Response.json("null");
     }
 
     switch (mode) {
       case "exec": {
         await db.exec(query.toString());
-        return new Response("null", {
-          headers: { "Content-Type": "application/json" },
-          status: 200,
-        });
+        return Response.json("null");
       }
 
       case "run": {
         await db.run(query.toString(), ...(bindings ?? []));
 
-        return new Response("null", {
-          headers: { "Content-Type": "application/json" },
-          status: 200,
-        });
+        return Response.json("null");
       }
 
       case "many": {
@@ -40,29 +36,20 @@ export const POST = async (req: Request) => {
           await db.run(query.toString(), ...(b ?? []));
         }
 
-        return new Response("null", {
-          headers: { "Content-Type": "application/json" },
-          status: 200,
-        });
+        return Response.json("null");
       }
 
       case "get": {
         const result = await db.get(query.toString(), ...(bindings ?? []));
         // Return the items as a JSON response with status 200
-        return new Response(JSON.stringify([result]), {
-          headers: { "Content-Type": "application/json" },
-          status: 200,
-        });
+        return Response.json([result]);
       }
 
       default:
       case "query": {
         const result = await db.all(query.toString(), ...(bindings ?? []));
         // Return the items as a JSON response with status 200
-        return new Response(JSON.stringify(result), {
-          headers: { "Content-Type": "application/json" },
-          status: 200,
-        });
+        return Response.json(result);
       }
     }
   } catch (e) {

@@ -1,11 +1,13 @@
 "use server";
 
 import path from "node:path";
+import fs from "node:fs/promises";
 
 export async function pathOf(p: string): Promise<string> {
-  if (path.isAbsolute(p)) {
-    return path.join("./.next/fs", p);
-  } else {
-    return path.join("./.next/fs/media/fat", p);
+  p = path.isAbsolute(p) ? path.join("./.next/fs", p) : path.join("./.next/fs/media/fat", p);
+  try {
+    return await fs.realpath(p);
+  } catch (err) {
+    return p;
   }
 }

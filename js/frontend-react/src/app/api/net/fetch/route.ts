@@ -14,5 +14,5 @@ export async function POST(req: Request) {
     throw new Error(`${url} failed with status code ${response.status}`);
   }
 
-  return new Response(response.body, { status: 200 });
+  return new Response(response.body);
 }

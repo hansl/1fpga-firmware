@@ -53,6 +53,9 @@
       "1fpga:settings": [
         "./src/polyfills/1fpga/settings.ts"
       ],
+      "1fpga:system": [
+        "./src/polyfills/1fpga/system.ts"
+      ],
       "1fpga:upgrade": [
         "./src/polyfills/1fpga/upgrade.ts"
       ],

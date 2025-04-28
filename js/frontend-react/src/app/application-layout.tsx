@@ -4,7 +4,7 @@ import { ReactNode } from "react";
 import { SidebarLayout } from "@/components/ui-kit/sidebar-layout";
 import { Navbar } from "@/components/ui-kit/navbar";
 import {
-  ChatBubbleLeftRightIcon,
+  ChatBubbleLeftRightIcon, CircleStackIcon,
   CpuChipIcon,
   HomeIcon,
   PlayIcon,
@@ -28,9 +28,9 @@ import GearIcon from "next/dist/client/components/react-dev-overlay/ui/icons/gea
 import { SiDiscord, SiDiscourse } from "@icons-pack/react-simple-icons";
 
 function IsOneFpgaRunning({
-  fallback = null,
-  children,
-}: {
+                            fallback = null,
+                            children,
+                          }: {
   fallback?: ReactNode;
   children: ReactNode;
 }) {

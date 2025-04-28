@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import { pathOf } from "@/utils/server/filesystem";
+import nodePath from "node:path";
 
 export const GET = () => {
   return new Response(null, { status: 403 });
@@ -23,8 +24,9 @@ export const POST = async (req: Request) => {
 
     const content = Buffer.from(bytes, "hex");
     console.log(`Writing ${content.length} bytes to ${path}`);
+    await fs.mkdir(nodePath.dirname(path), { recursive: true });
     await fs.writeFile(path, content);
-    return new Response(undefined, { status: 200 });
+    return new Response("");
   } catch (e) {
     return new Response(`${e}`, { status: 500 });
   }

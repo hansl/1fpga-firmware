@@ -20,9 +20,7 @@ export async function writeFile(
     }),
   });
 
-  if (result.ok) {
-    return await result.json();
-  } else {
+  if (!result.ok) {
     throw new Error(`Failed to writeFile: ${result.statusText}`);
   }
 }
@@ -32,7 +30,14 @@ export async function writeFile(
 // export function readTextFile(path: string): Promise<string>;
 
 export async function deleteFile(path: string): Promise<void> {
-  throw new Error("Not implemented")
+  const result = await fetch("/api/fs/rm", {
+    method: "POST",
+    body: JSON.stringify({ path }),
+  });
+
+  if (!result.ok) {
+    throw new Error(`Failed to writeFile: ${result.statusText}`);
+  }
 }
 
 // export function readDir(path: string): Promise<string[]>;
@@ -45,9 +50,7 @@ export async function mkdir(path: string, all?: boolean): Promise<void> {
     body: JSON.stringify({ path, all }),
   });
 
-  if (result.ok) {
-    return await result.json();
-  } else {
+  if (!result.ok) {
     throw new Error(`Failed to writeFile: ${result.statusText}`);
   }
 }
@@ -58,30 +61,30 @@ export async function rmdir(path: string, recursive?: boolean): Promise<void> {
     body: JSON.stringify({ path, recursive }),
   });
 
-  if (result.ok) {
-    return await result.json();
-  } else {
+  if (!result.ok) {
     throw new Error(`Failed to writeFile: ${result.statusText}`);
   }
 }
 
-// export function isDir(path: string): Promise<boolean>;
+export function isDir(path: string): Promise<boolean> {
+  throw new Error("Not implemented");
+}
 
 export async function findAllFiles(
   root: string,
   options?: { extensions?: string[] },
 ): Promise<string[]> {
-  throw new Error('Not implemented');
+  throw new Error("Not implemented");
 }
 
 export function sha256(path: string): Promise<string>;
 export function sha256(path: string[]): Promise<string[]>;
 export function sha256(path: string | string[]): Promise<string | string[]> {
-  throw new Error('Not implemented');
+  throw new Error("Not implemented");
 }
 
 export function fileSize(path: string): Promise<number>;
 export function fileSize(path: string[]): Promise<number[]>;
 export function fileSize(path: string | string[]): Promise<number | number[]> {
-  throw new Error('Not implemented');
+  throw new Error("Not implemented");
 }

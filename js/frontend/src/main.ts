@@ -4,6 +4,7 @@ import rev from "consts:revision";
 import production from "consts:revision";
 import * as fs from "1fpga:fs";
 import * as osd from "1fpga:osd";
+import * as system from "1fpga:system";
 import * as video from "1fpga:video";
 import {
   Catalog,
@@ -74,24 +75,22 @@ async function mainMenu(
     case StartOnKind.GameLibrary:
       await gamesMenu();
       break;
-    case StartOnKind.LastGamePlayed:
-      {
-        const game = await Games.lastPlayed();
-        if (game) {
-          await game.launch();
-        } else {
-          await gamesMenu();
-          break;
-        }
+    case StartOnKind.LastGamePlayed: {
+      const game = await Games.lastPlayed();
+      if (game) {
+        await game.launch();
+      } else {
+        await gamesMenu();
+        break;
       }
+    }
       break;
-    case StartOnKind.SpecificGame:
-      {
-        const game = await Games.byId(startOn.game);
-        if (game) {
-          await game.launch();
-        }
+    case StartOnKind.SpecificGame: {
+      const game = await Games.byId(startOn.game);
+      if (game) {
+        await game.launch();
       }
+    }
       break;
 
     case StartOnKind.MainMenu:
@@ -135,12 +134,12 @@ async function mainMenu(
         },
         ...(user.admin
           ? [
-              {
-                label: "Download Center...",
-                marker: downloadMarker,
-                select: async () => await downloadCenterMenu(),
-              },
-            ]
+            {
+              label: "Download Center...",
+              marker: downloadMarker,
+              select: async () => await downloadCenterMenu(),
+            },
+          ]
           : []),
         {
           label: "Controllers...",
@@ -152,18 +151,19 @@ async function mainMenu(
         { label: "About", select: about },
         ...((await settings.getDevTools())
           ? [
-              "-",
-              {
-                label: "Developer Tools",
-                select: async () => await debugMenu(),
-              },
-            ]
+            "-",
+            {
+              label: "Developer Tools",
+              select: async () => await debugMenu(),
+            },
+          ]
           : []),
         "---",
         ...((await User.canLogOut())
           ? [{ label: "Logout", select: () => (logout = true) }]
           : []),
         { label: "Exit", select: () => (quit = true) },
+        { label: "Shutdown", select: () => system.shutdown() },
       ],
     });
   }

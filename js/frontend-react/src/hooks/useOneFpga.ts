@@ -79,6 +79,10 @@ async function startInner() {
       case "stopped":
         await stop();
         return;
+      case "shutdown":
+        console.log("Shutting down...");
+        await stop();
+        return;
       case "response": {
         if (id !== undefined) {
           const o = responses[id];

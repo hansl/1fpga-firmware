@@ -4,7 +4,6 @@ import { Button } from "@/components/ui-kit/button";
 import { Sidebar, SidebarItem } from "@/components/ui-kit/sidebar";
 import { PropertyList } from "@/components";
 import { Text } from "@/components/ui-kit/text";
-import { Textarea } from "@/components/ui-kit/textarea";
 
 export interface OsdAlertProps {
   title?: string;
@@ -58,9 +57,9 @@ export function OsdAlert({ title, message, choices, resolve }: OsdAlertProps) {
 }
 
 export function OsdShow({
-  title,
-  message,
-}: {
+                          title,
+                          message,
+                        }: {
   title?: string;
   message: string;
 }) {
