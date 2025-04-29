@@ -74,10 +74,10 @@ export async function alert(
   messageOrOptions:
     | string
     | {
-    title?: string;
-    message: string;
-    choices?: string[];
-  },
+        title?: string;
+        message: string;
+        choices?: string[];
+      },
   orMessage: string,
 ): Promise<void | null | number> {
   return await postMessageAndWait({
@@ -102,22 +102,25 @@ export async function selectFile(
   initialDir: string,
   options: SelectFileOptions,
 ): Promise<string | undefined> {
-  return undefined;
+  return await postMessageAndWait({
+    kind: "osd.selectFile",
+    title,
+    initialDir,
+    options,
+  });
 }
 
-export const hideOsd = () => {
-};
-export const inputTester = () => {
-};
+export const hideOsd = () => {};
+export const inputTester = () => {};
 
 export async function prompt(
   messageOrOptions:
     | string
     | {
-    title?: string;
-    message: string;
-    default?: string;
-  },
+        title?: string;
+        message: string;
+        default?: string;
+      },
 ): Promise<undefined | string> {
   return await postMessageAndWait({
     kind: "osd.prompt",
@@ -125,12 +128,9 @@ export async function prompt(
   });
 }
 
-export const promptPassword = () => {
-};
-export const promptShortcut = () => {
-};
-export const qrCode = () => {
-};
+export const promptPassword = () => {};
+export const promptShortcut = () => {};
+export const qrCode = () => {};
 
 export async function show(messageOrTitle: string, message?: string) {
   postMessage({
@@ -140,8 +140,7 @@ export async function show(messageOrTitle: string, message?: string) {
   });
 }
 
-export const showOsd = () => {
-};
+export const showOsd = () => {};
 
 export async function textMenu<R>(options: TextMenuOptions<R>): Promise<R> {
   const root = Math.random().toString(36).slice(2);
@@ -162,8 +161,8 @@ export async function textMenu<R>(options: TextMenuOptions<R>): Promise<R> {
 
   const newOptions = {
     ...options,
-    ...back ? { back: `--back-${root}` } : {},
-    ...sort ? { sort: `--sort-${root}` } : {},
+    ...(back ? { back: `--back-${root}` } : {}),
+    ...(sort ? { sort: `--sort-${root}` } : {}),
     items: [
       ...options.items.map((item, i) => {
         if (typeof item === "string") {

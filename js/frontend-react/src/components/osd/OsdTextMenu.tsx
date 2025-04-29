@@ -12,6 +12,7 @@ import {
 import { Badge } from "@/components/ui-kit/badge";
 import { Link } from "@/components/ui-kit/link";
 import { PropertyList } from "@/components";
+import { ArrowLeftIcon, Bars3BottomLeftIcon } from "@heroicons/react/24/solid";
 
 export interface OsdTextMenuProps<R> {
   resolve: (value: R | void | undefined) => void;
@@ -32,9 +33,9 @@ function Separator() {
 }
 
 function OsdTextMenuLabel({
-                            label,
-                            marker,
-                          }: {
+  label,
+  marker,
+}: {
   label: string;
   marker?: string;
 }) {
@@ -93,10 +94,10 @@ function OsdTextMenuItem<R>({ item, i, resolve }: OsdTextMenuItemProps<R>) {
 }
 
 export function OsdTextMenu<R>({
-                                 options,
-                                 resolve,
-                                 reject,
-                               }: OsdTextMenuProps<R>) {
+  options,
+  resolve,
+  reject,
+}: OsdTextMenuProps<R>) {
   async function back() {
     if (options.back !== undefined) {
       if (options.back instanceof Function) {
@@ -127,8 +128,7 @@ export function OsdTextMenu<R>({
       <PropertyList properties={options} />
 
       <Subheading className="mt-8 text-xl!">Menu Items</Subheading>
-      <Sidebar
-        className="min-h-5 mt-4 pl-1 border-l-2 border-white/5 [--gutter:--spacing(6)] lg:[--gutter:--spacing(10)]">
+      <Sidebar className="min-h-5 mt-4 pl-1 border-l-2 border-white/5 [--gutter:--spacing(6)] lg:[--gutter:--spacing(10)]">
         {options.items.map((item, i) => (
           <OsdTextMenuItem
             key={`item-${i}`}
@@ -143,12 +143,17 @@ export function OsdTextMenu<R>({
 
       <Divider className="py-2 mt-8" />
 
-      {options.back && <Button onClick={back} disabled={!options.back}>
-        Back
-      </Button>}
-      {options.sort && <Button onClick={sort} disabled={!options.sort}>
-        Sort
-      </Button>}
+      {options.back !== undefined && (
+        <Button onClick={back}>
+          <ArrowLeftIcon /> Back
+        </Button>
+      )}
+      {options.sort !== undefined && (
+        <Button onClick={sort}>
+          <Bars3BottomLeftIcon />
+          Sort
+        </Button>
+      )}
     </>
   );
 }

@@ -7,6 +7,7 @@ import { Text } from "@/components/ui-kit/text";
 import { Button } from "@/components/ui-kit/button";
 import { Toggle } from "@/components/ui-kit/toggle";
 import { Input } from "@/components/ui-kit/input";
+import { TrashIcon } from "@heroicons/react/24/solid";
 
 export default function Home() {
   const { start, started, stop } = useOneFpga();
@@ -55,6 +56,7 @@ export default function Home() {
           </div>
           <div className="flex-col flex items-end">
             <Button onClick={doReset} disabled={started}>
+              <TrashIcon />
               Reset
             </Button>
           </div>

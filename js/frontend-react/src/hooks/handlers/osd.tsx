@@ -1,5 +1,12 @@
 import { createView, register } from "@/hooks";
-import { OsdAlert, OsdPrompt, OsdShow, OsdTextMenu } from "@/components/osd";
+import {
+  OsdAlert,
+  OsdPrompt,
+  OsdSelectFile,
+  OsdShow,
+  OsdTextMenu,
+} from "@/components/osd";
+import { SelectFileOptions } from "1fpga:osd";
 
 export async function alert({
   messageOrOptions,
@@ -78,6 +85,29 @@ async function prompt({
   return await promise;
 }
 
+export async function selectFile({
+  title,
+  initialDir,
+  options,
+}: {
+  title: string;
+  initialDir: string;
+  options: SelectFileOptions;
+}): Promise<string | undefined> {
+  const { promise, resolve } = Promise.withResolvers<string | undefined>();
+
+  createView("osd", () => (
+    <OsdSelectFile
+      title={title}
+      initialDir={initialDir}
+      options={options}
+      resolve={resolve}
+    />
+  ));
+
+  return promise;
+}
+
 export async function show({
   messageOrTitle,
   message,
@@ -96,8 +126,9 @@ export async function show({
 }
 
 export function registerHandlers() {
-  register("osd.textMenu", textMenu);
   register("osd.alert", alert);
+  register("osd.textMenu", textMenu);
   register("osd.prompt", prompt);
+  register("osd.selectFile", selectFile);
   register("osd.show", show);
 }

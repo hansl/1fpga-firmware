@@ -1,5 +1,4 @@
 import * as osd from "1fpga:osd";
-import { resetAll } from "@/utils";
 import { SqlTag } from "@sqltags/core";
 import { oneLine } from "common-tags";
 
@@ -16,7 +15,7 @@ export async function post(
     oneLine`
       The catalog format changed significantly with the latest release.
       We have to remove all catalogs from your local installation.
-      You will need to add them again.
+      You will need to add them again and reidentify your games.
       This should be now much quicker.
   `,
   );
