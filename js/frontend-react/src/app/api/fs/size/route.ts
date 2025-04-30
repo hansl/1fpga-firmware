@@ -8,14 +8,14 @@ export const GET = () => {
 // Define the POST request handler function
 export const POST = async (req: Request) => {
   try {
-    const { path: p } = await req.json();
-    const path = await pathOf(p);
-
-    if ((await fs.lstat(path)).isFile()) {
-      await fs.rm(path);
-    } else {
-      return new Response(`${path} not a file.`, { status: 500 });
-    }
+    const { path: inPath }: { path: string[] } = await req.json();
+    const sizes = await Promise.all(
+      inPath.map(async (p) => {
+        const stat = await fs.stat(await pathOf(p));
+        return stat.size;
+      }),
+    );
+    return Response.json(sizes);
   } catch (e) {
     return new Response(`${e}`, { status: 500 });
   }

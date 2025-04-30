@@ -10,7 +10,7 @@ import {
   SidebarLabel,
 } from "@/components/ui-kit/sidebar";
 import { Button } from "@/components/ui-kit/button";
-import { ArrowPathIcon, XMarkIcon } from "@heroicons/react/24/solid";
+import { ArrowPathIcon, CheckIcon, XMarkIcon } from "@heroicons/react/24/solid";
 import normalize from "path-normalize";
 
 export interface OsdSelectFileProps {
@@ -148,7 +148,13 @@ export function OsdSelectFile({
           </Sidebar>
 
           <Divider className="py-2 mt-8" />
-          <Button onClick={() => resolve(undefined)}>
+          {options.directory === true && (
+            <Button className="mx-2" onClick={() => resolve(dir)}>
+              <CheckIcon />
+              Select
+            </Button>
+          )}
+          <Button className="mx-2" onClick={() => resolve(undefined)}>
             <XMarkIcon />
             Cancel
           </Button>

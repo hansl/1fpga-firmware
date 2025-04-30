@@ -6,10 +6,10 @@ export async function post(
   _: SqlTag<unknown, unknown>,
   { initial }: { initial: boolean },
 ) {
-  console.log(initial);
   if (initial) {
     return;
   }
+
   await osd.alert(
     "Catalogs must be deleted",
     oneLine`

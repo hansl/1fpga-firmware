@@ -1,7 +1,6 @@
 import { createGlobalStore } from "@/utils/client";
 import { registerHandlers } from "@/hooks/handlers";
 import { createView } from "@/hooks/useView";
-import { useRouter } from "next/navigation";
 
 export enum OneFpgaWorkerState {
   Stopped = 0,
@@ -141,6 +140,10 @@ async function start() {
   const worker = workerStore.get();
   if (!worker) {
     throw new Error("Worker not found.");
+  }
+
+  while (workerStore.get().state !== OneFpgaWorkerState.Started) {
+    await new Promise((r) => setTimeout(r, 20));
   }
 }
 

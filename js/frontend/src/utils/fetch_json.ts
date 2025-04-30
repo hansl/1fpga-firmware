@@ -1,14 +1,19 @@
-import type { ErrorObject, ValidateFunction } from "ajv";
+import type { ValidateFunction } from "ajv";
 import * as net from "1fpga:net";
 import * as osd from "1fpga:osd";
 
 export class ValidationError extends Error {
-  constructor(public readonly errors: ErrorObject[]) {
+  constructor(public readonly errors: any) {
     const message =
       `Validation error:\n  ` +
-      errors.map((e) => JSON.stringify(e)).join("\n  ");
+      errors.map((e: any) => JSON.stringify(e)).join("\n  ");
     super(message);
   }
+}
+
+export interface FetchJsonAndValidateOptions {
+  allowRetry?: boolean | "onlyFetch";
+  onPreValidate?: (json: any) => Promise<void>;
 }
 
 /**
@@ -20,28 +25,53 @@ export class ValidationError extends Error {
  */
 export async function fetchJsonAndValidate<T>(
   url: string,
-  validate: ValidateFunction<T> | ((json: unknown) => json is T),
-  options?: {
-    allowRetry?: boolean;
-    onPreValidate?: (json: any) => Promise<void>;
-  },
+  validate:
+    | ValidateFunction<T>
+    | {
+        safeParseAsync(
+          v: unknown,
+        ): Promise<{ success: true; data: T } | { success: false; error: any }>;
+      }
+    | ((json: unknown) => boolean | Promise<boolean>),
+  { allowRetry = true, onPreValidate }: FetchJsonAndValidateOptions = {},
 ): Promise<T> {
   while (true) {
+    let fetching = true;
     try {
       const response = await net.fetchJson(url);
-      if (options?.onPreValidate) {
-        await options.onPreValidate(response);
+      fetching = false;
+
+      if (onPreValidate) {
+        await onPreValidate(response);
       }
 
-      if (validate(response)) {
+      let valid = false;
+      let error = null;
+      if (validate instanceof Function) {
+        valid = await validate(response);
+        if (!valid) {
+          error = (validate as any).errors ?? [];
+        }
+      } else {
+        const result = await validate.safeParseAsync(response);
+
+        valid = result.success;
+        if (!result.success) {
+          error = result.error;
+        }
+      }
+      if (valid) {
         return response;
       } else {
-        const e = (validate as any).errors ?? [];
-        console.warn(`Validation error: ${JSON.stringify(e)}`);
-        throw new ValidationError(e);
+        console.warn(`Validation error: ${JSON.stringify(error)}`);
+        throw new ValidationError(error);
       }
     } catch (e) {
-      if (!(options?.allowRetry ?? true)) {
+      if (allowRetry === "onlyFetch") {
+        allowRetry = fetching;
+      }
+
+      if (!allowRetry) {
         console.warn(`Error fetching JSON: ${e}`);
         throw e;
       }

@@ -35,7 +35,7 @@ export class UserSettings {
   private constructor(private readonly storage_: DbStorage) {}
 
   public async startOn(): Promise<settings.StartOnSetting> {
-    const schema = settings.startOnSetting;
+    const schema = settings.StartOnSetting;
     return await getOrFail(
       this.storage_,
       START_ON_KEY,

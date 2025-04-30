@@ -6,7 +6,8 @@
   "typings": "dist/index.d.ts",
   "type": "module",
   "scripts": {
-    "build": "tsc"
+    "build": "tsc",
+    "test": "jest"
   },
   "keywords": [
     "schemas",
@@ -18,6 +19,8 @@
     "zod": "^4.0.0-beta.20250420T053007"
   },
   "devDependencies": {
+    "@jest/globals": "^29.7.0",
+    "ts-jest": "^29.3.2",
     "typescript": "^5.8.3"
   }
 }

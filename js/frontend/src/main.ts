@@ -1,11 +1,7 @@
 // The root file being executed by 1FPGA by default.
 import { settings } from "@1fpga/schemas";
-import rev from "consts:revision";
-import production from "consts:revision";
-import * as fs from "1fpga:fs";
 import * as osd from "1fpga:osd";
 import * as system from "1fpga:system";
-import * as video from "1fpga:video";
 import {
   Catalog,
   Commands,
@@ -16,6 +12,7 @@ import {
   StartOnKind,
   User,
   UserSettings,
+  WellKnownCatalogs,
 } from "./services";
 import { stripIndents } from "common-tags";
 import { StartGameAction } from "@/actions/start_game";
@@ -28,6 +25,7 @@ import { login } from "@/ui/login";
 import { downloadCenterMenu } from "@/ui/downloads";
 import { about } from "@/ui/about";
 import { resetAll, resetDb } from "@/utils";
+import { fetchCatalog } from "@/services/catalog";
 
 // Polyfill for events.
 globalThis.performance = <any>{
@@ -75,22 +73,24 @@ async function mainMenu(
     case StartOnKind.GameLibrary:
       await gamesMenu();
       break;
-    case StartOnKind.LastGamePlayed: {
-      const game = await Games.lastPlayed();
-      if (game) {
-        await game.launch();
-      } else {
-        await gamesMenu();
-        break;
+    case StartOnKind.LastGamePlayed:
+      {
+        const game = await Games.lastPlayed();
+        if (game) {
+          await game.launch();
+        } else {
+          await gamesMenu();
+          break;
+        }
       }
-    }
       break;
-    case StartOnKind.SpecificGame: {
-      const game = await Games.byId(startOn.game);
-      if (game) {
-        await game.launch();
+    case StartOnKind.SpecificGame:
+      {
+        const game = await Games.byId(startOn.game);
+        if (game) {
+          await game.launch();
+        }
       }
-    }
       break;
 
     case StartOnKind.MainMenu:
@@ -134,12 +134,12 @@ async function mainMenu(
         },
         ...(user.admin
           ? [
-            {
-              label: "Download Center...",
-              marker: downloadMarker,
-              select: async () => await downloadCenterMenu(),
-            },
-          ]
+              {
+                label: "Download Center...",
+                marker: downloadMarker,
+                select: async () => await downloadCenterMenu(),
+              },
+            ]
           : []),
         {
           label: "Controllers...",
@@ -151,12 +151,12 @@ async function mainMenu(
         { label: "About", select: about },
         ...((await settings.getDevTools())
           ? [
-            "-",
-            {
-              label: "Developer Tools",
-              select: async () => await debugMenu(),
-            },
-          ]
+              "-",
+              {
+                label: "Developer Tools",
+                select: async () => await debugMenu(),
+              },
+            ]
           : []),
         "---",
         ...((await User.canLogOut())
@@ -284,33 +284,45 @@ async function mainInner(): Promise<boolean> {
 }
 
 export async function main() {
-  console.log(`Build: "${rev}" (${production ? "production" : "development"})`);
-  console.log("1FPGA started. ONE_FPGA =", JSON.stringify(ONE_FPGA));
-  let quit = false;
+  console.log(
+    await fetchCatalog(WellKnownCatalogs.OneFpga, {
+      cores: true,
+    }),
+  );
 
-  // Log the last time this was started.
-  await fs.writeFile("1fpga.start", new Date().toISOString());
+  while (true) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  /*
+    console.log(`Build: "${rev}" (${production ? "production" : "development"})`);
+    console.log("1FPGA started. ONE_FPGA =", JSON.stringify(ONE_FPGA));
+    let quit = false;
 
-  const start = Date.now();
-  const resolution = video.getResolution();
-  let image = await Image.embedded("background");
+    // Log the last time this was started.
+    await fs.writeFile("1fpga.start", new Date().toISOString());
 
-  if (resolution) {
-    console.log("Resolution:", resolution.width, "x", resolution.height);
-    const imageAr = image.width / image.height;
-    const resolutionAr = resolution.width / resolution.height;
-    if (imageAr > resolutionAr) {
-      resolution.width = resolution.height * imageAr;
-    } else if (imageAr < resolutionAr) {
-      resolution.height = resolution.width / imageAr;
+    const start = Date.now();
+    const resolution = video.getResolution();
+    let image = await Image.embedded("background");
+
+    if (resolution) {
+      console.log("Resolution:", resolution.width, "x", resolution.height);
+      const imageAr = image.width / image.height;
+      const resolutionAr = resolution.width / resolution.height;
+      if (imageAr > resolutionAr) {
+        resolution.width = resolution.height * imageAr;
+      } else if (imageAr < resolutionAr) {
+        resolution.height = resolution.width / imageAr;
+      }
+      image = image.resize(resolution.width, resolution.height);
     }
-    image = image.resize(resolution.width, resolution.height);
-  }
 
-  image.sendToBackground({ position: "center", clear: true });
-  console.log("Background set in", Date.now() - start, "ms");
+    image.sendToBackground({ position: "center", clear: true });
+    console.log("Background set in", Date.now() - start, "ms");
 
-  while (!quit) {
-    quit = await mainInner();
-  }
+    while (!quit) {
+      quit = await mainInner();
+    }
+
+   */
 }

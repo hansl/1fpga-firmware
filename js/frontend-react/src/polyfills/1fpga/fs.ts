@@ -74,17 +74,71 @@ export async function findAllFiles(
   root: string,
   options?: { extensions?: string[] },
 ): Promise<string[]> {
-  throw new Error("Not implemented");
+  const response = await fetch(`/api/fs/list`, {
+    method: "POST",
+    body: JSON.stringify({
+      dir: root,
+      recursive: true,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`HTTP error: ${response.statusText}`);
+  }
+  let all: [string, boolean][] = await response.json();
+  debugger;
+  if (options?.extensions) {
+    all = all.filter(([name]) => {
+      return options.extensions?.some((ext) => name.endsWith(`.${ext}`));
+    });
+  }
+
+  const files = all
+    .filter(([_, isDir]) => !isDir)
+    .map(([name]) => `${root}/${name}`);
+  console.log(files);
+  return files;
 }
 
 export function sha256(path: string): Promise<string>;
 export function sha256(path: string[]): Promise<string[]>;
-export function sha256(path: string | string[]): Promise<string | string[]> {
-  throw new Error("Not implemented");
+export async function sha256(
+  path: string | string[],
+): Promise<string | string[]> {
+  const response = await fetch(`/api/fs/sha256`, {
+    method: "POST",
+    body: JSON.stringify({ path: Array.isArray(path) ? path : [path] }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP error: ${response.statusText}`);
+  }
+
+  const shas = await response.json();
+  if (Array.isArray(path)) {
+    return shas;
+  } else {
+    return shas[0];
+  }
 }
 
 export function fileSize(path: string): Promise<number>;
 export function fileSize(path: string[]): Promise<number[]>;
-export function fileSize(path: string | string[]): Promise<number | number[]> {
-  throw new Error("Not implemented");
+export async function fileSize(
+  path: string | string[],
+): Promise<number | number[]> {
+  const response = await fetch(`/api/fs/size`, {
+    method: "POST",
+    body: JSON.stringify({ path: Array.isArray(path) ? path : [path] }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP error: ${response.statusText}`);
+  }
+
+  const shas = await response.json();
+  if (Array.isArray(path)) {
+    return shas;
+  } else {
+    return shas[0];
+  }
 }

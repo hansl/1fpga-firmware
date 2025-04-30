@@ -8,11 +8,12 @@ interface CatalogRow extends Row {
   id: number;
   name: string;
   url: string;
-  latest_update_at: string | null;
   last_updated: string;
   version: string;
   priority: number;
   update_pending: boolean;
+
+  json: string;
 }
 
 export interface ListCatalogsOptions {
@@ -21,30 +22,41 @@ export interface ListCatalogsOptions {
 }
 
 export interface ICatalog {
-   readonly id: number;
-   readonly name: string;
-   readonly url: string;
-   readonly latestUpdateAt: Date | null;
-   readonly lastUpdated: string;
-   readonly version: string;
-   readonly priority: number;
-   readonly updatePending: boolean;
+  readonly id: number;
+  readonly name: string;
+  readonly url: string;
+  readonly lastUpdated: string;
+  readonly version: string;
+  readonly priority: number;
+  readonly updatePending: boolean;
+  readonly json: any;
 }
 
-function rowIntoCatalog({ url,priority,version,name,latest_update_at,last_updated,update_pending,id }: CatalogRow): ICatalog {
+function rowIntoCatalog({
+  url,
+  priority,
+  version,
+  name,
+  last_updated,
+  update_pending,
+  id,
+  json,
+}: CatalogRow): ICatalog {
   return {
     id,
     name,
     url,
-    latestUpdateAt: latest_update_at ? new Date(latest_update_at) : null,
     lastUpdated: last_updated,
     version,
     priority,
     updatePending: update_pending,
+    json: JSON.parse(json),
   };
 }
 
-export async function listCatalogs(options: ListCatalogsOptions): Promise<ICatalog[]> {
+export async function listCatalogs(
+  options: ListCatalogsOptions,
+): Promise<ICatalog[]> {
   const rows = await sql<CatalogRow>`SELECT *
                                      FROM catalogs
                                      WHERE ${sql.and(
@@ -77,7 +89,6 @@ export class Catalog {
       row.id,
       row.name,
       row.url,
-      row.latest_update_at ? new Date(row.latest_update_at) : null,
       row.last_updated,
       row.version,
       row.priority,
@@ -121,11 +132,11 @@ export class Catalog {
     ).filter((c) => c !== undefined);
 
     await sql`UPDATE catalogs
-                  SET update_pending = true
-                  WHERE ${sql.in(
-      "id",
-      shouldUpdate.map((c) => c.id),
-    )}`;
+              SET update_pending = true
+              WHERE ${sql.in(
+                "id",
+                shouldUpdate.map((c) => c.id),
+              )}`;
     return shouldUpdate.length > 0;
   }
 
@@ -133,41 +144,41 @@ export class Catalog {
     options: ListCatalogsOptions = {},
   ): Promise<Catalog[]> {
     const rows = await sql<CatalogRow>`SELECT *
-                                           FROM catalogs
-                                           WHERE ${sql.and(
-      true,
-      options.url
-        ? sql`url =
-                                                           ${options.url}`
-        : undefined,
-      options.updatePending
-        ? sql`update_pending =
-                                                           ${options.updatePending}`
-        : undefined,
-    )}
-        `;
+                                       FROM catalogs
+                                       WHERE ${sql.and(
+                                         true,
+                                         options.url
+                                           ? sql`url =
+                                           ${options.url}`
+                                           : undefined,
+                                         options.updatePending
+                                           ? sql`update_pending =
+                                           ${options.updatePending}`
+                                           : undefined,
+                                       )}
+    `;
     return rows.map(Catalog.fromRow).sort((a, b) => a.priority - b.priority);
   }
 
   public static async count(updatePending = false): Promise<number> {
     const [{ count }] = await sql<{ count: number }>`SELECT COUNT(*) as count
-                                                       FROM catalogs ${updatePending ? sql`WHERE update_pending = true` : ""}`;
+                                                     FROM catalogs ${updatePending ? sql`WHERE update_pending = true` : ""}`;
     return count;
   }
 
   public static async getByUrl(url: string): Promise<Catalog | null> {
     const row = await sql<CatalogRow>`SELECT *
-                                          FROM catalogs
-                                          WHERE url = ${url}
-                                          LIMIT 1`;
+                                      FROM catalogs
+                                      WHERE url = ${url}
+                                      LIMIT 1`;
     return row.length == 1 ? Catalog.fromRow(row[0]) : null;
   }
 
   public static async getById(id: number): Promise<Catalog | null> {
     const row = await sql<CatalogRow>`SELECT *
-                                          FROM catalogs
-                                          WHERE id = ${id}
-                                          LIMIT 1`;
+                                      FROM catalogs
+                                      WHERE id = ${id}
+                                      LIMIT 1`;
     return row.length == 1 ? Catalog.fromRow(row[0]) : null;
   }
 
@@ -210,13 +221,11 @@ export class Catalog {
     public readonly id: number,
     public readonly name: string,
     public readonly url: string,
-    public readonly latestUpdateAt: Date | null,
     public readonly lastUpdated: string,
     public readonly version: string,
     public readonly priority: number,
     public readonly updatePending: boolean,
-  ) {
-  }
+  ) {}
 
   /**
    * Check for updates in the catalog.

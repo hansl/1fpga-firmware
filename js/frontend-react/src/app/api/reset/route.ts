@@ -1,5 +1,6 @@
 import { resetAll } from "../db/database";
 import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { pathOf } from "@/utils/server/filesystem";
 
 export const GET = () => {
@@ -8,11 +9,30 @@ export const GET = () => {
 
 // Define the POST request handler function
 export async function POST() {
+  // Calling `fs.rm(..., { recursive: true })` leads to deleting
+  // content of symlinks. We don't want that.
+  async function rm(dir: string) {
+    await Promise.all(
+      (await fs.readdir(dir)).map(async (name) => {
+        const p = path.join(dir, name);
+        const stat = await fs.lstat(p);
+
+        if (stat.isDirectory() && !stat.isSymbolicLink()) {
+          await rm(p);
+        } else {
+          await fs.rm(p);
+        }
+      }),
+    );
+    await fs.rmdir(dir);
+  }
+
   try {
-    // First, delete all files.
-    await fs.rm(await pathOf("/"), { recursive: true });
-    // Then, delete all databases.
     await resetAll();
+
+    // First, delete everything.
+    await rm(await pathOf("/"));
+
     return new Response("");
   } catch (e) {
     return new Response(`${e}`, { status: 500 });
