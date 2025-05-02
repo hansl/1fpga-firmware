@@ -25,7 +25,7 @@ import { login } from "@/ui/login";
 import { downloadCenterMenu } from "@/ui/downloads";
 import { about } from "@/ui/about";
 import { resetAll, resetDb } from "@/utils";
-import { fetchCatalog } from "@/services/catalog";
+import { fetchAndNormalizeCatalog } from "@/services/catalog";
 
 // Polyfill for events.
 globalThis.performance = <any>{
@@ -284,11 +284,7 @@ async function mainInner(): Promise<boolean> {
 }
 
 export async function main() {
-  console.log(
-    await fetchCatalog(WellKnownCatalogs.OneFpga, {
-      cores: true,
-    }),
-  );
+  console.log(await fetchAndNormalizeCatalog(WellKnownCatalogs.OneFpga));
 
   while (true) {
     await new Promise((r) => setTimeout(r, 100));

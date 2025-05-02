@@ -1,18 +1,35 @@
 import * as zod from "zod";
-import { Base64, Hex, ShortName, Tag, UrlOrRelative, Version } from "./utils";
+import {
+  File,
+  Links,
+  ShortName,
+  Tag,
+  UrlOrRelative,
+  UrlVersionedType,
+  Version,
+} from "./utils";
 
-export const File = zod.object({
-  url: UrlOrRelative,
-  type: zod.string().describe("A mimetype for the file."),
-  size: zod.number().describe("The size (in bytes) of the file."),
-  sha256: zod
-    .union([Hex.length(64), Base64.length(44)])
-    .describe("The SHA256 hash of the file, in hexadecimal or base64."),
-  signature: Hex.or(Base64)
-    .describe("The signature of the file, in hexa or base64.")
-    .optional(),
+export const GamesDb = File.extend({
+  version: Version.optional(),
+  links: Links.optional(),
 });
-export type File = zod.TypeOf<typeof File>;
+
+export const System = zod.object({
+  name: zod.string(),
+  uniqueName: ShortName,
+  description: zod.string(),
+  icon: UrlOrRelative.optional(),
+  image: UrlOrRelative.optional(),
+  gamesDb: UrlVersionedType(GamesDb),
+});
+export type System = zod.TypeOf<typeof System>;
+
+export const Systems = zod
+  .object({
+    _url: zod.void(),
+  })
+  .catchall(UrlVersionedType(System));
+export type Systems = zod.TypeOf<typeof Systems>;
 
 export const Release = zod.object({
   files: zod.array(File),
@@ -25,12 +42,7 @@ export const Core = zod.object({
   name: zod.string().describe("Name of the core"),
   uniqueName: ShortName.describe("Unique short name of the core"),
   tags: zod.array(Tag).optional(),
-  links: zod
-    .object({
-      homepage: zod.url().optional(),
-      github: zod.url().optional(),
-    })
-    .catchall(zod.url()),
+  links: Links.optional(),
   description: zod.string().optional(),
   icon: UrlOrRelative.optional(),
   image: UrlOrRelative.optional(),
@@ -41,42 +53,21 @@ export type Core = zod.TypeOf<typeof Core>;
 
 export const Cores = zod
   .object({
-    _url: zod.never(),
+    _url: zod.void(),
   })
-  .catchall(
-    UrlOrRelative.or(
-      zod.object({
-        url: UrlOrRelative,
-        version: Version,
-      }),
-    ),
-  )
+  .catchall(UrlVersionedType(Core))
   .describe("A list of all cores and their definition files.");
 
 export type Cores = zod.TypeOf<typeof Cores>;
 
 export const Catalog = zod
   .object({
+    _url: zod.void(),
     name: zod.string().min(3).max(64).describe("Name of the catalog."),
-    cores: zod
-      .union([
-        Cores,
-        zod.string(),
-        zod.object({
-          url: UrlOrRelative,
-          version: Version,
-        }),
-      ])
+    cores: UrlVersionedType(Cores)
       .describe("List of cores in this catalog.")
       .optional(),
-    systems: zod
-      .union([
-        UrlOrRelative,
-        zod.object({
-          url: UrlOrRelative,
-          version: Version,
-        }),
-      ])
+    systems: UrlVersionedType(Systems)
       .describe("List of systems in this catalog.")
       .optional(),
     releases: zod

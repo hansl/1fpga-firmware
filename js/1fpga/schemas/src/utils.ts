@@ -53,3 +53,35 @@ export const Base64 = zod
   .string()
   .regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/);
 export type Base64 = zod.TypeOf<typeof Base64>;
+
+export const File = zod.object({
+  url: UrlOrRelative,
+  type: zod.string().optional().describe("A mimetype for the file."),
+  size: zod.number().describe("The size (in bytes) of the file."),
+  sha256: zod
+    .union([Hex.length(64), Base64.length(44)])
+    .describe("The SHA256 hash of the file, in hexadecimal or base64."),
+  signature: Hex.or(Base64)
+    .describe("The signature of the file, in hexa or base64.")
+    .optional(),
+});
+export type File = zod.TypeOf<typeof File>;
+
+export function UrlVersionedType<Inner extends zod.Schema>(inner: Inner) {
+  return zod.union([
+    inner,
+    UrlOrRelative,
+    zod.object({ url: UrlOrRelative, version: Version }),
+  ]);
+}
+
+export type UrlVersionedType<Inner extends zod.Schema> = zod.TypeOf<
+  ReturnType<typeof UrlVersionedType<Inner>>
+>;
+
+export const Links = zod
+  .object({
+    homepage: zod.url().optional(),
+    github: zod.url().optional(),
+  })
+  .catchall(zod.url());

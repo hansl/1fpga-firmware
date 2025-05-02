@@ -1,12 +1,22 @@
-import type { ValidateFunction } from "ajv";
 import * as net from "1fpga:net";
 import * as osd from "1fpga:osd";
+import production from "consts:production";
+import { ValidateFunction } from "ajv";
 
 export class ValidationError extends Error {
   constructor(public readonly errors: any) {
-    const message =
-      `Validation error:\n  ` +
-      errors.map((e: any) => JSON.stringify(e)).join("\n  ");
+    if (!production) {
+      debugger;
+    }
+
+    let message = "" + errors;
+    if (Array.isArray(errors)) {
+      message =
+        `Validation error:\n  ` +
+        errors.map((e: any) => JSON.stringify(e)).join("\n  ");
+    } else if (errors.name === "$ZodError") {
+      message = errors.message;
+    }
     super(message);
   }
 }
@@ -30,7 +40,7 @@ export async function fetchJsonAndValidate<T>(
     | {
         safeParseAsync(
           v: unknown,
-        ): Promise<{ success: true; data: T } | { success: false; error: any }>;
+        ): Promise<{ success: true } | { success: false; error: any }>;
       }
     | ((json: unknown) => boolean | Promise<boolean>),
   { allowRetry = true, onPreValidate }: FetchJsonAndValidateOptions = {},
