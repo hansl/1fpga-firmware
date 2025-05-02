@@ -2,7 +2,15 @@ import * as osd from "1fpga:osd";
 import type * as schemas from "@1fpga/schemas";
 import { fetchJsonAndValidate, ValidationError } from "@/utils";
 
+export type NormalizedCore = schemas.catalog.Core & {
+  _url: string;
+};
+
 export type Cores = schemas.catalog.Cores & {
+  _url: string;
+};
+
+export type NormalizedCores = Record<string, NormalizedCore> & {
   _url: string;
 };
 
@@ -12,6 +20,13 @@ export type Cores = schemas.catalog.Cores & {
  */
 export type Catalog = schemas.catalog.Catalog & {
   _url: string;
+};
+
+/**
+ * A normalized catalog with cores.
+ */
+export type NormalizedCatalog = Omit<Catalog, "cores"> & {
+  cores?: NormalizedCores;
 };
 
 /**
@@ -28,6 +43,7 @@ export async function fetchCores(catalog: Catalog): Promise<Catalog> {
   let cores = catalog.cores;
   if (typeof cores === "string") {
     const coresUrl = new URL(cores, catalog._url).toString();
+    osd.show("Fetching cores...", "URL: " + coresUrl);
     cores = {
       ...(await fetchJsonAndValidate<schemas.catalog.Cores>(
         coresUrl,
@@ -38,6 +54,7 @@ export async function fetchCores(catalog: Catalog): Promise<Catalog> {
     } as Cores;
   } else if ("url" in cores && "version" in cores) {
     const coresUrl = new URL(cores.url, catalog._url).toString();
+    osd.show("Fetching cores...", "URL: " + coresUrl);
     cores = {
       ...(await fetchJsonAndValidate<schemas.catalog.Cores>(
         coresUrl,
@@ -68,7 +85,7 @@ export interface FetchCatalogOptions {
 export async function fetchCatalog(
   url: string,
   options: FetchCatalogOptions = {},
-) {
+): Promise<Catalog> {
   // Normalize the URL.
   url = new URL(url).toString();
   osd.show("Fetching catalog...", "URL: " + url);

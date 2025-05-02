@@ -32,3 +32,24 @@ export const UrlOrRelative = zod.url().or(
       },
     ),
 );
+
+export type UrlOrRelative = zod.TypeOf<typeof UrlOrRelative>;
+
+export const ShortName = zod
+  .string()
+  .min(3)
+  .max(32)
+  .regex(/^[a-zA-Z0-9_-]+$/);
+
+export type ShortName = zod.TypeOf<typeof ShortName>;
+
+export const Tag = ShortName;
+export type Tag = zod.TypeOf<typeof ShortName>;
+
+export const Hex = zod.string().regex(/^[0-9a-fA-F]+$/);
+export type Hex = zod.TypeOf<typeof Hex>;
+
+export const Base64 = zod
+  .string()
+  .regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/);
+export type Base64 = zod.TypeOf<typeof Base64>;

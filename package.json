@@ -11,7 +11,8 @@
     "build": "npm run build:schemas && npm run build:frontend",
     "build:schemas": "npm run -w @1fpga/schemas build",
     "build:frontend": "npm run -w @1fpga/frontend build",
-    "dev": "cd js/frontend-react && next dev"
+    "dev": "cd js/frontend-react && next dev",
+    "test": "npm test -w @1fpga/schemas"
   },
   "devDependencies": {
     "prettier": "3.3.3"

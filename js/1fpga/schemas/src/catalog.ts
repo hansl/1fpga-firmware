@@ -1,18 +1,55 @@
 import * as zod from "zod";
-import { UrlOrRelative, Version } from "./utils";
+import { Base64, Hex, ShortName, Tag, UrlOrRelative, Version } from "./utils";
+
+export const File = zod.object({
+  url: UrlOrRelative,
+  type: zod.string().describe("A mimetype for the file."),
+  size: zod.number().describe("The size (in bytes) of the file."),
+  sha256: zod
+    .union([Hex.length(64), Base64.length(44)])
+    .describe("The SHA256 hash of the file, in hexadecimal or base64."),
+  signature: Hex.or(Base64)
+    .describe("The signature of the file, in hexa or base64.")
+    .optional(),
+});
+export type File = zod.TypeOf<typeof File>;
+
+export const Release = zod.object({
+  files: zod.array(File),
+  version: Version,
+  tags: zod.array(Tag).optional(),
+});
+export type Release = zod.TypeOf<typeof Release>;
+
+export const Core = zod.object({
+  name: zod.string().describe("Name of the core"),
+  uniqueName: ShortName.describe("Unique short name of the core"),
+  tags: zod.array(Tag).optional(),
+  links: zod
+    .object({
+      homepage: zod.url().optional(),
+      github: zod.url().optional(),
+    })
+    .catchall(zod.url()),
+  description: zod.string().optional(),
+  icon: UrlOrRelative.optional(),
+  image: UrlOrRelative.optional(),
+  releases: zod.array(Release),
+  systems: ShortName.or(zod.array(ShortName)),
+});
+export type Core = zod.TypeOf<typeof Core>;
 
 export const Cores = zod
   .object({
     _url: zod.never(),
   })
   .catchall(
-    zod.union([
-      UrlOrRelative,
+    UrlOrRelative.or(
       zod.object({
         url: UrlOrRelative,
         version: Version,
       }),
-    ]),
+    ),
   )
   .describe("A list of all cores and their definition files.");
 
