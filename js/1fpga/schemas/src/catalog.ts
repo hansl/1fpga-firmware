@@ -20,23 +20,27 @@ export const System = zod.object({
   description: zod.string(),
   icon: UrlOrRelative.optional(),
   image: UrlOrRelative.optional(),
-  gamesDb: UrlVersionedType(GamesDb),
+  gamesDb: UrlVersionedType(GamesDb).optional(),
+  cores: zod.object().optional(),
+  tags: zod.array(Tag).optional(),
+  links: Links.optional(),
 });
 export type System = zod.TypeOf<typeof System>;
 
-export const Systems = zod
-  .object({
-    _url: zod.void(),
-  })
-  .catchall(UrlVersionedType(System));
+export const Systems = zod.object({}).catchall(UrlVersionedType(System));
 export type Systems = zod.TypeOf<typeof Systems>;
 
 export const Release = zod.object({
   files: zod.array(File),
-  version: Version,
+  version: Version.optional(),
   tags: zod.array(Tag).optional(),
 });
 export type Release = zod.TypeOf<typeof Release>;
+
+export const Releases = zod
+  .object({})
+  .catchall(UrlVersionedType(zod.array(Release)));
+export type Releases = zod.TypeOf<typeof Release>;
 
 export const Core = zod.object({
   name: zod.string().describe("Name of the core"),
@@ -52,9 +56,7 @@ export const Core = zod.object({
 export type Core = zod.TypeOf<typeof Core>;
 
 export const Cores = zod
-  .object({
-    _url: zod.void(),
-  })
+  .object({})
   .catchall(UrlVersionedType(Core))
   .describe("A list of all cores and their definition files.");
 
@@ -62,7 +64,6 @@ export type Cores = zod.TypeOf<typeof Cores>;
 
 export const Catalog = zod
   .object({
-    _url: zod.void(),
     name: zod.string().min(3).max(64).describe("Name of the catalog."),
     cores: UrlVersionedType(Cores)
       .describe("List of cores in this catalog.")
@@ -70,14 +71,7 @@ export const Catalog = zod
     systems: UrlVersionedType(Systems)
       .describe("List of systems in this catalog.")
       .optional(),
-    releases: zod
-      .union([
-        UrlOrRelative,
-        zod.object({
-          url: UrlOrRelative,
-          version: Version,
-        }),
-      ])
+    releases: UrlVersionedType(Releases)
       .describe("List of releases in this catalog.")
       .optional(),
     lastUpdated: zod.iso

@@ -4,3 +4,7 @@ export * as settings from "./settings";
 export * as utils from "./utils";
 
 export { TypeOf, ZodType, ZodSchema, Schema } from "zod";
+
+import * as zod from "zod";
+
+export const Any = zod.any();
