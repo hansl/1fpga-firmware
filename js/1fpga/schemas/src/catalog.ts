@@ -27,7 +27,19 @@ export const System = zod.object({
 });
 export type System = zod.TypeOf<typeof System>;
 
-export const Systems = zod.object({}).catchall(UrlVersionedType(System));
+export const Systems = zod.object({}).catchall(UrlVersionedType(System))
+  .check(ctx => {
+    // Check that all keys of the object is their uniqueName.
+    for (const [k, v] of Object.entries(ctx.value)) {
+      const u = (v as any)["uniqueName"];
+      if (k !== u) {
+        ctx.issues.push({
+          message: `key ${JSON.stringify(k)} !== uniqueName ${JSON.stringify(u)}`,
+          input: v,
+        });
+      }
+    }
+  });
 export type Systems = zod.TypeOf<typeof Systems>;
 
 export const Release = zod.object({

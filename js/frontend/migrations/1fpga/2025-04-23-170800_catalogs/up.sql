@@ -35,7 +35,11 @@ ALTER TABLE catalogs
     ADD COLUMN json JSONB;
 
 ALTER TABLE catalogs
-    DROP COLUMN last_updated;
+    DROP COLUMN last_updated_at;
+ALTER TABLE catalogs
+    RENAME COLUMN last_updated TO lastUpdated;
+ALTER TABLE catalogs
+    RENAME COLUMN update_pending TO updatePending;
 
 ALTER TABLE games
     DROP COLUMN games_id;

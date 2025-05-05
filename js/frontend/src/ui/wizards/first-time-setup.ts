@@ -6,7 +6,7 @@ import {
   Catalog,
   Core,
   DEFAULT_USERNAME,
-  GamesIdentification,
+  GamesIdentification, ICatalog,
   RemoteCatalog,
   User,
   WellKnownCatalogs,
@@ -30,6 +30,13 @@ import {
 } from "./wizard";
 import { oneLine, stripIndents } from "common-tags";
 import { selectCoresFromRemoteCatalog } from "@/ui/catalog/cores";
+import {
+  denormalize,
+  fetchAndCreateCatalogDbEntry,
+  listCatalogsFromDb,
+  NormalizedCatalog, NormalizedSystem,
+  NormalizedSystems,
+} from "@/services/catalog";
 
 /**
  * A wizard step that prompts the user for a password.
@@ -149,12 +156,11 @@ const createUserWizardStep = map(
 const SHOULD_RETRY_ADD_CATALOG = Symbol.for("SHOULD_RETRY_ADD_CATALOG");
 
 async function addWellKnownCatalog(
-  wellKnownCatalogs: WellKnownCatalogs,
-): Promise<Catalog | null | Symbol> {
+  catalog: WellKnownCatalogs,
+): Promise<ICatalog | null | Symbol> {
   while (true) {
     try {
-      const catalog = await RemoteCatalog.fetchWellKnown(wellKnownCatalogs);
-      return await Catalog.create(catalog, 0);
+      return await fetchAndCreateCatalogDbEntry(catalog);
     } catch (e) {
       console.error("Could not add 1fpga catalog:", e);
 
@@ -172,7 +178,7 @@ async function addWellKnownCatalog(
   }
 }
 
-async function addCustomCatalog(): Promise<Catalog | null | Symbol> {
+async function addCustomCatalog(): Promise<ICatalog | null | Symbol> {
   let url: string | null = null;
   while (true) {
     url = (await osd.prompt("Enter the URL of the catalog:")) || null;
@@ -181,8 +187,7 @@ async function addCustomCatalog(): Promise<Catalog | null | Symbol> {
     }
 
     try {
-      const catalog = await RemoteCatalog.fetch(url);
-      return await Catalog.create(catalog, 0);
+      return await fetchAndCreateCatalogDbEntry(url);
     } catch (e) {
       console.error("Could not add custom catalog:", e);
 
@@ -281,10 +286,7 @@ const catalogSetup = sequence(
     ),
   ),
   generate(async () => {
-    const [catalog, ...rest] = await Catalog.listCatalogs();
-    if (!catalog || rest.length !== 0) {
-      throw new Error("Should be exactly 1 catalog during the tutorial.");
-    }
+    const [catalog] = await listCatalogsFromDb();
 
     return call(async () => {
       const remote = await RemoteCatalog.fetch(catalog.url);
@@ -302,12 +304,11 @@ const catalogSetup = sequence(
         return;
       }
 
-      // Update the binaries table to make sure we check for updates.
-      const releases = await remote.fetchReleases();
-      for (const name of Object.getOwnPropertyNames(releases)) {
-        const binary = releases[name];
-        if (binary) {
-          await Binary.create(binary, catalog);
+      const normalizedCatalog: NormalizedCatalog = JSON.parse(catalog.json);
+      if (normalizedCatalog.systems) {
+        const systems = denormalize(normalizedCatalog.systems);
+        for (const system of Object.values(systems) as NormalizedSystem[]) {
+          
         }
       }
 

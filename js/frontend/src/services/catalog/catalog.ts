@@ -1,6 +1,19 @@
 import * as osd from "1fpga:osd";
 import type * as schemas from "@1fpga/schemas";
-import { fetchJsonAndValidate, ValidationError } from "@/utils";
+import { fetchJsonAndValidate, sql, ValidationError } from "@/utils";
+import { Row } from "1fpga:db";
+
+export interface CatalogRow extends Row {
+  id: number;
+  name: string;
+  url: string;
+  lastUpdated: string;
+  version: string;
+  priority: number;
+  updatePending: boolean;
+
+  json: string;
+}
 
 /**
  * Understand whether an inner object is a URL or versioned URL or actual
@@ -49,27 +62,30 @@ type Normalized<T> = T & {
   _version?: string;
 };
 
+export function denormalize<N extends Normalized<T>, T>(n: N): Omit<T, "_url" | "_version"> {
+  const { _url, _version, ...d } = n;
+  return d;
+}
+
 export type NormalizedSystem = Normalized<schemas.catalog.System>;
 
 export type NormalizedSystems = Normalized<
-  schemas.catalog.Systems & Record<string, NormalizedSystem>
+  Record<string, NormalizedSystem>
 >;
 
 export type NormalizedCore = Normalized<schemas.catalog.Core>;
 
 export type NormalizedCores = Normalized<
-  schemas.catalog.Cores & Record<string, NormalizedCore>
+  Record<string, NormalizedCore>
 >;
 
 /**
  * A normalized catalog with cores.
  */
-export type NormalizedCatalog = Normalized<
-  Omit<schemas.catalog.Catalog, "cores"> & {
-    cores?: NormalizedCores;
-    systems?: NormalizedSystems;
-  }
->;
+export type NormalizedCatalog = Normalized<schemas.catalog.Catalog> & {
+  cores?: NormalizedCores;
+  systems?: NormalizedSystems;
+};
 
 async function fetchInnerOfRecord<T, O>(
   record: Normalized<T>,
@@ -95,16 +111,16 @@ async function fetchInner<T extends schemas.ZodType>(
   baseUrl: string,
   record: unknown,
   schema: schemas.ZodType,
-  innerSchema: schemas.ZodType,
+  innerSchema?: schemas.ZodType,
 ): Promise<Normalized<T> | undefined> {
   if (record === undefined) {
     return undefined;
   }
 
-  return await fetchInnerOfRecord(
-    await fetchVersioned(baseUrl, record, schema),
-    innerSchema,
-  );
+  const inner = await fetchVersioned(baseUrl, record, schema);
+  if (innerSchema) {
+    return await fetchInnerOfRecord(inner, innerSchema);
+  }
 }
 
 export async function fetchAndNormalizeCatalog(
@@ -147,7 +163,6 @@ export async function fetchAndNormalizeCatalog(
       url,
       catalog.releases,
       schemas.catalog.Releases,
-      schemas.Any,
     );
 
     // At this point all internals have been normalized.
@@ -169,4 +184,51 @@ export async function fetchAndNormalizeCatalog(
       throw e;
     }
   }
+}
+
+export async function fetchAndCreateCatalogDbEntry(
+  url: string,
+  priority: number = 0,
+): Promise<ICatalog> {
+  const json = await fetchAndNormalizeCatalog(url);
+  await sql`INSERT INTO catalogs ${sql.insertValues({
+      name: json.name,
+      url: json._url,
+      last_updated: json.lastUpdated || null,
+      version: json.version,
+      priority,
+      json: JSON.stringify(json),
+  })}`;
+
+  const [catalog] = await sql<CatalogRow>`SELECT *
+                                          FROM catalogs
+                                          WHERE url = ${url}
+                                          LIMIT 1`;
+  return catalog;
+}
+
+
+export interface ListCatalogsOptions {
+  updatePending?: boolean;
+  url?: string;
+}
+
+export async function listCatalogsFromDb(
+  options: ListCatalogsOptions = {},
+): Promise<CatalogRow[]> {
+  const rows = await sql<CatalogRow>`SELECT *
+                                     FROM catalogs
+                                     WHERE ${sql.and(
+                                             true,
+                                             options.url
+                                                     ? sql`url =
+                                                     ${options.url}`
+                                                     : undefined,
+                                             options.updatePending
+                                                     ? sql`update_pending =
+                                                     ${options.updatePending}`
+                                                     : undefined,
+                                     )}
+  `;
+  return rows.sort((a, b) => a.priority - b.priority);
 }
