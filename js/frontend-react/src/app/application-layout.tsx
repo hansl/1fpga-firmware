@@ -1,16 +1,20 @@
-"use client";
+'use client';
 
-import { ReactNode } from "react";
-import { SidebarLayout } from "@/components/ui-kit/sidebar-layout";
-import { Navbar } from "@/components/ui-kit/navbar";
 import {
-  ChatBubbleLeftRightIcon, CircleStackIcon,
+  ChatBubbleLeftRightIcon,
+  CircleStackIcon,
   CpuChipIcon,
   HomeIcon,
   PlayIcon,
   Squares2X2Icon,
   StopIcon,
-} from "@heroicons/react/24/solid";
+} from '@heroicons/react/24/solid';
+import { SiDiscord, SiDiscourse } from '@icons-pack/react-simple-icons';
+import GearIcon from 'next/dist/client/components/react-dev-overlay/ui/icons/gear-icon';
+import { usePathname, useRouter } from 'next/navigation';
+import { ReactNode } from 'react';
+
+import { Navbar } from '@/components/ui-kit/navbar';
 import {
   Sidebar,
   SidebarBody,
@@ -21,16 +25,14 @@ import {
   SidebarLabel,
   SidebarSection,
   SidebarSpacer,
-} from "@/components/ui-kit/sidebar";
-import { usePathname, useRouter } from "next/navigation";
-import { useOneFpga } from "@/hooks";
-import GearIcon from "next/dist/client/components/react-dev-overlay/ui/icons/gear-icon";
-import { SiDiscord, SiDiscourse } from "@icons-pack/react-simple-icons";
+} from '@/components/ui-kit/sidebar';
+import { SidebarLayout } from '@/components/ui-kit/sidebar-layout';
+import { useOneFpga } from '@/hooks';
 
 function IsOneFpgaRunning({
-                            fallback = null,
-                            children,
-                          }: {
+  fallback = null,
+  children,
+}: {
   fallback?: ReactNode;
   children: ReactNode;
 }) {
@@ -61,17 +63,14 @@ export function ApplicationLayout({ children }: { children: ReactNode }) {
 
           <SidebarBody>
             <SidebarSection>
-              <SidebarItem
-                current={pathname === "/"}
-                onClick={() => router.push("/")}
-              >
+              <SidebarItem current={pathname === '/'} onClick={() => router.push('/')}>
                 <HomeIcon />
                 <SidebarLabel>Home</SidebarLabel>
               </SidebarItem>
               <IsOneFpgaRunning>
                 <SidebarItem
-                  current={pathname.startsWith("/osd")}
-                  onClick={() => router.push("/osd")}
+                  current={pathname.startsWith('/osd')}
+                  onClick={() => router.push('/osd')}
                 >
                   <Squares2X2Icon />
                   <SidebarLabel>OSD</SidebarLabel>
@@ -80,8 +79,8 @@ export function ApplicationLayout({ children }: { children: ReactNode }) {
 
               <SidebarDivider />
               <SidebarItem
-                current={pathname.startsWith("/settings")}
-                onClick={() => router.push("/settings")}
+                current={pathname.startsWith('/settings')}
+                onClick={() => router.push('/settings')}
               >
                 <GearIcon />
                 <SidebarLabel>Settings</SidebarLabel>

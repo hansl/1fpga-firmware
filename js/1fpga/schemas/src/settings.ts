@@ -1,11 +1,11 @@
-import * as zod from "zod";
+import * as zod from 'zod';
 
 export const StartOnSetting = zod.union([
   zod.object({
-    kind: zod.enum(["main-menu", "game-library", "last-game"]),
+    kind: zod.enum(['main-menu', 'game-library', 'last-game']),
   }),
   zod.object({
-    kind: zod.literal("start-game"),
+    kind: zod.literal('start-game'),
     game: zod.number(),
   }),
 ]);

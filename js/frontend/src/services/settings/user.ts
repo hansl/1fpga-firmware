@@ -1,24 +1,26 @@
-import { settings } from "@1fpga/schemas";
-import { DbStorage } from "../storage";
-import { User } from "../user";
-import { getOrFail } from "@/services/settings/utils";
-import { GameSortOrder } from "@/services/database/games";
+import { settings } from '@1fpga/schemas';
+
+import { GameSortOrder } from '@/services/database/games';
+import { getOrFail } from '@/services/settings/utils';
+
+import { DbStorage } from '../storage';
+import { User } from '../user';
 
 /**
  * The possible values for the `startOn` setting.
  * If you update this setting, remember to also update the `start-on.json` schema.
  */
 export enum StartOnKind {
-  MainMenu = "main-menu",
-  GameLibrary = "game-library",
-  LastGamePlayed = "last-game",
-  SpecificGame = "start-game",
+  MainMenu = 'main-menu',
+  GameLibrary = 'game-library',
+  LastGamePlayed = 'last-game',
+  SpecificGame = 'start-game',
 }
 
-const START_ON_KEY = "startOn";
-const DEV_TOOLS_KEY = "devTools";
-const GAME_SORT_KEY = "gameSort";
-const DEFAULT_VOLUME_KEY = "defaultVolume";
+const START_ON_KEY = 'startOn';
+const DEV_TOOLS_KEY = 'devTools';
+const GAME_SORT_KEY = 'gameSort';
+const DEFAULT_VOLUME_KEY = 'defaultVolume';
 
 export class UserSettings {
   public static async forLoggedInUser(): Promise<UserSettings> {

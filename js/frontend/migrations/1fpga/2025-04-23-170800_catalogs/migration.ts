@@ -1,22 +1,24 @@
-import * as osd from "1fpga:osd";
-import { SqlTag } from "@sqltags/core";
-import { oneLine } from "common-tags";
+import { SqlTag } from '@sqltags/core';
+import { oneLine } from 'common-tags';
 
-export async function post(
-  _: SqlTag<unknown, unknown>,
-  { initial }: { initial: boolean },
-) {
+import * as osd from '1fpga:osd';
+
+import { resetAll } from '@/utils';
+
+export async function post(_: SqlTag<unknown, unknown>, { initial }: { initial: boolean }) {
   if (initial) {
     return;
   }
 
   await osd.alert(
-    "Catalogs must be deleted",
+    '1FPGA must be reset',
     oneLine`
-      The catalog format changed significantly with the latest release.
-      We have to remove all catalogs from your local installation.
-      You will need to add them again and reidentify your games.
-      This should be now much quicker.
+      A breaking change occurred that makes all database information invalid.
+      This includes identified games, users and settings.
+      You will have to restart the first time setup again.
+      Things will be smoother from now on.
   `,
   );
+
+  await resetAll(true);
 }

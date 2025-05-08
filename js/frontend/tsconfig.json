@@ -8,8 +8,7 @@
       "src",
       "codegen"
     ],
-    "lib": [
-    ],
+    "lib": [],
     "strict": true,
     "resolveJsonModule": true,
     "esModuleInterop": true,
@@ -18,12 +17,6 @@
     "paths": {
       "@/*": [
         "./src/*"
-      ],
-      "schemas:*": [
-        "codegen/schemas/*"
-      ],
-      "schemas-json:*": [
-        "schemas/*"
       ],
       "1fpga:*": [
         "../1fpga/types/1fpga/*"

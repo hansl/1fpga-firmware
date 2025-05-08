@@ -14,8 +14,8 @@ export function compareVersions(
     return b === null || b === undefined ? 0 : 1;
   } else if (b === null || b === undefined) {
     return -1;
-  } else if (typeof a === "number") {
-    if (typeof b === "number") {
+  } else if (typeof a === 'number') {
+    if (typeof b === 'number') {
       return a - b;
     } else {
       a = a.toString();
@@ -24,8 +24,8 @@ export function compareVersions(
     b = b.toString();
   }
 
-  const aParts = a.split(".");
-  const bParts = b.split(".");
+  const aParts = a.split('.');
+  const bParts = b.split('.');
   const length = Math.max(aParts.length, bParts.length);
   const zipped = Array.from({ length }).map((_, i) => [aParts[i], bParts[i]]);
 

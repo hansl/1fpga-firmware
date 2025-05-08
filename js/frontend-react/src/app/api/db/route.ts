@@ -1,4 +1,4 @@
-import { connect } from "./database";
+import { connect } from './database';
 
 export const GET = () => {
   return new Response(null, { status: 403 });
@@ -12,41 +12,41 @@ export const POST = async (req: Request) => {
     const db = await connect(path);
 
     if (query === undefined) {
-      return new Response("No query specified", {
+      return new Response('No query specified', {
         status: 400,
       });
-    } else if (query === "") {
-      return Response.json("null");
+    } else if (query === '') {
+      return Response.json('null');
     }
 
     switch (mode) {
-      case "exec": {
+      case 'exec': {
         await db.exec(query.toString());
-        return Response.json("null");
+        return Response.json('null');
       }
 
-      case "run": {
+      case 'run': {
         await db.run(query.toString(), ...(bindings ?? []));
 
-        return Response.json("null");
+        return Response.json('null');
       }
 
-      case "many": {
+      case 'many': {
         for (const b of bindings ?? []) {
           await db.run(query.toString(), ...(b ?? []));
         }
 
-        return Response.json("null");
+        return Response.json('null');
       }
 
-      case "get": {
+      case 'get': {
         const result = await db.get(query.toString(), ...(bindings ?? []));
         // Return the items as a JSON response with status 200
         return Response.json([result]);
       }
 
       default:
-      case "query": {
+      case 'query': {
         const result = await db.all(query.toString(), ...(bindings ?? []));
         // Return the items as a JSON response with status 200
         return Response.json(result);

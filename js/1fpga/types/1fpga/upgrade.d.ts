@@ -19,7 +19,7 @@
 /**
  * This module provides functions for upgrading the firmware.
  */
-declare module "1fpga:upgrade" {
+declare module '1fpga:upgrade' {
   /**
    * Perform a firmware upgrade.
    *
@@ -30,11 +30,7 @@ declare module "1fpga:upgrade" {
    *                  manually before proceeding.
    * @throws If the upgrade fails.
    */
-  export function upgrade(
-    name: string,
-    path: string,
-    signature?: Uint8Array,
-  ): Promise<void>;
+  export function upgrade(name: string, path: string, signature?: Uint8Array): Promise<void>;
 
   /**
    * Verify a firmware file. This is a convenience to check if the firmware
@@ -45,8 +41,5 @@ declare module "1fpga:upgrade" {
    * @throws string If the file path is wrong or the signature is the invalid
    *                format. This will not throw if the signature is invalid.
    */
-  export function verifySignature(
-    path: string,
-    signature: Uint8Array,
-  ): Promise<boolean>;
+  export function verifySignature(path: string, signature: Uint8Array): Promise<boolean>;
 }

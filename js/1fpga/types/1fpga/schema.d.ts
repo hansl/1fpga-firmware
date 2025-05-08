@@ -1,6 +1,6 @@
 // Schema functions.
 
-declare module "1fpga:schema" {
+declare module '1fpga:schema' {
   /**
    * Add a schema to the schema registry.
    * @param schema The schema to add.
@@ -26,8 +26,5 @@ declare module "1fpga:schema" {
    * @throws If the value is invalid, an error is thrown with all validation errors.
    * @throws If the schema ID is not found, an error is thrown.
    */
-  export function validateWithId<T>(
-    value: unknown,
-    schemaId: string,
-  ): value is T;
+  export function validateWithId<T>(value: unknown, schemaId: string): value is T;
 }

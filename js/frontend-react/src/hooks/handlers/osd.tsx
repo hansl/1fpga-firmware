@@ -1,12 +1,7 @@
-import { createView, register } from "@/hooks";
-import {
-  OsdAlert,
-  OsdPrompt,
-  OsdSelectFile,
-  OsdShow,
-  OsdTextMenu,
-} from "@/components/osd";
-import { SelectFileOptions } from "1fpga:osd";
+import { SelectFileOptions } from '1fpga:osd';
+
+import { OsdAlert, OsdPrompt, OsdSelectFile, OsdShow, OsdTextMenu } from '@/components/osd';
+import { createView, register } from '@/hooks';
 
 export async function alert({
   messageOrOptions,
@@ -23,7 +18,7 @@ export async function alert({
 }): Promise<void | null | number> {
   // Resolve which version of alert was called.
   const { message, title, choices } =
-    typeof messageOrOptions !== "string"
+    typeof messageOrOptions !== 'string'
       ? messageOrOptions
       : {
           message: orMessage ?? messageOrOptions,
@@ -31,13 +26,8 @@ export async function alert({
         };
 
   let { promise, resolve } = Promise.withResolvers<number | null>();
-  createView("osd", () => (
-    <OsdAlert
-      message={message}
-      title={title}
-      choices={choices}
-      resolve={resolve}
-    />
+  createView('osd', () => (
+    <OsdAlert message={message} title={title} choices={choices} resolve={resolve} />
   ));
 
   const result = await promise;
@@ -46,9 +36,7 @@ export async function alert({
 
 async function textMenu({ options }: any) {
   let { promise, resolve, reject } = Promise.withResolvers<any>();
-  createView("osd", () => (
-    <OsdTextMenu options={options} resolve={resolve} reject={reject} />
-  ));
+  createView('osd', () => <OsdTextMenu options={options} resolve={resolve} reject={reject} />);
 
   return await promise;
 }
@@ -68,18 +56,11 @@ async function prompt({
     title,
     default: defaultValue,
     message,
-  } = typeof messageOrOptions === "string"
-    ? { message: messageOrOptions }
-    : messageOrOptions;
+  } = typeof messageOrOptions === 'string' ? { message: messageOrOptions } : messageOrOptions;
 
   const { promise, resolve } = Promise.withResolvers<string | undefined>();
-  createView("osd", () => (
-    <OsdPrompt
-      title={title}
-      default={defaultValue}
-      message={message}
-      resolve={resolve}
-    />
+  createView('osd', () => (
+    <OsdPrompt title={title} default={defaultValue} message={message} resolve={resolve} />
   ));
 
   return await promise;
@@ -96,13 +77,8 @@ export async function selectFile({
 }): Promise<string | undefined> {
   const { promise, resolve } = Promise.withResolvers<string | undefined>();
 
-  createView("osd", () => (
-    <OsdSelectFile
-      title={title}
-      initialDir={initialDir}
-      options={options}
-      resolve={resolve}
-    />
+  createView('osd', () => (
+    <OsdSelectFile title={title} initialDir={initialDir} options={options} resolve={resolve} />
   ));
 
   return promise;
@@ -122,13 +98,13 @@ export async function show({
     message = messageOrTitle;
   }
 
-  createView("osd", () => <OsdShow title={title} message={message} />);
+  createView('osd', () => <OsdShow title={title} message={message} />);
 }
 
 export function registerHandlers() {
-  register("osd.alert", alert);
-  register("osd.textMenu", textMenu);
-  register("osd.prompt", prompt);
-  register("osd.selectFile", selectFile);
-  register("osd.show", show);
+  register('osd.alert', alert);
+  register('osd.textMenu', textMenu);
+  register('osd.prompt', prompt);
+  register('osd.selectFile', selectFile);
+  register('osd.show', show);
 }

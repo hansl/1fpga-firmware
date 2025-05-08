@@ -1,18 +1,20 @@
-import { TextMenuItem, TextMenuOptions } from "1fpga:osd";
-import { Heading, Subheading } from "@/components/ui-kit/heading";
-import { Button } from "@/components/ui-kit/button";
-import { Divider } from "@/components/ui-kit/divider";
+import { ArrowLeftIcon, Bars3BottomLeftIcon } from '@heroicons/react/24/solid';
+
+import { TextMenuItem, TextMenuOptions } from '1fpga:osd';
+
+import { PropertyList } from '@/components';
+import { Badge } from '@/components/ui-kit/badge';
+import { Button } from '@/components/ui-kit/button';
+import { Divider } from '@/components/ui-kit/divider';
+import { Heading, Subheading } from '@/components/ui-kit/heading';
+import { Link } from '@/components/ui-kit/link';
 import {
   Sidebar,
   SidebarDivider,
   SidebarHeader,
   SidebarItem,
   SidebarLabel,
-} from "@/components/ui-kit/sidebar";
-import { Badge } from "@/components/ui-kit/badge";
-import { Link } from "@/components/ui-kit/link";
-import { PropertyList } from "@/components";
-import { ArrowLeftIcon, Bars3BottomLeftIcon } from "@heroicons/react/24/solid";
+} from '@/components/ui-kit/sidebar';
 
 export interface OsdTextMenuProps<R> {
   resolve: (value: R | void | undefined) => void;
@@ -32,13 +34,7 @@ function Separator() {
   return <SidebarDivider className="my-1! mx-0!" />;
 }
 
-function OsdTextMenuLabel({
-  label,
-  marker,
-}: {
-  label: string;
-  marker?: string;
-}) {
+function OsdTextMenuLabel({ label, marker }: { label: string; marker?: string }) {
   return (
     <SidebarHeader className="w-full p-2! border-0! font-bold bg-white/5">
       <SidebarLabel className="w-80">
@@ -50,7 +46,7 @@ function OsdTextMenuLabel({
 }
 
 function OsdTextMenuItem<R>({ item, i, resolve }: OsdTextMenuItemProps<R>) {
-  if (typeof item === "string") {
+  if (typeof item === 'string') {
     if (item.match(/^-+$/)) {
       return <Separator />;
     }
@@ -93,11 +89,7 @@ function OsdTextMenuItem<R>({ item, i, resolve }: OsdTextMenuItemProps<R>) {
   );
 }
 
-export function OsdTextMenu<R>({
-  options,
-  resolve,
-  reject,
-}: OsdTextMenuProps<R>) {
+export function OsdTextMenu<R>({ options, resolve, reject }: OsdTextMenuProps<R>) {
   async function back() {
     if (options.back !== undefined) {
       if (options.back instanceof Function) {

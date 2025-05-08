@@ -1,12 +1,12 @@
-import * as db from "1fpga:db";
-import * as net from "1fpga:net";
-import * as osd from "1fpga:osd";
+import * as db from '1fpga:db';
+import * as net from '1fpga:net';
+import * as osd from '1fpga:osd';
 
 export async function fetchDbAndValidate<T>(
   url: string,
   validate?: (db: db.Db) => boolean | Promise<boolean>,
   options?: {
-    path?: string,
+    path?: string;
     allowRetry?: boolean;
   },
 ): Promise<db.Db> {
@@ -31,14 +31,14 @@ export async function fetchDbAndValidate<T>(
       }
 
       let message = (e as any)?.message ?? `${e}`;
-      if (message.toString() == "[object Object]" || !message) {
+      if (message.toString() == '[object Object]' || !message) {
         message = JSON.stringify(e);
       }
 
       const choice = await osd.alert({
-        title: "Error fetching JSON",
+        title: 'Error fetching JSON',
         message: `URL: ${url}\n\n${(e as any)?.message ?? JSON.stringify(e)}\n`,
-        choices: ["Retry fetching", "Cancel"],
+        choices: ['Retry fetching', 'Cancel'],
       });
 
       if (choice === 1) {

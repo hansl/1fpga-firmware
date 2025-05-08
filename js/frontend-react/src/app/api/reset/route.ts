@@ -1,7 +1,9 @@
-import { resetAll } from "../db/database";
-import * as fs from "node:fs/promises";
-import * as path from "node:path";
-import { pathOf } from "@/utils/server/filesystem";
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+
+import { pathOf } from '@/utils/server/filesystem';
+
+import { resetAll } from '../db/database';
 
 export const GET = () => {
   return new Response(null, { status: 403 });
@@ -13,7 +15,7 @@ export async function POST() {
   // content of symlinks. We don't want that.
   async function rm(dir: string) {
     await Promise.all(
-      (await fs.readdir(dir)).map(async (name) => {
+      (await fs.readdir(dir)).map(async name => {
         const p = path.join(dir, name);
         const stat = await fs.lstat(p);
 
@@ -31,9 +33,9 @@ export async function POST() {
     await resetAll();
 
     // First, delete everything.
-    await rm(await pathOf("/"));
+    await rm(await pathOf('/'));
 
-    return new Response("");
+    return new Response('');
   } catch (e) {
     return new Response(`${e}`, { status: 500 });
   }

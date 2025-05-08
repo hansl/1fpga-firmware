@@ -4,16 +4,14 @@ export async function writeFile(
 ): Promise<void> {
   if (data instanceof ArrayBuffer) {
     data = new Uint8Array(data);
-  } else if (typeof data === "string") {
+  } else if (typeof data === 'string') {
     data = new TextEncoder().encode(data);
   }
 
-  let bytes = Array.from(data, (byte) =>
-    byte.toString(16).padStart(2, "0"),
-  ).join("");
+  let bytes = Array.from(data, byte => byte.toString(16).padStart(2, '0')).join('');
 
-  const result = await fetch("/api/fs/write", {
-    method: "POST",
+  const result = await fetch('/api/fs/write', {
+    method: 'POST',
     body: JSON.stringify({
       path,
       bytes,
@@ -30,8 +28,8 @@ export async function writeFile(
 // export function readTextFile(path: string): Promise<string>;
 
 export async function deleteFile(path: string): Promise<void> {
-  const result = await fetch("/api/fs/rm", {
-    method: "POST",
+  const result = await fetch('/api/fs/rm', {
+    method: 'POST',
     body: JSON.stringify({ path }),
   });
 
@@ -45,8 +43,8 @@ export async function deleteFile(path: string): Promise<void> {
 // export function isFile(path: string): Promise<boolean>;
 
 export async function mkdir(path: string, all?: boolean): Promise<void> {
-  const result = await fetch("/api/fs/mkdir", {
-    method: "POST",
+  const result = await fetch('/api/fs/mkdir', {
+    method: 'POST',
     body: JSON.stringify({ path, all }),
   });
 
@@ -56,8 +54,8 @@ export async function mkdir(path: string, all?: boolean): Promise<void> {
 }
 
 export async function rmdir(path: string, recursive?: boolean): Promise<void> {
-  const result = await fetch("/api/fs/rmdir", {
-    method: "POST",
+  const result = await fetch('/api/fs/rmdir', {
+    method: 'POST',
     body: JSON.stringify({ path, recursive }),
   });
 
@@ -67,7 +65,7 @@ export async function rmdir(path: string, recursive?: boolean): Promise<void> {
 }
 
 export function isDir(path: string): Promise<boolean> {
-  throw new Error("Not implemented");
+  throw new Error('Not implemented');
 }
 
 export async function findAllFiles(
@@ -75,37 +73,27 @@ export async function findAllFiles(
   options?: { extensions?: string[] },
 ): Promise<string[]> {
   const response = await fetch(`/api/fs/list`, {
-    method: "POST",
+    method: 'POST',
     body: JSON.stringify({
       dir: root,
       recursive: true,
+      extensions: options?.extensions,
     }),
   });
   if (!response.ok) {
     throw new Error(`HTTP error: ${response.statusText}`);
   }
   let all: [string, boolean][] = await response.json();
-  debugger;
-  if (options?.extensions) {
-    all = all.filter(([name]) => {
-      return options.extensions?.some((ext) => name.endsWith(`.${ext}`));
-    });
-  }
 
-  const files = all
-    .filter(([_, isDir]) => !isDir)
-    .map(([name]) => `${root}/${name}`);
-  console.log(files);
+  const files = all.filter(([_, isDir]) => !isDir).map(([name]) => `${root}/${name}`);
   return files;
 }
 
 export function sha256(path: string): Promise<string>;
 export function sha256(path: string[]): Promise<string[]>;
-export async function sha256(
-  path: string | string[],
-): Promise<string | string[]> {
+export async function sha256(path: string | string[]): Promise<string | string[]> {
   const response = await fetch(`/api/fs/sha256`, {
-    method: "POST",
+    method: 'POST',
     body: JSON.stringify({ path: Array.isArray(path) ? path : [path] }),
   });
 
@@ -123,11 +111,9 @@ export async function sha256(
 
 export function fileSize(path: string): Promise<number>;
 export function fileSize(path: string[]): Promise<number[]>;
-export async function fileSize(
-  path: string | string[],
-): Promise<number | number[]> {
+export async function fileSize(path: string | string[]): Promise<number | number[]> {
   const response = await fetch(`/api/fs/size`, {
-    method: "POST",
+    method: 'POST',
     body: JSON.stringify({ path: Array.isArray(path) ? path : [path] }),
   });
 

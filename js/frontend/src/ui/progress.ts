@@ -1,6 +1,7 @@
-import production from "consts:production";
-import * as osd from "1fpga:osd";
-import { oneLine } from "common-tags";
+import { oneLine } from 'common-tags';
+import production from 'consts:production';
+
+import * as osd from '1fpga:osd';
 
 const PARTITION_TOO_LARGE_MSEC = 500;
 const PARTITION_TOO_SMALL_MSEC = 200;

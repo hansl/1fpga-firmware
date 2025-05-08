@@ -1,15 +1,16 @@
-"use client";
+'use client';
 
-import { useOneFpga, useVersion } from "@/hooks";
-import { Heading, Subheading } from "@/components/ui-kit/heading";
-import { Divider } from "@/components/ui-kit/divider";
-import { Text } from "@/components/ui-kit/text";
-import { Button } from "@/components/ui-kit/button";
-import { Toggle } from "@/components/ui-kit/toggle";
-import { Input } from "@/components/ui-kit/input";
-import { TrashIcon } from "@heroicons/react/24/solid";
-import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { TrashIcon } from '@heroicons/react/24/solid';
+import { useRouter } from 'next/navigation';
+import { useState } from 'react';
+
+import { Button } from '@/components/ui-kit/button';
+import { Divider } from '@/components/ui-kit/divider';
+import { Heading, Subheading } from '@/components/ui-kit/heading';
+import { Input } from '@/components/ui-kit/input';
+import { Text } from '@/components/ui-kit/text';
+import { Toggle } from '@/components/ui-kit/toggle';
+import { useOneFpga, useVersion } from '@/hooks';
 
 export default function Home() {
   const { start, started, stop } = useOneFpga();
@@ -24,7 +25,7 @@ export default function Home() {
         await stop();
       } else {
         await start();
-        router.push("/osd");
+        router.push('/osd');
       }
     } finally {
       setDisabled(false);
@@ -32,8 +33,8 @@ export default function Home() {
   }
 
   async function doReset() {
-    if (confirm("Are you sure you want to reset the whole 1FPGA filesystem?")) {
-      await fetch("/api/reset", { method: "POST" });
+    if (confirm('Are you sure you want to reset the whole 1FPGA filesystem?')) {
+      await fetch('/api/reset', { method: 'POST' });
     }
   }
 
@@ -49,12 +50,7 @@ export default function Home() {
             <Text>Start (or stop) the 1FPGA frontend.</Text>
           </div>
           <div className="flex-col flex items-end">
-            <Toggle
-              name="start"
-              checked={started}
-              onChange={toggleStart}
-              disabled={disabled}
-            />
+            <Toggle name="start" checked={started} onChange={toggleStart} disabled={disabled} />
           </div>
         </section>
         <Divider className="my-10" soft />
@@ -97,9 +93,7 @@ export default function Home() {
                   pattern="\d+"
                   min={0}
                   disabled={disabled || started}
-                  onChange={(e) =>
-                    setVersion([e.target.valueAsNumber, version[1], version[2]])
-                  }
+                  onChange={e => setVersion([e.target.valueAsNumber, version[1], version[2]])}
                   value={version[0]}
                 />
               </div>
@@ -110,9 +104,7 @@ export default function Home() {
                   type="number"
                   pattern="\d+"
                   disabled={disabled || started}
-                  onChange={(e) =>
-                    setVersion([version[0], e.target.valueAsNumber, version[2]])
-                  }
+                  onChange={e => setVersion([version[0], e.target.valueAsNumber, version[2]])}
                   value={version[1]}
                 />
               </div>
@@ -123,9 +115,7 @@ export default function Home() {
                   type="number"
                   pattern="\d+"
                   disabled={disabled || started}
-                  onChange={(e) =>
-                    setVersion([version[0], version[1], e.target.valueAsNumber])
-                  }
+                  onChange={e => setVersion([version[0], version[1], e.target.valueAsNumber])}
                   value={version[2]}
                 />
               </div>

@@ -1,4 +1,4 @@
-import { sql } from "@/utils";
+import { sql } from '@/utils';
 
 interface UserStorageRow {
   value: string;
@@ -13,27 +13,23 @@ export class DbStorage {
     return new DbStorage(undefined);
   }
 
-  private constructor(private readonly userId: number | undefined) {
-  }
+  private constructor(private readonly userId: number | undefined) {}
 
-  async get<T>(
-    key: string,
-    validator?: (v: unknown) => v is T,
-  ): Promise<T | undefined> {
+  async get<T>(key: string, validator?: (v: unknown) => v is T): Promise<T | undefined> {
     let value: string | undefined;
     if (this.userId === undefined) {
       const rows = await sql<UserStorageRow>`SELECT value
-                                                   FROM global_storage
-                                                   WHERE key = ${key}
-                                                   LIMIT 1`;
+                                             FROM global_storage
+                                             WHERE key = ${key}
+                                             LIMIT 1`;
       value = rows[0]?.value;
     } else {
       let rows = await sql<UserStorageRow>`
-                SELECT value
-                FROM user_storage
-                WHERE key = ${key}
-                  AND user_id = ${this.userId}
-                LIMIT 1`;
+        SELECT value
+        FROM user_storage
+        WHERE key = ${key}
+          AND userId = ${this.userId}
+        LIMIT 1`;
       value = rows[0]?.value;
     }
 
@@ -54,29 +50,29 @@ export class DbStorage {
         key,
         value: valueJson,
       })}
-                      ON CONFLICT (key)
-            DO UPDATE SET value = excluded.value`;
+                ON CONFLICT (key)
+      DO UPDATE SET value = excluded.value`;
     } else {
       await sql`INSERT INTO user_storage ${sql.insertValues({
         key,
         value: valueJson,
-        user_id: this.userId,
+        userId: this.userId,
       })}
-                      ON CONFLICT (key, user_id)
-            DO UPDATE SET value = excluded.value`;
+                ON CONFLICT (key, userId)
+      DO UPDATE SET value = excluded.value`;
     }
   }
 
   async remove(key: string): Promise<void> {
     if (this.userId === undefined) {
       await sql`DELETE
-                      FROM global_storage
-                      WHERE key = ${key}`;
+                FROM global_storage
+                WHERE key = ${key}`;
     } else {
       await sql`DELETE
-                      FROM user_storage
-                      WHERE key = ${key}
-                        AND user_id = ${this.userId}`;
+                FROM user_storage
+                WHERE key = ${key}
+                  AND userId = ${this.userId}`;
     }
   }
 }

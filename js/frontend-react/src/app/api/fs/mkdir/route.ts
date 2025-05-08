@@ -1,5 +1,6 @@
-import * as fs from "node:fs/promises";
-import { pathOf } from "@/utils/server/filesystem";
+import * as fs from 'node:fs/promises';
+
+import { pathOf } from '@/utils/server/filesystem';
 
 export const GET = () => {
   return new Response(null, { status: 403 });

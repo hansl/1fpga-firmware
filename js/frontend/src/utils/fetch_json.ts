@@ -1,7 +1,8 @@
-import * as net from "1fpga:net";
-import * as osd from "1fpga:osd";
-import production from "consts:production";
-import { ValidateFunction } from "ajv";
+import { ValidateFunction } from 'ajv';
+import production from 'consts:production';
+
+import * as net from '1fpga:net';
+import * as osd from '1fpga:osd';
 
 export class ValidationError extends Error {
   constructor(public readonly errors: any) {
@@ -9,12 +10,10 @@ export class ValidationError extends Error {
       debugger;
     }
 
-    let message = "" + errors;
+    let message = '' + errors;
     if (Array.isArray(errors)) {
-      message =
-        `Validation error:\n  ` +
-        errors.map((e: any) => JSON.stringify(e)).join("\n  ");
-    } else if (errors.name === "$ZodError") {
+      message = `Validation error:\n  ` + errors.map((e: any) => JSON.stringify(e)).join('\n  ');
+    } else if (errors.name === '$ZodError') {
       message = errors.message;
     }
     super(message);
@@ -22,7 +21,7 @@ export class ValidationError extends Error {
 }
 
 export interface FetchJsonAndValidateOptions {
-  allowRetry?: boolean | "onlyFetch";
+  allowRetry?: boolean | 'onlyFetch';
   onPreValidate?: (json: any) => Promise<void>;
 }
 
@@ -38,9 +37,7 @@ export async function fetchJsonAndValidate<T>(
   validate:
     | ValidateFunction<T>
     | {
-        safeParseAsync(
-          v: unknown,
-        ): Promise<{ success: true } | { success: false; error: any }>;
+        safeParseAsync(v: unknown): Promise<{ success: true } | { success: false; error: any }>;
       }
     | ((json: unknown) => boolean | Promise<boolean>),
   { allowRetry = true, onPreValidate }: FetchJsonAndValidateOptions = {},
@@ -77,7 +74,7 @@ export async function fetchJsonAndValidate<T>(
         throw new ValidationError(error);
       }
     } catch (e) {
-      if (allowRetry === "onlyFetch") {
+      if (allowRetry === 'onlyFetch') {
         allowRetry = fetching;
       }
 
@@ -87,14 +84,14 @@ export async function fetchJsonAndValidate<T>(
       }
 
       let message = (e as any)?.message ?? `${e}`;
-      if (message.toString() == "[object Object]" || !message) {
+      if (message.toString() == '[object Object]' || !message) {
         message = JSON.stringify(e);
       }
 
       const choice = await osd.alert({
-        title: "Error fetching JSON",
+        title: 'Error fetching JSON',
         message: `URL: ${url}\n\n${(e as any)?.message ?? JSON.stringify(e)}\n`,
-        choices: ["Retry fetching", "Cancel"],
+        choices: ['Retry fetching', 'Cancel'],
       });
 
       if (choice === 1) {

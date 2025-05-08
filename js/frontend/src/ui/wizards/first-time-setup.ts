@@ -1,17 +1,15 @@
-import production from "consts:production";
-import * as osd from "1fpga:osd";
-import * as net from "1fpga:net";
+import { oneLine, stripIndents } from 'common-tags';
+
+import * as net from '1fpga:net';
+import * as osd from '1fpga:osd';
+
+import production from 'consts:production';
+
+import { DEFAULT_USERNAME, db, remote, user } from '@/services';
+import { selectCoresFromRemoteCatalog } from '@/ui/catalog/cores';
+
 import {
-  Binary,
-  Catalog,
-  Core,
-  DEFAULT_USERNAME,
-  GamesIdentification, ICatalog,
-  RemoteCatalog,
-  User,
-  WellKnownCatalogs,
-} from "@/services";
-import {
+  WizardStep,
   call,
   choice,
   conditional,
@@ -26,17 +24,7 @@ import {
   skipIf,
   value,
   wizard,
-  WizardStep,
-} from "./wizard";
-import { oneLine, stripIndents } from "common-tags";
-import { selectCoresFromRemoteCatalog } from "@/ui/catalog/cores";
-import {
-  denormalize,
-  fetchAndCreateCatalogDbEntry,
-  listCatalogsFromDb,
-  NormalizedCatalog, NormalizedSystem,
-  NormalizedSystems,
-} from "@/services/catalog";
+} from './wizard';
 
 /**
  * A wizard step that prompts the user for a password.
@@ -46,7 +34,7 @@ function password(
   message: string,
   length: number,
 ): WizardStep<string[] | undefined> {
-  return async (options) => {
+  return async options => {
     const password = await osd.promptPassword(title, message, length);
 
     if (password === null) {
@@ -64,14 +52,10 @@ function selectPath(
   title: string,
   options?: { initialDir?: string },
 ): WizardStep<string | undefined> {
-  return async (o) => {
-    const path = await osd.selectFile(
-      title,
-      options?.initialDir ?? "/media/fat",
-      {
-        directory: true,
-      },
-    );
+  return async o => {
+    const path = await osd.selectFile(title, options?.initialDir ?? '/media/fat', {
+      directory: true,
+    });
 
     if (path === undefined) {
       await o.previous();
@@ -86,7 +70,7 @@ function selectPath(
  * will succeed if both match.
  */
 function passwordAndVerify(
-  title: string = "Set Password",
+  title: string = 'Set Password',
   length = 4,
 ): WizardStep<string[] | undefined> {
   const fn = first(
@@ -97,14 +81,11 @@ function passwordAndVerify(
           return false;
         }
         // Passwords don't match.
-        if (
-          User.passwordToString(matches[0]) !==
-          User.passwordToString(matches[1])
-        ) {
+        if (user.User.passwordToString(matches[0]) !== user.User.passwordToString(matches[1])) {
           const should = await osd.alert({
-            title: "Error",
-            message: "Passwords do not match. Please try again.",
-            choices: ["OK", "Don't set password"],
+            title: 'Error',
+            message: 'Passwords do not match. Please try again.',
+            choices: ['OK', "Don't set a password"],
           });
           return should === 0;
         }
@@ -112,10 +93,10 @@ function passwordAndVerify(
       },
       map(
         sequence(
-          password(title, "Enter a new password:", length),
-          password(title, "Verify your password:", length),
+          password(title, 'Enter a new password:', length),
+          password(title, 'Verify your password:', length),
         ),
-        async (c) => {
+        async c => {
           const [password, check] = c;
           return password && check ? [password, check] : undefined;
         },
@@ -132,42 +113,43 @@ const createUserWizardStep = map(
   conditional(
     map(
       message(
-        "Set Password",
+        'Set Password',
         stripIndents`
           By default, there is one default user (named 'admin'). You'll be able to add more later.
           
           Would you like to set a password?
         `,
-        { choices: ["No", "Yes"] },
+        { choices: ['No', 'Yes'] },
       ),
-      async (choice) => choice === 1,
+      async choice => choice === 1,
     ),
     passwordAndVerify(),
   ),
-  async (password) => {
-    await User.create(DEFAULT_USERNAME, password ?? null, true);
-    const user = await User.login(DEFAULT_USERNAME, true);
-    if (user === null) {
-      throw new Error("Could not log in the user.");
+  async password => {
+    await user.User.create(DEFAULT_USERNAME, password ?? null, true);
+    const u = await user.User.login(DEFAULT_USERNAME, true);
+    if (u === null) {
+      throw new Error('Could not log in the user.');
     }
   },
 );
 
-const SHOULD_RETRY_ADD_CATALOG = Symbol.for("SHOULD_RETRY_ADD_CATALOG");
+const SHOULD_RETRY_ADD_CATALOG = Symbol.for('SHOULD_RETRY_ADD_CATALOG');
 
 async function addWellKnownCatalog(
-  catalog: WellKnownCatalogs,
-): Promise<ICatalog | null | Symbol> {
+  catalog: remote.catalog.WellKnownCatalogs,
+): Promise<db.catalog.CatalogRow | null | Symbol> {
   while (true) {
     try {
-      return await fetchAndCreateCatalogDbEntry(catalog);
+      const json = await remote.catalog.fetchAndNormalizeCatalog(catalog);
+      return await db.catalog.create(json, 0);
     } catch (e) {
-      console.error("Could not add 1fpga catalog:", e);
+      console.error('Could not add 1fpga catalog:', e);
 
       const should = await osd.alert({
-        title: "Error",
-        message: "Could not fetch the catalog. Please try again.",
-        choices: ["Retry", "Skip adding catalog", "Back"],
+        title: 'Error',
+        message: 'Could not fetch the catalog. Please try again.',
+        choices: ['Retry', 'Skip adding catalog', 'Back'],
       });
       if (should === 1) {
         return null;
@@ -178,23 +160,24 @@ async function addWellKnownCatalog(
   }
 }
 
-async function addCustomCatalog(): Promise<ICatalog | null | Symbol> {
+async function addCustomCatalog(): Promise<db.catalog.CatalogRow | null | Symbol> {
   let url: string | null = null;
   while (true) {
-    url = (await osd.prompt("Enter the URL of the catalog:")) || null;
+    url = (await osd.prompt('Enter the URL of the catalog:')) || null;
     if (url === null) {
       return null;
     }
 
     try {
-      return await fetchAndCreateCatalogDbEntry(url);
+      const json = await remote.catalog.fetchAndNormalizeCatalog(url);
+      return await db.catalog.create(json, 0);
     } catch (e) {
-      console.error("Could not add custom catalog:", e);
+      console.error('Could not add custom catalog:', e);
 
       const should = await osd.alert({
-        title: "Error",
-        message: "Could not fetch the catalog. Please try again.",
-        choices: ["Retry", "Skip adding catalog", "Back"],
+        title: 'Error',
+        message: 'Could not fetch the catalog. Please try again.',
+        choices: ['Retry', 'Skip adding catalog', 'Back'],
       });
       if (should === 1) {
         return null;
@@ -206,12 +189,12 @@ async function addCustomCatalog(): Promise<ICatalog | null | Symbol> {
 }
 
 const catalogAddStep = repeat(
-  async (result) => result === SHOULD_RETRY_ADD_CATALOG,
+  async result => result === SHOULD_RETRY_ADD_CATALOG,
   last(
     sequence(
       ignore(
         message(
-          "Catalogs - Introduction",
+          'Catalogs - Introduction',
           stripIndents`
             Catalogs are online repositories where you can download games and cores from.
             Catalogs can be added or removed later.
@@ -225,25 +208,25 @@ const catalogAddStep = repeat(
             // Skip this if we're online (only show warning while offline).
             async () => await net.isOnline(),
             repeat<number | undefined>(
-              async (choice) => choice === 0 && !(await net.isOnline()),
+              async choice => choice === 0 && !(await net.isOnline()),
               message(
-                "Catalogs (No Internet Connection)",
+                'Catalogs (No Internet Connection)',
                 oneLine`You need to be online to set up catalogs.
                   Please connect to the internet and try again. 
                   You can also skip this step and set up catalogs later.
                 `,
                 {
-                  choices: ["Try again", "Skip"],
+                  choices: ['Try again', 'Skip'],
                 },
               ),
             ),
             0,
           ),
-          async (c) => c !== undefined && c === 0,
+          async c => c !== undefined && c === 0,
         ),
 
         choice(
-          "Catalogs",
+          'Catalogs',
           stripIndents`
             1FPGA comes with a default catalog of officially supported cores and homebrew games.
             It also includes updates to 1FPGA itself, if you skip this, you will not be able to update your firmware.
@@ -252,25 +235,22 @@ const catalogAddStep = repeat(
           `,
           [
             [
-              "Add the 1FPGA catalog",
-              call(
-                async () =>
-                  await addWellKnownCatalog(WellKnownCatalogs.OneFpga),
-              ),
+              'Add the 1FPGA catalog',
+              call(async () => await addWellKnownCatalog(remote.catalog.WellKnownCatalogs.OneFpga)),
             ],
             ...(!production
               ? [
-                [
-                  "Add a local test catalog",
-                  call(
-                    async () =>
-                      await addWellKnownCatalog(WellKnownCatalogs.LocalTest),
-                  ),
-                ] as [string, WizardStep<null>],
-              ]
+                  [
+                    'Add a local test catalog',
+                    call(
+                      async () =>
+                        await addWellKnownCatalog(remote.catalog.WellKnownCatalogs.LocalTest),
+                    ),
+                  ] as [string, WizardStep<null>],
+                ]
               : []),
-            ["Add custom catalog", call(async () => await addCustomCatalog())],
-            ["Skip", async () => null],
+            ['Add custom catalog', call(async () => await addCustomCatalog())],
+            ['Skip', async () => null],
           ],
         ),
       ),
@@ -279,23 +259,18 @@ const catalogAddStep = repeat(
 );
 
 const catalogSetup = sequence(
-  ignore(
-    message(
-      "Catalogs - Installing Cores",
-      "Choose cores to install from the catalog.",
-    ),
-  ),
+  ignore(message('Catalogs - Installing Cores', 'Choose cores to install from the catalog.')),
   generate(async () => {
-    const [catalog] = await listCatalogsFromDb();
+    const [catalog] = await db.catalog.list();
 
     return call(async () => {
-      const remote = await RemoteCatalog.fetch(catalog.url);
-      const { cores, systems } = await selectCoresFromRemoteCatalog(remote, {
+      const catalog$: remote.catalog.NormalizedCatalog = JSON.parse(catalog.json);
+      const { cores, systems } = await selectCoresFromRemoteCatalog(catalog$, {
         installAll: true,
       });
       if (cores.length === 0 && systems.length === 0) {
         await osd.alert(
-          "Warning",
+          'Warning',
           stripIndents`
               Skipping core installation. This may cause some games to not work.
               You can always install cores later in the Download Center.
@@ -304,54 +279,46 @@ const catalogSetup = sequence(
         return;
       }
 
-      const normalizedCatalog: NormalizedCatalog = JSON.parse(catalog.json);
-      if (normalizedCatalog.systems) {
-        const systems = denormalize(normalizedCatalog.systems);
-        for (const system of Object.values(systems) as NormalizedSystem[]) {
-          
-        }
-      }
-
-      for (const system of (await catalog.listSystems()).filter((s) =>
-        systems.some((r) => r.uniqueName === s.uniqueName),
-      )) {
-        await system.install(catalog);
+      for (const system of systems) {
+        const p = await remote.systems.download(catalog$, system);
+        await db.systems.create(catalog, system, p ?? null);
       }
       for (const core of cores) {
-        await Core.install(core, catalog);
+        const p = await remote.cores.download(catalog$, core);
+        await db.cores.create(catalog, core, p ?? null);
       }
     });
   }),
   ignore(
     message(
-      "Catalogs",
-      "Catalogs have been set up. You can always add more catalogs later in the Download Center.",
+      'Catalogs',
+      'Catalogs have been set up. You can always add more catalogs later in the Download Center.',
     ),
   ),
 );
 
 const addGames = sequence(
-  map(selectPath("Select the directory with your games"), async (root) => {
-    console.log("Selected root: ", root);
+  map(selectPath('Select the directory with your games'), async root => {
+    console.log('Selected root: ', root);
     if (root === undefined) {
       return null;
     }
 
-    await GamesIdentification.addGamesFromRoot(root);
+    await db.gamesId.identify(root, { create: true });
   }),
 );
 
 const maybeAddGames = ignore(
   choice(
-    "Adding Games",
+    'Adding Games',
     oneLine`
     If you have games on your SD card, you can add them to the database now.
     This may take a while depending on the number of games you have.
     You can always add (or remove) games later.
   `,
     [
-      ["Add My Games", addGames],
-      ["Skip", value(null)],
+      ['Add My Games', addGames],
+      ['Skip', value(null)],
     ],
   ),
 );
@@ -359,8 +326,8 @@ const maybeAddGames = ignore(
 // The first message in the first time setup wizard.
 // Language has not been selected yet, so we can't use i18next.
 const firstMessage = message(
-  "First Time Setup",
-  "Welcome to 1FPGA. Follow this wizard to get started.\n",
+  'First Time Setup',
+  'Welcome to 1FPGA. Follow this wizard to get started.\n',
   { choices: ["Let's Go!"], noCancel: true },
 );
 
@@ -368,25 +335,23 @@ const firstMessage = message(
  * Runs the first time setup wizard.
  */
 export async function firstTimeSetup() {
-  console.warn("Running first time setup.");
+  console.warn('Running first time setup.');
   await wizard<any>(
     [
       firstMessage,
       createUserWizardStep,
       skipIf(
-        map(catalogAddStep, async (catalog) => catalog === null),
+        map(catalogAddStep, async catalog => catalog === null),
         sequence(catalogSetup, maybeAddGames),
       ),
-      message(
-        "First Time Setup",
-        "You're all set up! Welcome to 1FPGA and enjoy your stay.",
-        { choices: ["Thanks"] },
-      ),
+      message('First Time Setup', "You're all set up! Welcome to 1FPGA and enjoy your stay.", {
+        choices: ['Thanks'],
+      }),
     ],
-    async (err) => {
+    async err => {
       await osd.alert({
-        title: "Error",
-        message: "An unexpected error occurred: " + err.toString(),
+        title: 'Error',
+        message: 'An unexpected error occurred: ' + err.toString(),
       });
     },
   );

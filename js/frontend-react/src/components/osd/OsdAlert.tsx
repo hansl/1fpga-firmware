@@ -1,9 +1,9 @@
-import { Heading, Subheading } from "@/components/ui-kit/heading";
-import { Divider } from "@/components/ui-kit/divider";
-import { Button } from "@/components/ui-kit/button";
-import { Sidebar, SidebarItem } from "@/components/ui-kit/sidebar";
-import { PropertyList } from "@/components";
-import { Text } from "@/components/ui-kit/text";
+import { PropertyList } from '@/components';
+import { Button } from '@/components/ui-kit/button';
+import { Divider } from '@/components/ui-kit/divider';
+import { Heading, Subheading } from '@/components/ui-kit/heading';
+import { Sidebar, SidebarItem } from '@/components/ui-kit/sidebar';
+import { Text } from '@/components/ui-kit/text';
 
 export interface OsdAlertProps {
   title?: string;
@@ -56,20 +56,14 @@ export function OsdAlert({ title, message, choices, resolve }: OsdAlertProps) {
   );
 }
 
-export function OsdShow({
-                          title,
-                          message,
-                        }: {
-  title?: string;
-  message: string;
-}) {
+export function OsdShow({ title, message }: { title?: string; message: string }) {
   return (
     <>
       <Heading>Show</Heading>
       <Divider className="mt-4" />
 
       <Subheading className="mt-8 text-xl!">Title</Subheading>
-      <Text className="mt-4 text-xl!">{title ?? ""}</Text>
+      <Text className="mt-4 text-xl!">{title ?? ''}</Text>
 
       <Subheading className="mt-8 text-xl!">Message</Subheading>
       <Text className="ml-2 mt-4 text-lg!">{message}</Text>

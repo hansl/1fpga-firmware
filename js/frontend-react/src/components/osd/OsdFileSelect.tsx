@@ -1,17 +1,15 @@
-import { SelectFileOptions } from "1fpga:osd";
-import { Heading, Subheading } from "@/components/ui-kit/heading";
-import { Divider } from "@/components/ui-kit/divider";
-import { PropertyList } from "@/components";
-import { useEffect, useMemo, useState } from "react";
-import { Code, Text } from "@/components/ui-kit/text";
-import {
-  Sidebar,
-  SidebarItem,
-  SidebarLabel,
-} from "@/components/ui-kit/sidebar";
-import { Button } from "@/components/ui-kit/button";
-import { ArrowPathIcon, CheckIcon, XMarkIcon } from "@heroicons/react/24/solid";
-import normalize from "path-normalize";
+import { ArrowPathIcon, CheckIcon, XMarkIcon } from '@heroicons/react/24/solid';
+import normalize from 'path-normalize';
+import { useEffect, useMemo, useState } from 'react';
+
+import { SelectFileOptions } from '1fpga:osd';
+
+import { PropertyList } from '@/components';
+import { Button } from '@/components/ui-kit/button';
+import { Divider } from '@/components/ui-kit/divider';
+import { Heading, Subheading } from '@/components/ui-kit/heading';
+import { Sidebar, SidebarItem, SidebarLabel } from '@/components/ui-kit/sidebar';
+import { Code, Text } from '@/components/ui-kit/text';
 
 export interface OsdSelectFileProps {
   title: string;
@@ -20,12 +18,7 @@ export interface OsdSelectFileProps {
   resolve: (result: string | undefined) => void;
 }
 
-export function OsdSelectFile({
-  title,
-  initialDir,
-  options,
-  resolve,
-}: OsdSelectFileProps) {
+export function OsdSelectFile({ title, initialDir, options, resolve }: OsdSelectFileProps) {
   const [dir, setDirInner] = useState(initialDir);
   const [files, setFiles] = useState<[string, boolean, number][]>([]);
   const [loading, setLoading] = useState(true);
@@ -40,17 +33,15 @@ export function OsdSelectFile({
     (async () => {
       setLoading(true);
       try {
-        const response = await fetch("/api/fs/list", {
-          method: "POST",
+        const response = await fetch('/api/fs/list', {
+          method: 'POST',
           body: JSON.stringify({
             dir,
           }),
         });
 
         if (!response.ok) {
-          throw new Error(
-            `HTTP error: ${response.status} ${response.statusText}`,
-          );
+          throw new Error(`HTTP error: ${response.status} ${response.statusText}`);
         }
         const data: [string, boolean, number][] = await response.json();
         setFiles(data);
@@ -69,7 +60,7 @@ export function OsdSelectFile({
     let f = files.sort((a, b) => a[0].localeCompare(b[0]));
     if (options.extensions) {
       f = f.filter(([name, isDir]) => {
-        const ext = name.match(/\.[^.]+$/)?.[0] ?? "";
+        const ext = name.match(/\.[^.]+$/)?.[0] ?? '';
         return isDir || options.extensions?.includes(ext);
       });
     }
@@ -77,7 +68,7 @@ export function OsdSelectFile({
       f = f.filter(([_, isDir]) => isDir);
     }
     if (options.showHidden === true) {
-      f = f.filter(([name]) => !name.startsWith("."));
+      f = f.filter(([name]) => !name.startsWith('.'));
     }
     if (options.filterPattern) {
       const re = new RegExp(options.filterPattern);
@@ -93,12 +84,11 @@ export function OsdSelectFile({
     return f;
   }, [files, options]);
 
-  const canGoUp =
-    options.allowBack !== false ? dir !== "/" : dir.startsWith(initialDir);
+  const canGoUp = options.allowBack !== false ? dir !== '/' : dir.startsWith(initialDir);
 
   function goUp() {
-    const up = dir.replace(/[^\/]+\/?$/, "");
-    setDir(up === "" ? "/" : up);
+    const up = dir.replace(/[^\/]+\/?$/, '');
+    setDir(up === '' ? '/' : up);
   }
 
   function select(name: string, isDir: boolean) {
@@ -133,15 +123,10 @@ export function OsdSelectFile({
           <Sidebar className="min-h-5 mt-4 pl-1 border-l-2 border-white/5 [--gutter:--spacing(6)] lg:[--gutter:--spacing(10)]">
             {canGoUp && <SidebarItem onClick={goUp}>..</SidebarItem>}
             {filtered.map(([name, isDir, size]) => (
-              <SidebarItem
-                key={`${dir}/${name}`}
-                onClick={() => select(name, isDir)}
-              >
+              <SidebarItem key={`${dir}/${name}`} onClick={() => select(name, isDir)}>
                 <SidebarLabel>
-                  {options.showExtensions === false
-                    ? name.replace(/\.[^.]+$/, "")
-                    : name}
-                  {isDir ? "/" : ` (${size} bytes)`}
+                  {options.showExtensions === false ? name.replace(/\.[^.]+$/, '') : name}
+                  {isDir ? '/' : ` (${size} bytes)`}
                 </SidebarLabel>
               </SidebarItem>
             ))}
@@ -158,8 +143,8 @@ export function OsdSelectFile({
             <XMarkIcon />
             Cancel
           </Button>
-          {window.location.hostname === "localhost" && (
-            <Button className="mx-2" onClick={() => setRefresh((r) => !r)}>
+          {window.location.hostname === 'localhost' && (
+            <Button className="mx-2" onClick={() => setRefresh(r => !r)}>
               <ArrowPathIcon />
               Refresh
             </Button>

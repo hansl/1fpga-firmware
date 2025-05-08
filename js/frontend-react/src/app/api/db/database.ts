@@ -1,8 +1,9 @@
-import { Database, open } from "sqlite";
-import sqlite3 from "sqlite3";
-import * as fs from "node:fs";
-import path from "node:path";
-import * as filesystem from "@/utils/server/filesystem";
+import * as fs from 'node:fs';
+import path from 'node:path';
+import { Database, open } from 'sqlite';
+import sqlite3 from 'sqlite3';
+
+import * as filesystem from '@/utils/server/filesystem';
 
 const DB_MAP = new Map<string, Database>();
 
@@ -48,10 +49,10 @@ export async function reset(name: string) {
 }
 
 export async function resetAll() {
-  const dir = path.dirname(await pathOf(""));
+  const dir = path.dirname(await pathOf(''));
   const files = await fs.promises.readdir(dir);
 
-  for (const file of files.filter((n) => n.endsWith(".sqlite"))) {
+  for (const file of files.filter(n => n.endsWith('.sqlite'))) {
     await reset(file.slice(0, -7));
   }
 

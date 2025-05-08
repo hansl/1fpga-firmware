@@ -1,6 +1,7 @@
-import * as fs from "node:fs/promises";
-import * as path from "node:path";
-import { pathOf } from "@/utils/server/filesystem";
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+
+import { pathOf } from '@/utils/server/filesystem';
 
 export const GET = () => {
   return new Response(null, { status: 403 });
@@ -8,15 +9,20 @@ export const GET = () => {
 
 // Define the POST request handler function
 export const POST = async (req: Request) => {
-  async function walk(root: string, dir: string, recursive: boolean) {
+  async function walk(root: string, dir: string, recursive: boolean, extensions?: string[]) {
     const fileNames = await fs.readdir(dir);
     const files: [string, boolean, number][] = [];
     for (const name of fileNames) {
       const p = path.relative(root, path.join(dir, name));
-      console.log(p, root, path.join(dir, name));
+      const ext = path.extname(p).slice(1);
+
       const stat = await fs.stat(path.join(root, p));
       const isDir = stat.isDirectory();
-      files.push([p, isDir, stat.size]);
+
+      console.log(extensions, ext);
+      if (extensions === undefined || extensions.includes(ext)) {
+        files.push([p, isDir, stat.size]);
+      }
 
       if (isDir && recursive) {
         files.push(...(await walk(root, p, recursive)));
@@ -27,15 +33,15 @@ export const POST = async (req: Request) => {
   }
 
   try {
-    const { dir, recursive } = await req.json();
+    const { dir, recursive, extensions } = await req.json();
     const p = await pathOf(dir);
-    console.log("d", dir, p);
 
     if (!(await fs.stat(p)).isDirectory()) {
       return new Response(`Dir ${dir} not a directory`, { status: 400 });
     }
 
-    return Response.json(await walk(p, p, !!recursive));
+    const allFiles = await walk(p, p, !!recursive, extensions);
+    return Response.json(allFiles);
   } catch (e) {
     return new Response(`${e}`, { status: 500 });
   }

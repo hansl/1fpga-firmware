@@ -1,14 +1,15 @@
-import * as core from "1fpga:core";
-import { coreOsdMenu } from "@/ui/menus/core_osd";
-import { Commands, CoreCommandImpl } from "@/services/database/commands";
-import { Core } from "@/services/database/core";
-import { Games, Screenshot, User } from "@/services";
+import * as core from '1fpga:core';
+
+import { db } from '@/services';
+import { Commands, CoreCommandImpl } from '@/services/database/commands';
+import * as screenshots from '@/services/database/screenshots';
+import { coreOsdMenu } from '@/ui/menus/core_osd';
 
 export class ShowCoreMenuCommand extends CoreCommandImpl {
-  key = "showCoreMenu";
+  key = 'showCoreMenu';
   label = "Show the core's menu";
-  category = "Core";
-  default = ["'F12'", "Guide"];
+  category = 'Core';
+  default = ["'F12'", 'Guide'];
 
   // This is used to prevent the menu from being shown multiple times.
   shown = false;
@@ -17,7 +18,7 @@ export class ShowCoreMenuCommand extends CoreCommandImpl {
     if (!this.shown) {
       try {
         this.shown = true;
-        const coreDb = Core.running();
+        const coreDb = db.cores.running();
         let error = undefined;
         core.showOsd(async () => {
           try {
@@ -38,9 +39,9 @@ export class ShowCoreMenuCommand extends CoreCommandImpl {
 }
 
 export class QuitCoreCommand extends CoreCommandImpl {
-  key = "quitCore";
-  label = "Quit to the main menu";
-  category = "Core";
+  key = 'quitCore';
+  label = 'Quit to the main menu';
+  category = 'Core';
   default = "'F10'";
 
   execute(core: core.OneFpgaCore) {
@@ -49,34 +50,34 @@ export class QuitCoreCommand extends CoreCommandImpl {
 }
 
 export class ShowDebugLogCommand extends CoreCommandImpl {
-  key = "showDebugLog";
-  label = "Show a debug log";
-  category = "Developer";
+  key = 'showDebugLog';
+  label = 'Show a debug log';
+  category = 'Developer';
   default = "Ctrl + 'D'";
 
   execute() {
-    console.log("Debug log.");
+    console.log('Debug log.');
   }
 }
 
 export class ScreenshotCommand extends CoreCommandImpl {
-  key = "screenshot";
-  label = "Take a screenshot";
-  category = "Core";
+  key = 'screenshot';
+  label = 'Take a screenshot';
+  category = 'Core';
   default = "'SysReq'";
 
   async execute(core: core.OneFpgaCore) {
-    const user = User.loggedInUser(true);
-    const game = Games.getRunning();
+    // Verify we have a logged-in user.
+    const game = db.games.running();
     if (!game) {
-      console.error("No game running.");
+      console.error('No game running.');
       return;
     }
     try {
-      await Screenshot.create(game, core.screenshot());
-      console.log("Saved screenshot");
+      await screenshots.create(game, core.screenshot());
+      console.log('Saved screenshot');
     } catch (e) {
-      console.error("Failed to take a screenshot.", e);
+      console.error('Failed to take a screenshot.', e);
     }
   }
 }

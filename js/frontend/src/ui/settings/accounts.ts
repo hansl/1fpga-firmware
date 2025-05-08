@@ -1,6 +1,8 @@
-import { DEFAULT_USERNAME, User } from "@/services";
-import * as osd from "1fpga:osd";
-import { oneLine } from "common-tags";
+import { oneLine } from 'common-tags';
+
+import * as osd from '1fpga:osd';
+
+import { DEFAULT_USERNAME, User } from '@/services';
 
 async function addUser() {
   const username = await osd.prompt("Enter the new user's username:");
@@ -8,11 +10,11 @@ async function addUser() {
     return;
   }
   if (username === DEFAULT_USERNAME) {
-    await osd.alert("Invalid username");
+    await osd.alert('Invalid username');
     return;
   }
   if ((await User.byUsername(username)) !== null) {
-    await osd.alert("User already exists");
+    await osd.alert('User already exists');
     return;
   }
 
@@ -26,32 +28,24 @@ async function addUser() {
 
 async function changePassword(user: User) {
   while (true) {
-    const password = await osd.promptPassword(
-      "Enter your new password:",
-      "",
-      4,
-    );
+    const password = await osd.promptPassword('Enter your new password:', '', 4);
     if (password === null) {
       return;
     }
 
-    const password2 = await osd.promptPassword(
-      "Verify your new password:",
-      "",
-      4,
-    );
+    const password2 = await osd.promptPassword('Verify your new password:', '', 4);
     if (password2 === null) {
       continue;
     }
     if (User.passwordToString(password) === User.passwordToString(password2)) {
       await user.setPassword(password);
-      await osd.alert("Password changed successfully");
+      await osd.alert('Password changed successfully');
       return;
     }
 
     const choice = await osd.alert({
-      message: "Passwords do not match. Please try again.",
-      choices: ["Try Again", "Cancel"],
+      message: 'Passwords do not match. Please try again.',
+      choices: ['Try Again', 'Cancel'],
     });
     if (choice === 1) {
       return;
@@ -65,34 +59,34 @@ async function manageUser(user: User) {
     back: false,
     items: [
       {
-        label: "Clear Password...",
+        label: 'Clear Password...',
         select: async () => {
           await user.clearPassword();
-          await osd.alert("Password cleared successfully");
+          await osd.alert('Password cleared successfully');
           return false;
         },
       },
       {
-        label: "Delete User",
+        label: 'Delete User',
         select: async () => {
           const choice = await osd.alert({
-            message: "Are you sure you want to delete this user?",
-            choices: ["No", "Yes"],
+            message: 'Are you sure you want to delete this user?',
+            choices: ['No', 'Yes'],
           });
           if (choice === 0) {
             return;
           }
           await user.delete();
-          await osd.alert("User deleted successfully");
+          await osd.alert('User deleted successfully');
           return false;
         },
       },
       {
-        label: "Admin: ",
-        marker: user.admin ? "Yes" : "No",
-        select: async (item) => {
+        label: 'Admin: ',
+        marker: user.admin ? 'Yes' : 'No',
+        select: async item => {
           await user.toggleAdmin();
-          item.marker = user.admin ? "Yes" : "No";
+          item.marker = user.admin ? 'Yes' : 'No';
           return false;
         },
       },
@@ -107,26 +101,26 @@ async function manageUser(user: User) {
 export async function accountsSettingsMenu(): Promise<boolean> {
   const loggedInUser = User.loggedInUser(true);
   const users = (await User.list()).filter(
-    (u) => u.id != loggedInUser.id && u.username != DEFAULT_USERNAME,
+    u => u.id != loggedInUser.id && u.username != DEFAULT_USERNAME,
   );
   const items: osd.TextMenuItem<boolean>[] = [
     {
-      label: "Clear Password",
+      label: 'Clear Password',
       select: async () => {
         await loggedInUser.clearPassword();
       },
     },
     {
-      label: "Change Password...",
+      label: 'Change Password...',
       select: async () => await changePassword(loggedInUser),
     },
   ];
 
   if (loggedInUser.admin) {
     items.push(
-      { label: "-" },
+      { label: '-' },
       {
-        label: "Add User...",
+        label: 'Add User...',
         select: async () => {
           await addUser();
           reloadMainMenu = true;
@@ -135,9 +129,9 @@ export async function accountsSettingsMenu(): Promise<boolean> {
     );
     if (users.length > 0) {
       items.push(
-        { label: "-" },
-        ...users.map((user) => ({
-          label: user.username + (user.admin ? " (admin)" : ""),
+        { label: '-' },
+        ...users.map(user => ({
+          label: user.username + (user.admin ? ' (admin)' : ''),
           select: async () => {
             await manageUser(user);
             reloadMainMenu = true;
@@ -152,7 +146,7 @@ export async function accountsSettingsMenu(): Promise<boolean> {
   let reloadMainMenu = false;
   while (!done) {
     done = await osd.textMenu({
-      title: "Accounts",
+      title: 'Accounts',
       back: true,
       items,
     });

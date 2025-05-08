@@ -23,7 +23,7 @@ export async function load(name: string): Promise<Db> {
 export async function loadPath(path: string): Promise<Db> {
   async function send(body: any): Promise<any> {
     const r = await fetch(`/api/db`, {
-      method: "POST",
+      method: 'POST',
       body: JSON.stringify({
         ...body,
         db: path,
@@ -39,52 +39,46 @@ export async function loadPath(path: string): Promise<Db> {
 
   const db = {
     async beginTransaction(): Promise<Transaction> {
-      await send({ query: "BEGIN TRANSACTION;", mode: "exec" });
+      await send({ query: 'BEGIN TRANSACTION;', mode: 'exec' });
 
       const tx = {
         ...db,
         _transaction: true,
         async rollback() {
           if (!this._transaction) {
-            throw new Error("Not a transaction.");
+            throw new Error('Not a transaction.');
           }
           this._transaction = false;
-          await send({ query: "ROLLBACK", mode: "exec" });
+          await send({ query: 'ROLLBACK', mode: 'exec' });
         },
         async commit() {
           if (!this._transaction) {
-            throw new Error("Not a transaction.");
+            throw new Error('Not a transaction.');
           }
           this._transaction = false;
-          await send({ query: "COMMIT", mode: "exec" });
+          await send({ query: 'COMMIT', mode: 'exec' });
         },
       };
 
       return tx;
     },
     async execute(query: string, bindings?: SqlValue[]): Promise<number> {
-      await send({ query, bindings, mode: "run" });
+      await send({ query, bindings, mode: 'run' });
       return 0;
     },
     async executeMany(query: string, bindings: SqlValue[][]): Promise<number> {
-      await send({ query, bindings, mode: "many" });
+      await send({ query, bindings, mode: 'many' });
       return 0;
     },
     async executeRaw(query: string): Promise<void> {
-      await send({ query, mode: "exec" });
+      await send({ query, mode: 'exec' });
     },
-    async query<T = Row>(
-      query: string,
-      bindings?: SqlValue[],
-    ): Promise<{ rows: T[] }> {
-      const rows = await send({ query, bindings, mode: "query" });
+    async query<T = Row>(query: string, bindings?: SqlValue[]): Promise<{ rows: T[] }> {
+      const rows = await send({ query, bindings, mode: 'query' });
       return { rows };
     },
-    async queryOne<T = Row>(
-      query: string,
-      bindings?: SqlValue[],
-    ): Promise<T | null> {
-      const result = await send({ query, bindings, mode: "get" });
+    async queryOne<T = Row>(query: string, bindings?: SqlValue[]): Promise<T | null> {
+      const result = await send({ query, bindings, mode: 'get' });
 
       return result[0] ?? null;
     },
@@ -98,12 +92,9 @@ export async function loadPath(path: string): Promise<Db> {
  * @param name The name of the database.
  */
 export async function reset(name: string): Promise<void> {
-  const r = await fetch(
-    `/api/db/${name.replace(/[^a-zA-Z0-9_.-]/g, "$")}/reset`,
-    {
-      method: "POST",
-    },
-  );
+  const r = await fetch(`/api/db/${name.replace(/[^a-zA-Z0-9_.-]/g, '$')}/reset`, {
+    method: 'POST',
+  });
 
   if (!r.ok) {
     throw new Error(`From server: ${await r.text()}`);

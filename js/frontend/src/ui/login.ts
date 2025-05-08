@@ -1,6 +1,7 @@
-import * as osd from "1fpga:osd";
-import { User } from "@/services";
-import { sql } from "@/utils";
+import * as osd from '1fpga:osd';
+
+import { User } from '@/services';
+import { sql } from '@/utils';
 
 interface UserRow {
   username: string;
@@ -18,7 +19,7 @@ export async function login(): Promise<User | null> {
 
   // Check if there's only 1 user in the database.
   if (rows.length === 1) {
-    return await User.login("" + rows[0].username);
+    return await User.login('' + rows[0].username);
   }
 
   // If there are multiple users, prompt the user to select one.
@@ -26,12 +27,12 @@ export async function login(): Promise<User | null> {
 
   while (user === null) {
     user = await osd.textMenu({
-      title: "Select User",
-      items: rows.map((u) => ({
-        label: "" + u.username,
-        marker: u.password ? ">>" : "",
+      title: 'Select User',
+      items: rows.map(u => ({
+        label: '' + u.username,
+        marker: u.password ? '>>' : '',
         select: async () => {
-          return await User.login("" + u.username);
+          return await User.login('' + u.username);
         },
       })),
     });

@@ -1,4 +1,4 @@
-import { postMessageAndWait } from "@/utils/worker/postMessageAndWait";
+import { postMessageAndWait } from '@/utils/worker/postMessageAndWait';
 
 /**
  * Represents a textual menu item.
@@ -38,10 +38,7 @@ export interface TextMenuOptions<R> {
   /**
    * The value to return if the user presses the cancel button (or function to execute).
    */
-  sort?: () =>
-    | Partial<TextMenuOptions<R>>
-    | void
-    | Promise<Partial<TextMenuOptions<R>> | void>;
+  sort?: () => Partial<TextMenuOptions<R>> | void | Promise<Partial<TextMenuOptions<R>> | void>;
 
   /**
    * The label to show for the sort button.
@@ -81,7 +78,7 @@ export async function alert(
   orMessage: string,
 ): Promise<void | null | number> {
   return await postMessageAndWait({
-    kind: "osd.alert",
+    kind: 'osd.alert',
     messageOrOptions,
     orMessage,
   });
@@ -103,7 +100,7 @@ export async function selectFile(
   options: SelectFileOptions,
 ): Promise<string | undefined> {
   return await postMessageAndWait({
-    kind: "osd.selectFile",
+    kind: 'osd.selectFile',
     title,
     initialDir,
     options,
@@ -123,7 +120,7 @@ export async function prompt(
       },
 ): Promise<undefined | string> {
   return await postMessageAndWait({
-    kind: "osd.prompt",
+    kind: 'osd.prompt',
     messageOrOptions,
   });
 }
@@ -134,7 +131,7 @@ export const qrCode = () => {};
 
 export async function show(messageOrTitle: string, message?: string) {
   postMessage({
-    kind: "osd.show",
+    kind: 'osd.show',
     messageOrTitle,
     message,
   });
@@ -165,15 +162,15 @@ export async function textMenu<R>(options: TextMenuOptions<R>): Promise<R> {
     ...(sort ? { sort: `--sort-${root}` } : {}),
     items: [
       ...options.items.map((item, i) => {
-        if (typeof item === "string") {
+        if (typeof item === 'string') {
           return item;
         } else {
           const select = item.select;
           const details = item.details;
           const newItem = {
             ...item,
-            select: createCallback(select, (f) => f(newItem, i)),
-            details: createCallback(details, (f) => f(newItem, i)),
+            select: createCallback(select, f => f(newItem, i)),
+            details: createCallback(details, f => f(newItem, i)),
           };
           return newItem;
         }
@@ -183,7 +180,7 @@ export async function textMenu<R>(options: TextMenuOptions<R>): Promise<R> {
 
   while (true) {
     let result = await postMessageAndWait({
-      kind: "osd.textMenu",
+      kind: 'osd.textMenu',
       options: newOptions,
     });
 
