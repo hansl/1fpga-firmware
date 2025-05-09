@@ -194,3 +194,24 @@ CREATE TABLE Screenshots
     userId    INTEGER NOT NULL REFERENCES Users (id),
     createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Views to facilitate selection and listing of games.
+
+-- An extended view which links games and their cores and systems.
+CREATE VIEW ExtendedGamesView AS
+SELECT Games.id                                        AS id,
+       IFNULL(Systems_2.name, Systems.name)            AS systemName,
+       IFNULL(UserGames.coresId, CoresSystems.coresId) AS coresId,
+       Games.path                                      AS romPath,
+       IFNULL(Cores_2.rbfPath, Cores.rbfPath)          AS rbfPath,
+       Games.name                                      AS name,
+       UserGames.favorite                              AS favorite,
+       UserGames.lastPlayedAt                          AS lastPlayedAt
+FROM Games
+         LEFT JOIN Systems ON Games.systemsId = Systems.id
+         LEFT JOIN Cores AS Cores_2 ON Games.coresId = Cores_2.id
+         LEFT JOIN CoresSystems ON CoresSystems.id IN (Cores_2.id, Games.coresId, Systems.id)
+         LEFT JOIN Systems as Systems_2 ON CoresSystems.systemsId = Systems_2.id
+         LEFT JOIN Cores ON Games.coresId = Cores.id OR CoresSystems.coresId = Cores.id
+         LEFT JOIN UserGames ON UserGames.gamesId = Games.id
+;

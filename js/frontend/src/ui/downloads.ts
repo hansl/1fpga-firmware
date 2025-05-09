@@ -1,3 +1,5 @@
+export default {};
+
 // import * as osd from '1fpga:osd';
 //
 // import { Core, KnownBinary, RemoteCatalog, User, WellKnownCatalogs, db } from '@/services';

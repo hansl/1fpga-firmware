@@ -1,13 +1,17 @@
-import { oneLine } from 'common-tags';
-
 import * as oneFpgaCore from '1fpga:core';
+import { Row } from '1fpga:db';
 
+import { CoreRow } from '@/services/database/cores';
+import { NormalizedCore, NormalizedSystem } from '@/services/remote/catalog';
 import { sql } from '@/utils';
 
 import { User } from '../user';
 import type { GamesId } from './games_identification';
 
-export interface GamesRow {
+/**
+ * A Row from the Games table.
+ */
+export interface GamesRow extends Row {
   id: number;
   name: string;
   gamesId: number;
@@ -18,9 +22,10 @@ export interface GamesRow {
 }
 
 /**
- * A games row with more information than is in the Games table.
+ * A Row from the ExtendedGamesView which links games with their systems and
+ * other useful information.
  */
-export interface ExtendedGamesRow {
+export interface ExtendedGamesRow extends Row {
   id: number;
   name: string;
   romPath: string | null;
@@ -28,7 +33,7 @@ export interface ExtendedGamesRow {
   systemName: string;
   coresId: number;
   favorite: boolean | null;
-  lastPlayedAt: Date | null;
+  lastPlayedAt: string | null;
 }
 
 export enum GameSortOrder {
@@ -52,42 +57,15 @@ export interface GamesListOptions {
   /**
    * Merge games with the same game identification.
    */
-  mergeByGameId?: boolean;
   includeUnplayed?: boolean;
   includeUnfavorites?: boolean;
   system?: string;
 }
 
-const GAMES_FIELDS = oneLine`
-  Games.id AS id,
-  Games.path AS romPath,
-  IFNULL(Cores2.rbfPath, cores.rbfPath) AS rbfPath,
-  IFNULL(GamesIdentification.name, Games.name) AS name,
-  Systems.uniqueName AS systemName,
-  UserGames.favorite,
-  UserGames.lastPlayedAt,
-  IFNULL(UserGames.coresId, CoresSystems.coresId) AS coresId
-`;
-
-const GAMES_FROM_JOIN = oneLine`
-  games
-    LEFT JOIN GamesIdentification ON Games.gamesId = GamesIdentification.id
-    LEFT JOIN systems AS systems_2 ON GamesIdentification.systemsId = systems_2.id
-    LEFT JOIN cores AS Cores2 ON games.coresId = Cores2.id
-    LEFT JOIN cores_systems ON Cores2.id = CoresSystems.coresId OR games.coresId = CoresSystems.coresId OR systems_2.id = cores_systems.systemsId
-    LEFT JOIN cores ON games.coresId = cores.id OR cores_systems.coresId = cores.id
-    LEFT JOIN systems ON GamesIdentification.systemsId = systems.id OR cores_systems.systemsId = systems.id
-    LEFT JOIN UserGames ON UserGames.gamesId = games.id
-`;
-
-const GROUP_BY_GAME_ID = oneLine`
-    GROUP BY IFNULL(GamesIdentification.id, cores.rbfPath)
-`;
-
 function buildSqlQuery(options: GamesListOptions) {
   return sql`
-    SELECT ${sql.raw(GAMES_FIELDS)}
-    FROM ${sql.raw(GAMES_FROM_JOIN)}
+    SELECT *
+    FROM ExtendedGamesView
     WHERE ${sql.and(
       true,
       options.system
@@ -102,7 +80,7 @@ function buildSqlQuery(options: GamesListOptions) {
   `;
 }
 
-export async function count(options: GamesListOptions) {
+export async function count(options: GamesListOptions = {}) {
   const [{ count }] = await sql<{ count: number }>`
     SELECT COUNT(*) as count
     FROM (${buildSqlQuery(options)})
@@ -112,8 +90,8 @@ export async function count(options: GamesListOptions) {
 
 export async function getExtended(id: number) {
   const [row] = await sql<ExtendedGamesRow>`
-    SELECT ${sql.raw(GAMES_FIELDS)}
-    FROM ${sql.raw(GAMES_FROM_JOIN)}
+    SELECT *
+    FROM ExtendedGamesView
     WHERE Games.id = ${id}
   `;
   return row;
@@ -121,8 +99,8 @@ export async function getExtended(id: number) {
 
 export async function lastPlayedExtended() {
   const [row] = await sql<ExtendedGamesRow>`
-    SELECT ${sql.raw(GAMES_FIELDS)}
-    FROM ${sql.raw(GAMES_FROM_JOIN)}
+    SELECT *
+    FROM ExtendedGamesView
     WHERE UserGames.lastPlayedAt IS NOT NULL
     ORDER BY UserGames.lastPlayedAt DESC
     LIMIT 1
@@ -135,8 +113,8 @@ export async function lastPlayedExtended() {
  */
 export async function first() {
   const [row] = await sql<ExtendedGamesRow>`
-    SELECT ${sql.raw(GAMES_FIELDS)}
-    FROM ${sql.raw(GAMES_FROM_JOIN)}
+    SELECT *
+    FROM ExtendedGamesView
     LIMIT 1
   `;
   return row ?? null;
@@ -220,6 +198,24 @@ export async function createIdentifiedGame(g: GamesId): Promise<GamesRow> {
       tagsId: id,
     })}`;
   }
+
+  return row;
+}
+
+export async function createCoreGame(
+  core: NormalizedCore,
+  coreRow: CoreRow,
+  s: NormalizedSystem[],
+) {
+  const [row] = await sql<GamesRow>`
+    INSERT INTO Games
+      ${sql.insertValues({
+        name: core.name,
+        coresId: coreRow.id,
+      })}
+      RETURNING *
+  `;
+  console.log(core.name, row);
 
   return row;
 }

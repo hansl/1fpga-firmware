@@ -5,7 +5,7 @@ import { ShowCoreMenuCommand } from '@/commands/basic';
 import { db } from '@/services';
 import { launchCore } from '@/services/utils';
 
-async function selectCoreFile() {
+async function selectFile() {
   let f = await osd.selectFile('Select Core', '/media/fat', {
     dirFirst: false,
     extensions: ['rbf'],
@@ -22,7 +22,7 @@ async function selectCoreFile() {
   }
 }
 
-export async function coresMenu() {
+export async function select() {
   const cores = await db.cores.list();
 
   await osd.textMenu({
@@ -36,7 +36,7 @@ export async function coresMenu() {
         },
       })),
       '-',
-      { label: 'Select File...', select: selectCoreFile },
+      { label: 'Select File...', select: selectFile },
     ],
   });
 }

@@ -1,6 +1,6 @@
-export * as remote from './remote';
 export * as db from './database';
+export * as launch from './launch';
+export * as remote from './remote';
 export * as settings from './settings';
-export * from './storage';
-export * from './user';
+export * as storage from './storage';
 export * as user from './user';

@@ -1,4 +1,4 @@
-import { settings } from '@1fpga/schemas';
+import * as schemas from '@1fpga/schemas';
 
 import { GameSortOrder } from '@/services/database/games';
 import { getOrFail } from '@/services/settings/utils';
@@ -36,19 +36,19 @@ export class UserSettings {
 
   private constructor(private readonly storage_: DbStorage) {}
 
-  public async startOn(): Promise<settings.StartOnSetting> {
-    const schema = settings.StartOnSetting;
+  public async startOn(): Promise<schemas.settings.StartOnSetting> {
+    const schema = schemas.settings.StartOnSetting;
     return await getOrFail(
       this.storage_,
       START_ON_KEY,
       {
         kind: StartOnKind.MainMenu,
       },
-      (v): v is settings.StartOnSetting => schema.safeParse(v).success,
+      (v): v is schemas.settings.StartOnSetting => schema.safeParse(v).success,
     );
   }
 
-  public async setStartOn(value: settings.StartOnSetting): Promise<void> {
+  public async setStartOn(value: schemas.settings.StartOnSetting): Promise<void> {
     await this.storage_.set(START_ON_KEY, value);
   }
 

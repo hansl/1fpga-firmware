@@ -1,4 +1,4 @@
-import * as schemas from '@1fpga/schemas';
+import type * as schemas from '@1fpga/schemas';
 
 import * as net from '1fpga:net';
 

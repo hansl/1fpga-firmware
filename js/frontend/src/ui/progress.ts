@@ -1,7 +1,8 @@
 import { oneLine } from 'common-tags';
-import production from 'consts:production';
 
 import * as osd from '1fpga:osd';
+
+import production from 'consts:production';
 
 const PARTITION_TOO_LARGE_MSEC = 500;
 const PARTITION_TOO_SMALL_MSEC = 200;
@@ -42,7 +43,7 @@ export async function partitionAndProgress<T>(
     const elapsed = +new Date() - last;
     if (!production) {
       console.log(oneLine`
-        Processed ${Math.min(partitionSize, total)} items in ${elapsed}ms,
+        Processed ${Math.min(partitionSize, total - i)} items in ${elapsed}ms,
         current index: ${Math.min(i + partitionSize, total)}
       `);
     }

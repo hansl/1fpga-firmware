@@ -33,7 +33,17 @@ export async function create(catalog: CatalogRow, core: NormalizedCore, rbfPath:
     name: core.name,
     uniqueName: core.uniqueName,
     rbfPath,
-  })}`;
+  })} RETURNING *`;
+
+  for (const s of Array.isArray(core.systems) ? core.systems : [core.systems]) {
+    const [{ id: systemsId }] = await sql<{ id: number }>`SELECT id
+                                                          FROM Systems
+                                                          WHERE uniqueName = ${s}`;
+    await sql`INSERT INTO CoresSystems ${sql.insertValues({
+      coresId: row.id,
+      systemsId,
+    })}`;
+  }
 
   return row;
 }

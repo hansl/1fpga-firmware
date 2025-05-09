@@ -1,4 +1,4 @@
-import fs from '1fpga:fs';
+import * as fs from '1fpga:fs';
 
 import * as user from '@/services/user';
 import { sql } from '@/utils';

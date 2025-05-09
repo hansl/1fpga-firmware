@@ -5,7 +5,7 @@ import * as osd from '1fpga:osd';
 
 import production from 'consts:production';
 
-import { DEFAULT_USERNAME, db, remote, user } from '@/services';
+import * as services from '@/services';
 import { selectCoresFromRemoteCatalog } from '@/ui/catalog/cores';
 
 import {
@@ -81,7 +81,10 @@ function passwordAndVerify(
           return false;
         }
         // Passwords don't match.
-        if (user.User.passwordToString(matches[0]) !== user.User.passwordToString(matches[1])) {
+        if (
+          services.user.User.passwordToString(matches[0]) !==
+          services.user.User.passwordToString(matches[1])
+        ) {
           const should = await osd.alert({
             title: 'Error',
             message: 'Passwords do not match. Please try again.',
@@ -126,8 +129,8 @@ const createUserWizardStep = map(
     passwordAndVerify(),
   ),
   async password => {
-    await user.User.create(DEFAULT_USERNAME, password ?? null, true);
-    const u = await user.User.login(DEFAULT_USERNAME, true);
+    await services.user.User.create(services.user.DEFAULT_USERNAME, password ?? null, true);
+    const u = await services.user.User.login(services.user.DEFAULT_USERNAME, true);
     if (u === null) {
       throw new Error('Could not log in the user.');
     }
@@ -137,12 +140,12 @@ const createUserWizardStep = map(
 const SHOULD_RETRY_ADD_CATALOG = Symbol.for('SHOULD_RETRY_ADD_CATALOG');
 
 async function addWellKnownCatalog(
-  catalog: remote.catalog.WellKnownCatalogs,
-): Promise<db.catalog.CatalogRow | null | Symbol> {
+  catalog: services.remote.catalog.WellKnownCatalogs,
+): Promise<services.db.catalog.CatalogRow | null | Symbol> {
   while (true) {
     try {
-      const json = await remote.catalog.fetchAndNormalizeCatalog(catalog);
-      return await db.catalog.create(json, 0);
+      const json = await services.remote.catalog.fetchAndNormalizeCatalog(catalog);
+      return await services.db.catalog.create(json, 0);
     } catch (e) {
       console.error('Could not add 1fpga catalog:', e);
 
@@ -160,7 +163,7 @@ async function addWellKnownCatalog(
   }
 }
 
-async function addCustomCatalog(): Promise<db.catalog.CatalogRow | null | Symbol> {
+async function addCustomCatalog(): Promise<services.db.catalog.CatalogRow | null | Symbol> {
   let url: string | null = null;
   while (true) {
     url = (await osd.prompt('Enter the URL of the catalog:')) || null;
@@ -169,8 +172,8 @@ async function addCustomCatalog(): Promise<db.catalog.CatalogRow | null | Symbol
     }
 
     try {
-      const json = await remote.catalog.fetchAndNormalizeCatalog(url);
-      return await db.catalog.create(json, 0);
+      const json = await services.remote.catalog.fetchAndNormalizeCatalog(url);
+      return await services.db.catalog.create(json, 0);
     } catch (e) {
       console.error('Could not add custom catalog:', e);
 
@@ -236,7 +239,10 @@ const catalogAddStep = repeat(
           [
             [
               'Add the 1FPGA catalog',
-              call(async () => await addWellKnownCatalog(remote.catalog.WellKnownCatalogs.OneFpga)),
+              call(
+                async () =>
+                  await addWellKnownCatalog(services.remote.catalog.WellKnownCatalogs.OneFpga),
+              ),
             ],
             ...(!production
               ? [
@@ -244,7 +250,9 @@ const catalogAddStep = repeat(
                     'Add a local test catalog',
                     call(
                       async () =>
-                        await addWellKnownCatalog(remote.catalog.WellKnownCatalogs.LocalTest),
+                        await addWellKnownCatalog(
+                          services.remote.catalog.WellKnownCatalogs.LocalTest,
+                        ),
                     ),
                   ] as [string, WizardStep<null>],
                 ]
@@ -261,10 +269,10 @@ const catalogAddStep = repeat(
 const catalogSetup = sequence(
   ignore(message('Catalogs - Installing Cores', 'Choose cores to install from the catalog.')),
   generate(async () => {
-    const [catalog] = await db.catalog.list();
+    const [catalog] = await services.db.catalog.list();
 
     return call(async () => {
-      const catalog$: remote.catalog.NormalizedCatalog = JSON.parse(catalog.json);
+      const catalog$: services.remote.catalog.NormalizedCatalog = JSON.parse(catalog.json);
       const { cores, systems } = await selectCoresFromRemoteCatalog(catalog$, {
         installAll: true,
       });
@@ -279,13 +287,19 @@ const catalogSetup = sequence(
         return;
       }
 
+      let systemMap = new Map();
       for (const system of systems) {
-        const p = await remote.systems.download(catalog$, system);
-        await db.systems.create(catalog, system, p ?? null);
+        const p = await services.remote.systems.download(catalog$, system);
+        const systemRow = await services.db.systems.create(catalog, system, p ?? null);
+        systemMap.set(systemRow.uniqueName, system);
       }
       for (const core of cores) {
-        const p = await remote.cores.download(catalog$, core);
-        await db.cores.create(catalog, core, p ?? null);
+        const p = await services.remote.cores.download(catalog$, core);
+        const coreRow = await services.db.cores.create(catalog, core, p ?? null);
+
+        if ((core.tags ?? []).includes('no-roms')) {
+          await services.db.games.createCoreGame(core, coreRow, systems);
+        }
       }
     });
   }),
@@ -304,7 +318,7 @@ const addGames = sequence(
       return null;
     }
 
-    await db.gamesId.identify(root, { create: true });
+    await services.db.gamesId.identify(root, { create: true });
   }),
 );
 

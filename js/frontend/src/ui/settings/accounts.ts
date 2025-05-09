@@ -2,23 +2,23 @@ import { oneLine } from 'common-tags';
 
 import * as osd from '1fpga:osd';
 
-import { DEFAULT_USERNAME, User } from '@/services';
+import * as services from '@/services';
 
 async function addUser() {
   const username = await osd.prompt("Enter the new user's username:");
   if (!username) {
     return;
   }
-  if (username === DEFAULT_USERNAME) {
+  if (username === services.user.DEFAULT_USERNAME) {
     await osd.alert('Invalid username');
     return;
   }
-  if ((await User.byUsername(username)) !== null) {
+  if ((await services.user.User.byUsername(username)) !== null) {
     await osd.alert('User already exists');
     return;
   }
 
-  const user = await User.create(username, null, false);
+  const user = await services.user.User.create(username, null, false);
   await osd.alert(oneLine`
     User '${username}' created successfully. 
     To set a password, login as the user and change the password.
@@ -26,7 +26,7 @@ async function addUser() {
   return user;
 }
 
-async function changePassword(user: User) {
+async function changePassword(user: services.user.User) {
   while (true) {
     const password = await osd.promptPassword('Enter your new password:', '', 4);
     if (password === null) {
@@ -37,7 +37,10 @@ async function changePassword(user: User) {
     if (password2 === null) {
       continue;
     }
-    if (User.passwordToString(password) === User.passwordToString(password2)) {
+    if (
+      services.user.User.passwordToString(password) ===
+      services.user.User.passwordToString(password2)
+    ) {
       await user.setPassword(password);
       await osd.alert('Password changed successfully');
       return;
@@ -53,7 +56,7 @@ async function changePassword(user: User) {
   }
 }
 
-async function manageUser(user: User) {
+async function manageUser(user: services.user.User) {
   await osd.textMenu({
     title: "Manage User '" + user.username + "'",
     back: false,
@@ -95,13 +98,13 @@ async function manageUser(user: User) {
 }
 
 /**
- * Show the accounts settings menu.
+ * Show the account settings menu.
  * @returns Whether we need to refresh the main menu.
  */
 export async function accountsSettingsMenu(): Promise<boolean> {
-  const loggedInUser = User.loggedInUser(true);
-  const users = (await User.list()).filter(
-    u => u.id != loggedInUser.id && u.username != DEFAULT_USERNAME,
+  const loggedInUser = services.user.User.loggedInUser(true);
+  const users = (await services.user.User.list()).filter(
+    u => u.id != loggedInUser.id && u.username != services.user.DEFAULT_USERNAME,
   );
   const items: osd.TextMenuItem<boolean>[] = [
     {
