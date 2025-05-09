@@ -20,7 +20,7 @@ import { User } from '../user';
 
 interface ShortcutRow {
   id: number;
-  userId: number;
+  usersId: number;
   key: string;
   shortcut: string;
   meta: string;
@@ -106,7 +106,7 @@ class Shortcuts {
     const rows = await sql<ShortcutRow>`
       SELECT *
       FROM shortcuts
-      WHERE userId = ${user.id}
+      WHERE usersId = ${user.id}
         AND key = ${command.key}
     `;
     return rows.map(row => new Shortcuts(row, command, JSON.parse(row.meta)));
@@ -125,7 +125,7 @@ class Shortcuts {
 
     const [row] = await sql<ShortcutRow>`
       INSERT INTO shortcuts ${sql.insertValues({
-        userId: user.id,
+        usersId: user.id,
         key: command.key,
         shortcut,
         meta: JSON.stringify(meta ?? null),

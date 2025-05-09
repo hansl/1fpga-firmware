@@ -129,7 +129,7 @@ export async function pickGame(
         await userSettings.setGameSort(order);
 
         return {
-          sort_label: Object.keys(SORT_LABEL)[currentSort],
+          sort_label: Object.values(SORT_LABEL)[currentSort],
           items: await buildItems(),
         };
       },

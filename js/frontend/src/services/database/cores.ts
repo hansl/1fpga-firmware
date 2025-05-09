@@ -2,8 +2,8 @@ import * as core from '1fpga:core';
 import { Row } from '1fpga:db';
 
 import { CatalogRow } from '@/services/database/catalog';
-import { NormalizedCatalog, NormalizedCore } from '@/services/remote/catalog';
-import { compareVersions, sql } from '@/utils';
+import { NormalizedCore } from '@/services/remote/catalog';
+import { sql } from '@/utils';
 
 export interface CoreRow extends Row {
   id: number;
@@ -14,10 +14,6 @@ export interface CoreRow extends Row {
 }
 
 let runningCore: CoreRow | null = null;
-
-// export function pathForAsset(core: RemoteCore, version: string) {
-//   return `/media/fat/1fpga/cores/${core.uniqueName}/${version}`;
-// }
 
 export function running() {
   return runningCore;

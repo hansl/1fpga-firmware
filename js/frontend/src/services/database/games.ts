@@ -1,4 +1,3 @@
-import * as oneFpgaCore from '1fpga:core';
 import { Row } from '1fpga:db';
 
 import { CoreRow } from '@/services/database/cores';
@@ -39,9 +38,9 @@ export interface ExtendedGamesRow extends Row {
 export enum GameSortOrder {
   NameAsc = 'name ASC',
   NameDesc = 'name DESC',
-  SystemAsc = 'systems.uniqueName ASC',
-  LastPlayed = 'UserGames.lastPlayedAt DESC',
-  Favorites = 'UserGames.favorite DESC, UserGames.lastPlayedAt DESC',
+  SystemAsc = 'systemName ASC',
+  LastPlayed = 'lastPlayedAt DESC',
+  Favorites = 'favorite DESC, lastPlayedAt DESC',
 }
 
 export interface GamesListOptions {
@@ -131,7 +130,7 @@ export async function setFavorite(row: ExtendedGamesRow, favorite: boolean) {
   if (row.favorite !== favorite) {
     await sql`INSERT INTO UserGames
                 ${sql.insertValues({
-                  userId: User.loggedInUser(true).id,
+                  usersId: User.loggedInUser(true).id,
                   gamesId: row.id,
                   favorite,
                 })}
@@ -155,7 +154,7 @@ export function setRunning(g: ExtendedGamesRow | null) {
 export async function setLastPlayedAt(g: ExtendedGamesRow, lastPlayedAt: Date) {
   await sql`INSERT INTO UserGames
               ${sql.insertValues({
-                userId: User.loggedInUser(true).id,
+                usersId: User.loggedInUser(true).id,
                 gamesId: g.id,
                 lastPlayedAt: lastPlayedAt.toString(),
               })}
@@ -165,7 +164,6 @@ export async function setLastPlayedAt(g: ExtendedGamesRow, lastPlayedAt: Date) {
 }
 
 export async function createIdentifiedGame(g: GamesId): Promise<GamesRow> {
-  console.log('Creating game', g);
   const [row] = await sql<GamesRow>`
     INSERT INTO Games ${sql.insertValues({
       name: g.title,
@@ -215,49 +213,6 @@ export async function createCoreGame(
       })}
       RETURNING *
   `;
-  console.log(core.name, row);
 
   return row;
 }
-
-//   async launch() {
-//     console.log('Launching game: ', JSON.stringify(this.row_));
-//
-//     // Insert last played time at.
-//     await sql`INSERT INTO UserGames
-//                 ${sql.insertValues({
-//                   userId: User.loggedInUser(true).id,
-//                   gamesId: this.id,
-//                   lastPlayedAt: '' + new Date(),
-//                 })}
-//               ON CONFLICT
-//     DO
-//     UPDATE SET lastPlayedAt = excluded.lastPlayedAt`;
-//
-//     const settings = await (
-//       await import('@/services/settings/user')
-//     ).UserSettings.forLoggedInUser();
-//
-//     try {
-//       Core.setRunning(await Core.getById(this.row_.coresId));
-//       Games.runningGame = this;
-//       const core = oneFpgaCore.load({
-//         core: { type: 'Path', path: this.row_.rbfPath },
-//         ...(this.row_.romPath ? { game: { type: 'RomPath', path: this.row_.romPath } } : {}),
-//       });
-//
-//       if (core) {
-//         console.log('Starting core: ' + core.name);
-//         core.volume = await settings.defaultVolume();
-//         core.on('saveState', async (savestate: Uint8Array, screenshot: Image) => {
-//           const ss = SaveState.create(this, savestate, screenshot);
-//           console.log('Saved state: ', JSON.stringify(ss));
-//         });
-//         core.loop();
-//       }
-//     } finally {
-//       Games.runningGame = null;
-//       Core.setRunning(null);
-//     }
-//   }
-// }

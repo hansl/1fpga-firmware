@@ -25,7 +25,7 @@ function GlobalSetting({ name }: { name: string }) {
   const [value, setValue] = useState<string | null>(null);
 
   useEffect(() => {
-    send('SELECT value FROM global_storage WHERE key = ?', [name])
+    send('SELECT value FROM GlobalStorage WHERE key = ?', [name])
       .then(row => row[0])
       .then(({ value }) => setValue(value));
   }, [name]);
@@ -49,7 +49,7 @@ function GlobalSettingList() {
   const [keys, setKeys] = useState<string[]>([]);
 
   useEffect(() => {
-    send('SELECT key FROM global_storage').then(rows => setKeys(rows.map((r: any) => r.key)));
+    send('SELECT key FROM GlobalStorage').then(rows => setKeys(rows.map((r: any) => r.key)));
   }, []);
 
   function newValue() {}

@@ -289,12 +289,16 @@ const catalogSetup = sequence(
 
       let systemMap = new Map();
       for (const system of systems) {
+        osd.show('Installing Catalog...', `Downloading system ${system.name}...`);
         const p = await services.remote.systems.download(catalog$, system);
+        osd.show('Installing Catalog...', `Installing system ${system.name}...`);
         const systemRow = await services.db.systems.create(catalog, system, p ?? null);
         systemMap.set(systemRow.uniqueName, system);
       }
       for (const core of cores) {
+        osd.show('Installing Catalog...', `Downloading core ${core.name}...`);
         const p = await services.remote.cores.download(catalog$, core);
+        osd.show('Installing Catalog...', `Installing core ${core.name}...`);
         const coreRow = await services.db.cores.create(catalog, core, p ?? null);
 
         if ((core.tags ?? []).includes('no-roms')) {

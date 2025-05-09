@@ -49,9 +49,9 @@ export async function create(
   await screenshot.save(path);
 
   const [row] = await sql<ScreenshotRow>`INSERT INTO Screenshots ${sql.insertValues({
-    gameId: game.id,
+    gamesId: game.id,
     path,
-    userId: user.id,
+    usersId: user.id,
   })}
                                            RETURNING *`;
 
@@ -62,7 +62,7 @@ export async function count() {
   const user = User.loggedInUser(true);
   const [{ count }] = await sql<{ count: number }>`SELECT COUNT(*) as count
                                                    FROM Screenshots
-                                                   WHERE userId = ${user.id}`;
+                                                   WHERE usersId = ${user.id}`;
 
   return count;
 }

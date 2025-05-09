@@ -2,7 +2,8 @@ import * as core from '1fpga:core';
 import { CoreSettingPage } from '1fpga:core';
 import * as osd from '1fpga:osd';
 
-import { db } from '@/services';
+import * as services from '@/services';
+import * as ui from '@/ui';
 
 enum SettingReturn {
   Continue,
@@ -102,40 +103,38 @@ export async function coreSettingsMenu(
   return shouldReturn === SettingReturn.ReturnContinue ? SettingReturn.Continue : shouldReturn;
 }
 
-function isKindFile(item: core.CoreSettingsItem): item is core.CoreSettingFileSelect {
-  return item.kind === 'file';
-}
+const isKindFile = (item: core.CoreSettingsItem): item is core.CoreSettingFileSelect =>
+  item.kind === 'file';
 
 export async function coreOsdMenu(
   oneFpgaCore: core.OneFpgaCore,
-  coreRow: db.cores.CoreRow | null,
+  coreRow: services.db.cores.CoreRow | null,
 ): Promise<core.OsdResult> {
   let menu = oneFpgaCore.settings;
 
   let fileMenus = menu.items.filter(isKindFile);
 
-  console.log(JSON.stringify(menu));
+  const canLoadGame = coreRow && fileMenus.length > 0;
+  const [maybeSystem] = canLoadGame ? await services.db.systems.find({ core: coreRow }) : [];
 
   return await osd.textMenu({
     title: 'Core Menu',
     back: false,
     items: [
-      ...(coreRow
+      ...(canLoadGame && maybeSystem
         ? [
             {
               label: 'Load Game...',
               select: async () => {
-                // let system = await coreDb.getSystem();
-                // let game = await (
-                //   await import("@/services/database/games")
-                // ).Games.select({
-                //   title: "Load Game",
-                //   system: system.uniqueName,
-                // });
-                // if (game?.romPath) {
-                //   oneFpgaCore.fileSelect(0, game.romPath);
-                //   return false;
-                // }
+                const game = await ui.games.pickGame({
+                  title: 'Load Game',
+                  system: maybeSystem?.uniqueName,
+                });
+
+                if (game?.romPath) {
+                  oneFpgaCore.fileSelect(0, game.romPath);
+                  return false;
+                }
               },
             },
           ]

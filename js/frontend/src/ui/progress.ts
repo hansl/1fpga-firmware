@@ -41,12 +41,10 @@ export async function partitionAndProgress<T>(
     await progress(partition);
 
     const elapsed = +new Date() - last;
-    if (!production) {
-      console.log(oneLine`
-        Processed ${Math.min(partitionSize, total - i)} items in ${elapsed}ms,
-        current index: ${Math.min(i + partitionSize, total)}
-      `);
-    }
+    console.log(oneLine`
+      Processed ${Math.min(partitionSize, total - i)} items in ${elapsed}ms,
+      current index: ${Math.min(i + partitionSize, total)}
+    `);
 
     i += partitionSize;
     // Adjust the partition size based on how long it took to process the

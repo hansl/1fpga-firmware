@@ -6,7 +6,7 @@ js/frontend/dist/main.js: $(wildcard js/frontend/schemas/**/* js/frontend/migrat
 ifndef NPM
 	$(error "No `npm` in PATH, please install Node.js and npm, or pass NPM variable with path to npm binary")
 endif
-	$(NPM) run -w js/frontend/ build
+	$(NPM) run build
 
 build-frontend: js/frontend/dist/main.js
 

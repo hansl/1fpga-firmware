@@ -10,11 +10,11 @@ CREATE TABLE Users
 CREATE TABLE UserStorage
 (
     id        INTEGER PRIMARY KEY,
-    userId    INTEGER      NOT NULL REFERENCES Users (id),
+    usersId   INTEGER      NOT NULL REFERENCES Users (id),
     key       VARCHAR(255) NOT NULL,
     value     JSON         NOT NULL,
     updatedAt TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT userStorageUserIdKey UNIQUE (userId, key)
+    CONSTRAINT userStorageUsersIdKey UNIQUE (usersId, key)
 );
 
 CREATE TABLE GlobalStorage
@@ -28,7 +28,7 @@ CREATE TABLE GlobalStorage
 CREATE TABLE UserCores
 (
     id           INTEGER PRIMARY KEY,
-    userId       INTEGER   NOT NULL REFERENCES Users (id),
+    usersId      INTEGER   NOT NULL REFERENCES Users (id),
     coresId      INTEGER   NOT NULL REFERENCES Cores (id),
     favorite     BOOLEAN   NOT NULL DEFAULT FALSE,
     lastPlayedAt TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -75,7 +75,7 @@ CREATE TABLE UserGames
 
     favorite     BOOLEAN NOT NULL DEFAULT FALSE,
     lastPlayedAt TIMESTAMP        DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT userGamesUserIdGamesId UNIQUE (usersId, gamesId)
+    CONSTRAINT userGamesUsersIdGamesId UNIQUE (usersId, gamesId)
 );
 
 CREATE TABLE Savestates
@@ -170,7 +170,7 @@ CREATE TABLE CoresSystems
 CREATE TABLE Shortcuts
 (
     id       INTEGER PRIMARY KEY,
-    userId   INTEGER      NOT NULL REFERENCES Users (id),
+    usersId  INTEGER      NOT NULL REFERENCES Users (id),
 
     -- The shortcut unique key, like "resetCore".
     key      VARCHAR(255) NOT NULL,
@@ -183,7 +183,7 @@ CREATE TABLE Shortcuts
 
     -- It is illegal to have two identical shortcuts for the same user.
     -- The system would not know which one to trigger.
-    CONSTRAINT shortcutsUserIdKey UNIQUE (userId, shortcut)
+    CONSTRAINT shortcutsUsersIdKey UNIQUE (usersId, shortcut)
 );
 
 CREATE TABLE Screenshots
@@ -191,7 +191,7 @@ CREATE TABLE Screenshots
     id        INTEGER PRIMARY KEY,
     gamesId   INTEGER NOT NULL REFERENCES Games (id),
     path      TEXT    NOT NULL,
-    userId    INTEGER NOT NULL REFERENCES Users (id),
+    usersId   INTEGER NOT NULL REFERENCES Users (id),
     createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -200,18 +200,16 @@ CREATE TABLE Screenshots
 -- An extended view which links games and their cores and systems.
 CREATE VIEW ExtendedGamesView AS
 SELECT Games.id                                        AS id,
-       IFNULL(Systems_2.name, Systems.name)            AS systemName,
+       Systems.name                                    AS systemName,
        IFNULL(UserGames.coresId, CoresSystems.coresId) AS coresId,
        Games.path                                      AS romPath,
-       IFNULL(Cores_2.rbfPath, Cores.rbfPath)          AS rbfPath,
+       Cores.rbfPath                                   AS rbfPath,
        Games.name                                      AS name,
        UserGames.favorite                              AS favorite,
        UserGames.lastPlayedAt                          AS lastPlayedAt
 FROM Games
-         LEFT JOIN Systems ON Games.systemsId = Systems.id
-         LEFT JOIN Cores AS Cores_2 ON Games.coresId = Cores_2.id
-         LEFT JOIN CoresSystems ON CoresSystems.id IN (Cores_2.id, Games.coresId, Systems.id)
-         LEFT JOIN Systems as Systems_2 ON CoresSystems.systemsId = Systems_2.id
-         LEFT JOIN Cores ON Games.coresId = Cores.id OR CoresSystems.coresId = Cores.id
+         LEFT JOIN CoresSystems ON CoresSystems.systemsId = Games.systemsId OR CoresSystems.coresId = Games.coresId
+         LEFT JOIN Systems ON Games.systemsId = Systems.id OR CoresSystems.systemsId = Systems.id
+         LEFT JOIN Cores ON CoresSystems.coresId = Cores.id
          LEFT JOIN UserGames ON UserGames.gamesId = Games.id
 ;

@@ -31,3 +31,27 @@ export async function list(): Promise<SystemsRow[]> {
     FROM Systems
   `;
 }
+
+export interface FindOptions {
+  core?: { id: number };
+}
+
+export async function find({ core }: FindOptions) {
+  return sql<SystemsRow>`
+    SELECT Systems.*
+    FROM Systems ${
+      core &&
+      sql`
+        LEFT JOIN CoresSystems ON CoresSystems.systemsId = Systems.id
+        LEFT JOIN Cores ON Cores.id = CoresSystems.coresId = Cores.id
+      `
+    }
+    WHERE ${sql.and(
+      true,
+      core
+        ? sql`Cores.id =
+        ${core.id}`
+        : undefined,
+    )}
+  `;
+}

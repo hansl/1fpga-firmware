@@ -129,8 +129,7 @@ export async function selectCoresFromRemoteCatalog(
       { label: 'Install selected cores', select: () => true },
     ],
   });
-  console.log('selected', selected);
-  console.log('should', shouldInstall);
+  console.log('Selected cores:', [...selected]);
 
   if (shouldInstall) {
     const coresToInstall = Object.values(cores).filter(core => selected.has(core.uniqueName));

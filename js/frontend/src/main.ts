@@ -107,17 +107,17 @@ async function mainMenu(
       items: [
         {
           label: 'Game Library',
-          select: async () => await notImplemented('gamesMenu'),
+          select: async () => await ui.games.gamesMenu(),
           marker: gamesMarker,
         },
         {
           label: 'Cores',
-          select: async () => await notImplemented('coresMenu'),
+          select: async () => await ui.cores.select(),
           marker: coresMarker,
         },
         {
           label: 'Screenshots',
-          select: async () => await notImplemented('screenshotsMenu'),
+          select: async () => await ui.screenshots.screenshotsMenu(),
           marker: screenshotsMarker,
         },
         '---',
@@ -276,6 +276,8 @@ async function mainInner(): Promise<boolean> {
 }
 
 export async function main() {
+  osd.show('1FPGA Booting Up', 'Please wait...');
+
   console.log(`Build: "${revision}" (${production ? 'production' : 'development'})`);
   console.log('1FPGA started. ONE_FPGA =', JSON.stringify(ONE_FPGA));
   let quit = false;
