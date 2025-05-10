@@ -105,7 +105,7 @@ export async function launch(coreRow: CoreRow) {
       await import('@/services/settings/user')
     ).UserSettings.forLoggedInUser();
     c.volume = await settings.defaultVolume();
-    c.loop();
+    await c.loop();
   } finally {
     setRunning(null);
   }

@@ -1,7 +1,7 @@
 use crate::commands::maybe_call_command;
 use crate::modules::one_fpga::globals::classes::JsImage;
 use crate::HostData;
-use boa_engine::object::builtins::{JsFunction, JsUint8Array};
+use boa_engine::object::builtins::{JsFunction, JsPromise, JsUint8Array};
 use boa_engine::value::TryFromJs;
 use boa_engine::{js_error, Context, JsError, JsResult, JsString, JsValue, TryIntoJsResult};
 use boa_interop::{js_class, ContextData, JsClass};
@@ -64,7 +64,7 @@ impl JsCore {
         host_defined: HostData,
         options: Option<LoopOptions>,
         context: &mut Context,
-    ) -> JsResult<()> {
+    ) -> JsResult<JsPromise> {
         let app = host_defined.app_mut();
         let command_map = host_defined.command_map_mut();
         let mut core = self.core.clone();
@@ -119,7 +119,7 @@ impl JsCore {
             );
         });
 
-        result
+        result.map(|_| JsPromise::resolve(JsValue::undefined(), *cx.borrow_mut()))
     }
 
     fn show_osd(
@@ -246,7 +246,7 @@ js_class! {
             data: ContextData<HostData>,
             options: Option<LoopOptions>,
             context: &mut Context,
-        ) -> JsResult<()> {
+        ) -> JsResult<JsPromise> {
             this.clone_inner().r#loop(data.0, options, context)
         }
 

@@ -179,7 +179,7 @@ declare module '1fpga:core' {
      * shortcuts. This function will return when the core is unloaded by the
      * user.
      */
-    loop(options?: LoopOptions): void;
+    loop(options?: LoopOptions): Promise<void>;
 
     /**
      * Take a screenshot and returns it.

@@ -18,7 +18,7 @@ async function selectFile() {
     });
 
     await db.Commands.get(ShowCoreMenuCommand)?.execute(c, undefined);
-    c.loop();
+    await c.loop();
   }
 }
 

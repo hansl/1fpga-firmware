@@ -23,7 +23,7 @@ export async function launchCore(coreRow: db.cores.CoreRow) {
     ).UserSettings.forLoggedInUser();
 
     c.volume = await settings.defaultVolume();
-    c.loop();
+    await c.loop();
   } finally {
     db.cores.setRunning(null);
   }
@@ -53,7 +53,7 @@ export async function launchGame(gameRow: db.games.ExtendedGamesRow) {
         const ss = db.savestates.create(gameRow, savestate, screenshot);
         console.log('Saved state: ', JSON.stringify(ss));
       });
-      c.loop();
+      await c.loop();
     }
   } finally {
     db.games.setRunning(null);
