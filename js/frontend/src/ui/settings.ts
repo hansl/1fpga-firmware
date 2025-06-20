@@ -1,5 +1,6 @@
 import * as osd from '1fpga:osd';
 import * as oneFpgaSettings from '1fpga:settings';
+import * as video from '1fpga:video';
 
 import { db, settings, user } from '@/services';
 import { pickGame } from '@/ui/games';
@@ -31,6 +32,38 @@ const DATETIME_FORMAT_LABELS: {
   timeOnly: 'Time Only',
   hidden: 'Hidden',
 };
+
+function setMode(mode: string) {
+  try {
+    video.setMode(mode);
+  } catch (e) {
+    console.error('Could not set video mode: ' + e);
+  }
+}
+
+async function selectVideoMode() {
+  await osd.textMenu({
+    back: false,
+    title: 'Select Video Mode',
+    items: [
+      { label: 'V1280x720r60', select: () => setMode('V1280x720r60') },
+      { label: 'V1024x768r60', select: () => setMode('V1024x768r60') },
+      { label: 'V720x480r60', select: () => setMode('V720x480r60') },
+      { label: 'V720x576r50', select: () => setMode('V720x576r50') },
+      { label: 'V1280x1024r60', select: () => setMode('V1280x1024r60') },
+      { label: 'V800x600r60', select: () => setMode('V800x600r60') },
+      { label: 'V640x480r60', select: () => setMode('V640x480r60') },
+      { label: 'V1280x720r50', select: () => setMode('V1280x720r50') },
+      { label: 'V1920x1080r60', select: () => setMode('V1920x1080r60') },
+      { label: 'V1920x1080r50', select: () => setMode('V1920x1080r50') },
+      { label: 'V1366x768r60', select: () => setMode('V1366x768r60') },
+      { label: 'V1024x600r60', select: () => setMode('V1024x600r60') },
+      { label: 'V1920x1440r60', select: () => setMode('V1920x1440r60') },
+      { label: 'V2048x1536r60', select: () => setMode('V2048x1536r60') },
+      { label: 'V2560x1440r60', select: () => setMode('V2560x1440r60') },
+    ],
+  });
+}
 
 async function startOptionsMenu(userSettings: settings.UserSettings) {
   const labels = {
@@ -477,6 +510,12 @@ export async function settingsMenu() {
           await s.toggleDevTools();
           item.marker = (await s.getDevTools()) ? 'On' : 'Off';
           reloadMainMenu = true;
+        },
+      },
+      {
+        label: 'Video',
+        select: async () => {
+          await selectVideoMode();
         },
       },
     ],

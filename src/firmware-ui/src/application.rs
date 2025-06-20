@@ -60,7 +60,7 @@ impl OneFpgaApp {
             [NONE; 32]
         };
 
-        Self {
+        let mut app = Self {
             toolbar: Toolbar::new(),
             render_toolbar: true,
             gamepads,
@@ -70,7 +70,10 @@ impl OneFpgaApp {
             input_state: InputState::default(),
             shortcuts: Default::default(),
             ui_settings: UiSettings::default(),
-        }
+        };
+        app.init_platform();
+
+        app
     }
 
     pub fn add_shortcut(&mut self, shortcut: Shortcut, command: CommandId) {

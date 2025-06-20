@@ -66,7 +66,9 @@ fn main() {
             EnvFilter::builder()
                 .with_default_directive(level_filter.into())
                 .from_env_lossy()
-                .add_directive("reqwest=error".parse().unwrap()),
+                .add_directive("reqwest=error".parse().unwrap())
+                .add_directive("tokio=error".parse().unwrap())
+                .add_directive("liboptic_edid=error".parse().unwrap()),
         )
         .with_ansi(true)
         .with_writer(std::io::stderr)
@@ -91,10 +93,8 @@ fn main() {
     }
 
     // Create the application and run it.
-    let start = std::time::Instant::now();
     info!("Starting application...");
-    firmware_script::run(opts.script.as_ref(), application::OneFpgaApp::new())
-        .expect("Failed to run 1fpga");
-    let elapsed = start.elapsed();
-    info!(?elapsed, "Done");
+    let app = application::OneFpgaApp::new();
+    firmware_script::run(opts.script.as_ref(), app).expect("Failed to run 1fpga");
+    info!("Done");
 }
