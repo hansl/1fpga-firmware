@@ -92,8 +92,8 @@ impl JsImage {
     }
 }
 
-#[boa_class(name = "Image")]
-#[boa(rename = "camelCase")]
+#[boa_class(rename = "Image")]
+#[boa(rename_all = "camelCase")]
 impl JsImage {
     #[boa(static)]
     pub fn load(path: JsString, context: &mut Context) -> JsResult<JsObject> {
@@ -132,11 +132,13 @@ impl JsImage {
     /// Resize the image, returning a new image.
     pub fn resize(
         &self,
-        width: u32,
-        height: u32,
+        width: f64,
+        height: f64,
         keep_aspect_ratio: Option<bool>,
         context: &mut Context,
     ) -> JsResult<JsObject> {
+        let width = width as u32;
+        let height = height as u32;
         let this = Self::new(if keep_aspect_ratio.unwrap_or(true) {
             self.inner
                 .resize(width, height, image::imageops::FilterType::Nearest)
@@ -168,7 +170,7 @@ impl JsImage {
     }
 
     /// Put the image as the background, if on the menu core.
-    #[boa(name = "sendToBackground")]
+    #[boa(rename = "sendToBackground")]
     fn send_to_background(
         &self,
         ContextData(mut app): ContextData<AppRef>,

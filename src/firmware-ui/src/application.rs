@@ -9,6 +9,7 @@ use crate::platform::de10::De10Platform;
 use crate::platform::WindowManager;
 use embedded_graphics::draw_target::DrawTarget;
 use embedded_graphics::pixelcolor::{BinaryColor, Rgb888};
+use embedded_graphics::prelude::DrawTargetExt;
 use embedded_graphics::Drawable;
 use sdl3::event::Event;
 use sdl3::gamepad::Gamepad;
@@ -38,12 +39,6 @@ pub struct OneFpgaApp {
     shortcuts: RefCell<HashMap<Shortcut, CommandId>>,
 
     ui_settings: UiSettings,
-}
-
-impl Default for OneFpgaApp {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl OneFpgaApp {
@@ -140,24 +135,28 @@ impl OneFpgaApp {
             }
 
             self.platform.update_osd(&osd_buffer);
+            osd_buffer
+                .draw(&mut self.platform.main_buffer().color_converted())
+                .unwrap();
+
             result
         } else {
             drawer_fn(self)
         }
     }
 
-    pub fn draw<R>(&mut self, drawer_fn: impl FnOnce(&mut Self) -> R) -> R {
+    pub fn draw_once<R>(&mut self, drawer_fn: impl FnOnce(&mut Self) -> R) -> R {
         self.draw_inner(drawer_fn)
     }
 
-    pub fn draw_loop<R>(
+    pub fn run_draw_loop<R>(
         &mut self,
         mut loop_fn: impl FnMut(&mut Self, EventLoopState) -> Option<R>,
     ) -> R {
-        self.event_loop(|s, state| s.draw(|s| loop_fn(s, state)))
+        self.run_event_loop(|s, state| s.draw_inner(|s| loop_fn(s, state)))
     }
 
-    pub fn event_loop<R>(
+    pub fn run_event_loop<R>(
         &mut self,
         mut loop_fn: impl FnMut(&mut Self, EventLoopState) -> Option<R>,
     ) -> R {

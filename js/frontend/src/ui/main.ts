@@ -266,12 +266,31 @@ export async function mainInner(): Promise<boolean> {
     }
   }
 
+  let mode = await global.getVideoMode();
+  console.log('Global setting mode: ', mode);
+  if (mode === undefined) {
+    mode = await services.video.findDefaultVideoMode();
+  }
+  if (mode !== undefined) {
+    await services.video.setVideoMode(mode);
+  }
+
   let startOn = await settings.startOn();
 
   console.log('Starting on:', JSON.stringify(startOn));
   console.log('Date: ', new Date());
 
   let action = undefined;
+
+  // try {
+  //   console.log(Object.getOwnPropertyNames(video));
+  //   (video as any)['switchToterm']();
+  //   video.run();
+  // } catch (e) {
+  //   console.error(e);
+  // }
+  //
+  // return true;
 
   while (true) {
     try {
