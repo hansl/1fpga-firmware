@@ -5,25 +5,37 @@ use boa_engine::{Context, JsResult, JsString};
 use boa_gc::Trace;
 use boa_macros::Finalize;
 use boa_runtime::{ConsoleState, Logger};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
-fn stack(context: &mut Context) -> Vec<String> {
+fn stack(context: &mut Context) -> String {
     context
         .stack_trace()
-        .map(|frame| frame.code_block().name())
-        .map(JsString::to_std_string_escaped)
+        .map(|frame| {
+            format!(
+                "    {}",
+                JsString::to_std_string_lossy(frame.code_block().name())
+            )
+        })
         .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[derive(Debug, Trace, Finalize)]
 pub struct TracingLogger;
 
 impl Logger for TracingLogger {
+    fn trace(&self, msg: String, state: &ConsoleState, context: &mut Context) -> JsResult<()> {
+        let indent = state.indent();
+        let stack = stack(context);
+        trace!("{msg:>indent$}\n{stack}");
+        Ok(())
+    }
+
     fn debug(&self, msg: String, state: &ConsoleState, context: &mut Context) -> JsResult<()> {
         let indent = state.indent();
         if tracing::enabled!(tracing::Level::TRACE) {
             let stack = stack(context);
-            debug!(?stack, "{msg:>indent$}");
+            debug!("{msg:>indent$}\n{stack}");
         } else {
             debug!("{msg:>indent$}");
         }
@@ -34,7 +46,7 @@ impl Logger for TracingLogger {
         let indent = state.indent();
         if tracing::enabled!(tracing::Level::TRACE) {
             let stack = stack(context);
-            info!(?stack, "{msg:>indent$}");
+            info!("{msg:>indent$}\n{stack}");
         } else {
             info!("{msg:>indent$}");
         }
@@ -49,7 +61,7 @@ impl Logger for TracingLogger {
         let indent = state.indent();
         if tracing::enabled!(tracing::Level::TRACE) {
             let stack = stack(context);
-            warn!(?stack, "{msg:>indent$}");
+            warn!("{msg:>indent$}\n{stack}");
         } else {
             warn!("{msg:>indent$}");
         }
@@ -59,7 +71,7 @@ impl Logger for TracingLogger {
     fn error(&self, msg: String, state: &ConsoleState, context: &mut Context) -> JsResult<()> {
         let indent = state.indent();
         let stack = stack(context);
-        error!(?stack, "{msg:>indent$}");
+        error!("{msg:>indent$}\n{stack}");
         Ok(())
     }
 }

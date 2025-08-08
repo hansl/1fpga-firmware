@@ -1,110 +1,103 @@
-use boa_engine::{js_string, Context, JsResult, JsString, Module};
+use boa_engine::value::{TryFromJs, TryIntoJs};
+use boa_engine::{js_error, js_string, Context, JsResult, JsString, JsValue, Module};
 use boa_macros::boa_module;
+use firmware_ui::application::menu::style::MenuStyleFontSize;
+use firmware_ui::data::settings::DateTimeFormat;
+
+struct JsDatetimeFormat(DateTimeFormat);
+
+impl TryIntoJs for JsDatetimeFormat {
+    fn try_into_js(&self, _context: &mut Context) -> JsResult<JsValue> {
+        Ok(match self.0 {
+            DateTimeFormat::Default => js_string!("default"),
+            DateTimeFormat::Short => js_string!("short"),
+            DateTimeFormat::TimeOnly => js_string!("timeOnly"),
+            DateTimeFormat::Hidden => js_string!("hidden"),
+        }
+        .into())
+    }
+}
+
+impl TryFromJs for JsDatetimeFormat {
+    fn try_from_js(value: &JsValue, context: &mut Context) -> JsResult<Self> {
+        let s = value
+            .to_string(context)?
+            .to_std_string_lossy()
+            .to_lowercase();
+
+        Ok(Self(match s.as_str() {
+            "default" => DateTimeFormat::Default,
+            "short" => DateTimeFormat::Short,
+            "timeonly" | "time" => DateTimeFormat::TimeOnly,
+            "hidden" | "off" => DateTimeFormat::Hidden,
+            _ => return Err(js_error!("Invalid datetime format")),
+        }))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FontSize {
+    Small,
+    Medium,
+    Large,
+}
+
+impl From<FontSize> for MenuStyleFontSize {
+    fn from(val: FontSize) -> Self {
+        match val {
+            FontSize::Small => MenuStyleFontSize::Small,
+            FontSize::Medium => MenuStyleFontSize::Medium,
+            FontSize::Large => MenuStyleFontSize::Large,
+        }
+    }
+}
+
+impl From<MenuStyleFontSize> for FontSize {
+    fn from(val: MenuStyleFontSize) -> Self {
+        match val {
+            MenuStyleFontSize::Small => FontSize::Small,
+            MenuStyleFontSize::Medium => FontSize::Medium,
+            MenuStyleFontSize::Large => FontSize::Large,
+        }
+    }
+}
+
+impl TryIntoJs for FontSize {
+    fn try_into_js(&self, _context: &mut Context) -> JsResult<JsValue> {
+        Ok(match self {
+            FontSize::Small => js_string!("small"),
+            FontSize::Medium => js_string!("medium"),
+            FontSize::Large => js_string!("large"),
+        }
+        .into())
+    }
+}
+
+impl TryFromJs for FontSize {
+    fn try_from_js(value: &JsValue, context: &mut Context) -> JsResult<Self> {
+        let s = value
+            .to_string(context)?
+            .to_std_string_lossy()
+            .to_lowercase();
+
+        match s.as_str() {
+            "small" => Ok(Self::Small),
+            "medium" => Ok(Self::Medium),
+            "large" => Ok(Self::Large),
+            _ => Err(js_error!("Invalid font size")),
+        }
+    }
+}
 
 #[boa_module]
 #[boa(rename_all = "camelCase")]
 mod js {
+    use super::{FontSize, JsDatetimeFormat};
     use crate::AppRef;
     use boa_engine::interop::ContextData;
     use boa_engine::object::builtins::JsDate;
-    use boa_engine::value::TryFromJs;
-    use boa_engine::{js_error, js_string, Context, JsResult, JsString, JsValue};
-    use firmware_ui::application::menu::style::MenuStyleFontSize;
-    use firmware_ui::data::settings::DateTimeFormat;
+    use boa_engine::{js_error, js_string, Context, JsResult, JsString};
     use tracing::{debug, error, trace};
-
-    #[boa(skip)]
-    struct JsDatetimeFormat(DateTimeFormat);
-
-    #[boa(skip)]
-    impl From<JsDatetimeFormat> for JsValue {
-        fn from(val: JsDatetimeFormat) -> Self {
-            match val.0 {
-                DateTimeFormat::Default => js_string!("default"),
-                DateTimeFormat::Short => js_string!("short"),
-                DateTimeFormat::TimeOnly => js_string!("timeOnly"),
-                DateTimeFormat::Hidden => js_string!("hidden"),
-            }
-            .into()
-        }
-    }
-
-    #[boa(skip)]
-    impl TryFromJs for JsDatetimeFormat {
-        fn try_from_js(value: &JsValue, context: &mut Context) -> JsResult<Self> {
-            let s = value
-                .to_string(context)?
-                .to_std_string_lossy()
-                .to_lowercase();
-
-            Ok(Self(match s.as_str() {
-                "default" => DateTimeFormat::Default,
-                "short" => DateTimeFormat::Short,
-                "timeonly" | "time" => DateTimeFormat::TimeOnly,
-                "hidden" | "off" => DateTimeFormat::Hidden,
-                _ => return Err(js_error!("Invalid datetime format")),
-            }))
-        }
-    }
-
-    #[boa(skip)]
-    #[derive(Debug, Clone, Copy)]
-    enum FontSize {
-        Small,
-        Medium,
-        Large,
-    }
-
-    #[boa(skip)]
-    impl From<FontSize> for MenuStyleFontSize {
-        fn from(val: FontSize) -> Self {
-            match val {
-                FontSize::Small => MenuStyleFontSize::Small,
-                FontSize::Medium => MenuStyleFontSize::Medium,
-                FontSize::Large => MenuStyleFontSize::Large,
-            }
-        }
-    }
-
-    #[boa(skip)]
-    impl From<MenuStyleFontSize> for FontSize {
-        fn from(val: MenuStyleFontSize) -> Self {
-            match val {
-                MenuStyleFontSize::Small => FontSize::Small,
-                MenuStyleFontSize::Medium => FontSize::Medium,
-                MenuStyleFontSize::Large => FontSize::Large,
-            }
-        }
-    }
-
-    #[boa(skip)]
-    impl From<FontSize> for JsValue {
-        fn from(val: FontSize) -> Self {
-            match val {
-                FontSize::Small => js_string!("small"),
-                FontSize::Medium => js_string!("medium"),
-                FontSize::Large => js_string!("large"),
-            }
-            .into()
-        }
-    }
-
-    #[boa(skip)]
-    impl TryFromJs for FontSize {
-        fn try_from_js(value: &JsValue, context: &mut Context) -> JsResult<Self> {
-            let s = value
-                .to_string(context)?
-                .to_std_string_lossy()
-                .to_lowercase();
-
-            match s.as_str() {
-                "small" => Ok(Self::Small),
-                "medium" => Ok(Self::Medium),
-                "large" => Ok(Self::Large),
-                _ => Err(js_error!("Invalid font size")),
-            }
-        }
-    }
 
     fn set_font_size(ContextData(mut app): ContextData<AppRef>, size: FontSize) {
         app.ui_settings_mut().set_menu_font_size(size.into());

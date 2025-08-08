@@ -3,12 +3,14 @@
   "workspaces": [
     "js/frontend",
     "js/frontend-react",
+    "js/1fpga/react-osd",
     "js/1fpga/schemas",
     "js/1fpga/types",
     "scripts/patreon"
   ],
   "scripts": {
-    "build": "npm run build:schemas && npm run build:frontend",
+    "build": "npm run build:schemas && npm run build:react-osd && npm run build:frontend",
+    "build:react-osd": "npm run -w @1fpga/react-osd build",
     "build:schemas": "npm run -w @1fpga/schemas build",
     "build:frontend": "npm run -w @1fpga/frontend build",
     "patreon": "npm run -w patreon output",
@@ -17,6 +19,7 @@
   },
   "devDependencies": {
     "@trivago/prettier-plugin-sort-imports": "^5.2.2",
-    "prettier": "3.3.3"
+    "prettier": "3.3.3",
+    "prettier-plugin-jsdoc": "^1.3.3"
   }
 }

@@ -1,8 +1,9 @@
 import { ValidateFunction } from 'ajv';
-import production from 'consts:production';
 
 import * as net from '1fpga:net';
 import * as osd from '1fpga:osd';
+
+import production from 'consts:production';
 
 export class ValidationError extends Error {
   constructor(public readonly errors: any) {

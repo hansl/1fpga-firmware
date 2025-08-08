@@ -4,7 +4,6 @@ use crate::modules::CommandMap;
 use boa_engine::property::Attribute;
 use boa_engine::{js_string, Context, JsObject, JsResult, JsValue, Module, Source};
 use boa_macros::{js_str, Finalize, JsData, Trace};
-use boa_runtime::RegisterOptions;
 use firmware_ui::application::OneFpgaApp;
 use std::ops::{Deref, DerefMut};
 use std::path::Path;
@@ -103,8 +102,9 @@ pub fn run(script: Option<&impl AsRef<Path>>) -> Result<(), Box<dyn std::error::
     context.insert_data(host_defined);
 
     boa_runtime::register(
+        boa_runtime::extensions::ConsoleExtension(TracingLogger),
+        None,
         &mut context,
-        RegisterOptions::new().with_console_logger(TracingLogger),
     )?;
 
     modules::register_modules(loader.clone(), &mut context)?;

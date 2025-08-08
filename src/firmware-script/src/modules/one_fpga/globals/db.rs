@@ -2,9 +2,7 @@ use boa_engine::builtins::typed_array::TypedArray;
 use boa_engine::class::Class;
 use boa_engine::object::builtins::{JsArray, JsPromise, JsUint8Array};
 use boa_engine::value::{TryFromJs, TryIntoJs};
-use boa_engine::{
-    js_error, Context, JsObject, JsResult, JsString, JsValue, JsVariant, TryIntoJsResult,
-};
+use boa_engine::{js_error, Context, JsObject, JsResult, JsString, JsValue, JsVariant};
 use boa_macros::{boa_class, Finalize, JsData, Trace};
 use ouroboros::self_referencing;
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, Value, ValueRef};
@@ -322,20 +320,13 @@ impl JsDbInner {
     }
 }
 
-#[derive(Trace, Finalize, JsData)]
+#[derive(Clone, Trace, Finalize, JsData)]
 pub struct JsDb {
     #[unsafe_ignore_trace]
     inner: Rc<RefCell<JsDbInner>>,
 }
 
-impl TryIntoJsResult for JsDb {
-    fn try_into_js_result(self, context: &mut Context) -> JsResult<JsValue> {
-        Ok(JsDb::from_data(self, context)?.into())
-    }
-}
-
 #[boa_class(rename = "Db")]
-#[boa(rename_all = "camelCase")]
 impl JsDb {
     #[boa(constructor)]
     pub(crate) fn new(name: String) -> JsResult<Self> {

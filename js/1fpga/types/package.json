@@ -1,5 +1,8 @@
 {
   "name": "@1fpga/types",
   "module": "./index.js",
-  "types": "./globals.d.ts"
+  "types": "./globals.d.ts",
+  "devDependencies": {
+    "react": "^19.1"
+  }
 }

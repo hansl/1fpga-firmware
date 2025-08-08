@@ -1,6 +1,7 @@
 import commonjs from '@rollup/plugin-commonjs';
 import json from '@rollup/plugin-json';
 import { nodeResolve } from '@rollup/plugin-node-resolve';
+import replace from '@rollup/plugin-replace';
 import terser from '@rollup/plugin-terser';
 import typescript from '@rollup/plugin-typescript';
 import del from 'rollup-plugin-delete';
@@ -36,6 +37,7 @@ export default {
     codegen(),
     dbMigrations(),
     nodeResolve({
+      extensions: ['.ts', '.js', '.jsx', '.tsx'],
       preferBuiltins: false,
     }),
     constants({
@@ -52,8 +54,13 @@ export default {
     }),
     json({}),
     commonjs({
-      extensions: ['.js', '.ts', '.cjs'],
+      extensions: ['.js', '.ts', '.cjs', '.jsx', '.tsx'],
       transformMixedEsModules: true,
+      ignore: ['ws', 'react-devtools-core'],
+    }),
+    replace({
+      preventAssignment: false,
+      'process.env.NODE_ENV': production ? '"production"' : '"development"',
     }),
     // Remove tagged template in production only.
     ...(production

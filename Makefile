@@ -2,7 +2,7 @@ NPM := $(shell command -v npm 2> /dev/null)
 OPENSSL := $(shell command -v openssl 2> /dev/null)
 MISTER_IP := 192.168.1.79
 
-js/frontend/dist/main.js: $(wildcard js/frontend/schemas/**/* js/frontend/migrations/**/* js/frontend/src/**/* js/frontend/src/* js/frontend/types/**/* js/frontend/*.json js/frontend/*.js js/frontend/rollup/*.js)
+js/frontend/dist/main.js: $(wildcard js/1fpga/**/* js/frontend/migrations/**/* js/frontend/src/**/* js/frontend/src/* js/frontend/types/**/* js/frontend/*.json js/frontend/*.js js/frontend/rollup/*.js)
 ifndef NPM
 	$(error "No `npm` in PATH, please install Node.js and npm, or pass NPM variable with path to npm binary")
 endif

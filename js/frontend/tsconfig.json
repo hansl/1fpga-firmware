@@ -4,29 +4,19 @@
     "baseUrl": ".",
     "module": "ESNext",
     "outDir": "dist",
-    "rootDirs": [
-      "src",
-      "codegen"
-    ],
+    "rootDirs": ["src", "codegen"],
     "lib": [],
+    "jsx": "react",
     "strict": true,
     "resolveJsonModule": true,
     "esModuleInterop": true,
     "moduleResolution": "Bundler",
     "skipLibCheck": true,
     "paths": {
-      "@/*": [
-        "./src/*"
-      ],
-      "1fpga:*": [
-        "../1fpga/types/1fpga/*"
-      ],
-      "consts:*": [
-        "../1fpga/types/consts"
-      ],
-      "@:migrations": [
-        "types/migrations"
-      ]
+      "@/*": ["./src/*"],
+      "1fpga:*": ["../1fpga/types/1fpga/*"],
+      "consts:*": ["../1fpga/types/consts"],
+      "@:migrations": ["types/migrations"]
     }
   }
 }

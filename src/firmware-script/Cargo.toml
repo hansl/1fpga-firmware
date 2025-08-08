@@ -15,16 +15,18 @@ time.workspace = true
 strum.workspace = true
 tracing.workspace = true
 
-boa_engine = { git = "https://github.com/boa-dev/boa.git", rev = "8c057dc14af5696aff9065035951f5989ae68460", features = ["either"] }
-boa_gc = { git = "https://github.com/boa-dev/boa.git", rev = "8c057dc14af5696aff9065035951f5989ae68460" }
-boa_interop = { git = "https://github.com/boa-dev/boa.git", rev = "8c057dc14af5696aff9065035951f5989ae68460" }
-boa_macros = { git = "https://github.com/boa-dev/boa.git", rev = "8c057dc14af5696aff9065035951f5989ae68460" }
-boa_runtime = { git = "https://github.com/boa-dev/boa.git", rev = "8c057dc14af5696aff9065035951f5989ae68460", features = ["all"] }
+boa_engine = { git = "https://github.com/boa-dev/boa.git", branch = "main", features = ["either"] }
+boa_gc = { git = "https://github.com/boa-dev/boa.git", branch = "main" }
+boa_interop = { git = "https://github.com/boa-dev/boa.git", branch = "main" }
+boa_macros = { git = "https://github.com/boa-dev/boa.git", branch = "main" }
+boa_runtime = { git = "https://github.com/boa-dev/boa.git", branch = "main" }
 
 directories = "6.0.0"
 ed25519 = "2.2.3"
 ed25519-dalek = { version = "2.1.1", features = ["pem"] }
 either = "1"
+embedded-graphics = "0.8.1"
+embedded-text = "0.7.2"
 enum-map = { version = "3.0.0-beta.2", features = ["derive"] }
 firmware-gui.workspace = true
 firmware-ui.workspace = true
@@ -39,7 +41,9 @@ rusqlite = { version = "0.37.0", features = ["bundled", "serde_json"] }
 serde.workspace = true
 serde_json = "1.0.115"
 sha2 = { version = "0.11.0-pre.4" }
+taffy = "0.9.0"
 tempdir = "0.3.7"
+u8g2-fonts.workspace = true
 walkdir = "2.5.0"
 
 [features]

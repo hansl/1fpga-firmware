@@ -1,5 +1,5 @@
 use boa_engine::value::TryIntoJs;
-use boa_engine::{js_string, Context, JsResult, JsString, JsValue, Module, TryIntoJsResult};
+use boa_engine::{js_string, Context, JsResult, JsString, JsValue, Module};
 use boa_macros::{boa_module, js_value, Finalize, Trace};
 use liboptic_edid::structures::basic_info::vsi::VideoSignalInterface;
 use liboptic_edid::structures::basic_info::SizeOrRatio;
@@ -142,12 +142,6 @@ impl From<liboptic_edid::Edid> for Edid {
             .collect(),
             basic_display_info: BasicDisplayInfo(value.basic_display_info),
         }
-    }
-}
-
-impl TryIntoJsResult for Edid {
-    fn try_into_js_result(self, context: &mut Context) -> JsResult<JsValue> {
-        self.try_into_js(context)
     }
 }
 

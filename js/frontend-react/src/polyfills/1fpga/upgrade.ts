@@ -1,13 +1,12 @@
-import { postMessageAndWait } from "@/utils/worker/postMessageAndWait";
+import { postMessageAndWait } from '@/utils/worker/postMessageAndWait';
 
 /**
  * Perform an upgrade of the 1FPGA binary (named `one_fpga`). This will restart the
  * process and never return.
  */
-export function upgrade(name: "1fpga", path: string, signature?: Uint8Array): Promise<never> {
-  postMessage({ kind: "shutdown" });
-  while (true) {
-  }
+export function upgrade(name: '1fpga', path: string, signature?: Uint8Array): Promise<never> {
+  postMessage({ kind: 'shutdown' });
+  while (true) {}
 }
 
 /**
@@ -22,4 +21,3 @@ export function upgrade(name: "1fpga", path: string, signature?: Uint8Array): Pr
 export async function verifySignature(path: string, signature: Uint8Array): Promise<boolean> {
   return true;
 }
-

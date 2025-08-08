@@ -265,6 +265,9 @@ pub struct DrawBuffer<C: 'static> {
     inner: Rc<RefCell<DrawBufferInner<C>>>,
 }
 
+/// A Buffer that renders to the OSD.
+pub type OsdBuffer = DrawBuffer<BinaryColor>;
+
 impl<C: PixelColor> DrawBuffer<C> {
     /// Creates a buffer filled with a color.
     pub fn with_default_color(size: Size, default_color: C) -> Self {
