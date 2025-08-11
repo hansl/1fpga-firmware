@@ -12,13 +12,45 @@ use std::cell::{Ref, RefCell, RefMut};
 use std::fmt::Debug;
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
-use taffy::{AvailableSpace, NodeId, Style, TaffyTree, TraversePartialTree};
+use taffy::{AvailableSpace, Layout, NodeId, Style, TaffyTree, TraversePartialTree};
 
 #[derive(Debug)]
 pub enum NodeInfo {
     Root,
     Tag { name: String },
     Fragment(String),
+}
+
+impl NodeInfo {
+    pub(crate) fn render_to_osd(&self, layout: &Layout, target: &mut OsdBuffer) -> JsResult<()> {
+        match self {
+            NodeInfo::Fragment(text) => {
+                eprintln!("render fragment: {text:?} {layout:?}");
+
+                let character_style = u8g2_fonts::U8g2TextStyle::new(
+                    u8g2_fonts::fonts::u8g2_font_haxrcorp4089_t_cyrillic,
+                    BinaryColor::On,
+                );
+
+                TextBox::new(
+                    &text,
+                    // Rectangle::new(
+                    //     Point::new(layout.location.x as i32, layout.location.y as i32),
+                    //     Size::new(layout.size.width as u32, layout.size.height as u32),
+                    // ),
+                    Rectangle::new(
+                        Point::new(layout.location.x as i32, layout.location.y as i32),
+                        Size::new(100, 100),
+                    ),
+                    character_style,
+                )
+                .draw(target)
+                .unwrap();
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 pub type Tree = TaffyTree<NodeInfo>;
@@ -81,7 +113,8 @@ impl Node {
         }
     }
 
-    #[boa(getter)]
+    #[boa(setter)]
+    #[boa(rename = "text")]
     pub fn set_text(
         &self,
         ContextData(tree): ContextData<TreeRef>,
@@ -120,27 +153,9 @@ impl Root {
             Root::render_to_osd(tree, child, target)?;
         }
 
-        match tree.get_node_context(node) {
-            Some(NodeInfo::Fragment(text)) => {
-                let layout = tree.layout(node).unwrap();
-
-                let character_style = u8g2_fonts::U8g2TextStyle::new(
-                    u8g2_fonts::fonts::u8g2_font_haxrcorp4089_t_cyrillic,
-                    BinaryColor::On,
-                );
-
-                TextBox::new(
-                    &text,
-                    Rectangle::new(
-                        Point::new(layout.location.x as i32, layout.location.y as i32),
-                        Size::new(layout.size.width as u32, layout.size.height as u32),
-                    ),
-                    character_style,
-                )
-                .draw(target)
-                .map_err(JsError::from_rust)?;
-            }
-            _ => {}
+        let layout = tree.layout(node).unwrap();
+        if let Some(n) = tree.get_node_context(node) {
+            n.render_to_osd(layout, target)?;
         }
 
         Ok(())

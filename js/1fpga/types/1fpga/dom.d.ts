@@ -14,6 +14,7 @@ declare module '1fpga:dom' {
 
   export class Root extends Node {
     render();
+    append(child: Node | TextFragment): void;
   }
 
   export function createNode(type: string, props: object): Node;
