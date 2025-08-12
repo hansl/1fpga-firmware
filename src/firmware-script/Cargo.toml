@@ -21,6 +21,7 @@ boa_interop = { git = "https://github.com/boa-dev/boa.git", branch = "main" }
 boa_macros = { git = "https://github.com/boa-dev/boa.git", branch = "main" }
 boa_runtime = { git = "https://github.com/boa-dev/boa.git", branch = "main" }
 
+cosmic-text = "0.14.2"
 directories = "6.0.0"
 ed25519 = "2.2.3"
 ed25519-dalek = { version = "2.1.1", features = ["pem"] }

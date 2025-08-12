@@ -18,7 +18,12 @@ export function TestComponent({ state }: { state: { done: boolean } }) {
     }, 1000);
   }, []);
 
-  return <div>Hello Node {'' + count}</div>;
+  return (
+    <div>
+      Hello Node {'' + count}. After. Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed
+      do eiusmod tempor incididunt ut labore et dolore magna aliqua.
+    </div>
+  );
 }
 
 export async function run() {
