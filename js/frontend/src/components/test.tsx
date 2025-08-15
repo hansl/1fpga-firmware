@@ -1,7 +1,13 @@
 import { render } from '@1fpga/react-osd';
-import React, { useEffect } from 'react';
+import { FunctionComponent, PropsWithChildren, useEffect, useState } from 'react';
 
-import * as dom from '1fpga:dom';
+// namespace React {
+//   namespace JSX {
+//     interface IntrinsicElements {
+//       t: FunctionComponent<PropsWithChildren<{ font: string }>>;
+//     }
+//   }
+// }
 
 export function TestComponent({ state }: { state: { done: boolean } }) {
   setTimeout(() => {
@@ -10,7 +16,7 @@ export function TestComponent({ state }: { state: { done: boolean } }) {
     console.log(JSON.stringify(state));
   }, 100000);
 
-  const [count, setCount] = React.useState(0);
+  const [count, setCount] = useState(0);
   console.log('TestComponent', count);
   useEffect(() => {
     setInterval(() => {
@@ -19,10 +25,18 @@ export function TestComponent({ state }: { state: { done: boolean } }) {
   }, []);
 
   return (
-    <div>
-      Hello Node {'' + count}. After. Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed
-      do eiusmod tempor incididunt ut labore et dolore magna aliqua.
-    </div>
+    <>
+      <box font="small">
+        Node {count}. After. {'\n'}
+      </box>
+      <box font="medium" location={{ x: 0, y: 20 }}>
+        Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut
+        labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco
+        laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in
+        voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat
+        cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
+      </box>
+    </>
   );
 }
 

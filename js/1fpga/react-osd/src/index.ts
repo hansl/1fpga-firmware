@@ -76,7 +76,12 @@ export function createRenderer() {
       internalHandle: OpaqueHandle,
     ): Instance {
       console.log('createNode', JSON.stringify(rootContainer));
-      return dom.createNode(type, props);
+      try {
+        return dom.createNode(type, props);
+      } catch (e) {
+        console.error('createNode', e);
+        throw e;
+      }
     },
 
     /**
@@ -534,7 +539,11 @@ export function createRenderer() {
   /** Render the screen. */
   let doRender = debounce(() => {
     console.log(`render(${n++})`);
-    root.render();
+    try {
+      root.render();
+    } catch (e) {
+      console.error(`Error happened in render: `, e);
+    }
   }, 16);
 
   return function render(element: React.ReactNode, callback: (() => void) | null) {
