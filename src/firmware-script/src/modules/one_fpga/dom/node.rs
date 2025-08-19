@@ -1,4 +1,5 @@
 use crate::modules::one_fpga::dom::render::{FontProp, RenderingContext};
+use crate::modules::one_fpga::dom::Tree;
 use boa_engine::{js_error, JsResult};
 use boa_macros::{TryFromJs, TryIntoJs};
 use embedded_graphics::geometry::Point;
@@ -56,13 +57,21 @@ pub(crate) enum NodeType {
 impl NodeType {
     fn measure(
         &mut self,
+        tree: &Tree,
         known_dimensions: taffy::geometry::Size<Option<f32>>,
         available_space: taffy::geometry::Size<AvailableSpace>,
         context: &mut RenderingContext,
     ) -> taffy::geometry::Size<f32> {
+        if let taffy::geometry::Size {
+            width: Some(width),
+            height: Some(height),
+        } = known_dimensions
+        {
+            return taffy::geometry::Size { width, height };
+        }
+
         match self {
-            NodeType::Root => known_dimensions.unwrap_or(taffy::Size::zero()),
-            NodeType::Box { .. } => taffy::Size::zero(),
+            NodeType::Box { .. } | NodeType::Root => taffy::Size::zero(),
             NodeType::Fragment(fragment) => {
                 fragment.measure(known_dimensions, available_space, context)
             }
@@ -151,12 +160,13 @@ impl NodeInfo {
 
     pub fn measure(
         &mut self,
+        tree: &Tree,
         known_dimensions: TaffySize<Option<f32>>,
         available_space: TaffySize<AvailableSpace>,
         rendering_context: &mut RenderingContext,
     ) -> TaffySize<f32> {
         self.node_type
-            .measure(known_dimensions, available_space, rendering_context)
+            .measure(tree, known_dimensions, available_space, rendering_context)
     }
 
     pub fn can_append(&self) -> bool {
@@ -179,6 +189,16 @@ impl NodeInfo {
             node_type,
             props: Some(props),
         })
+    }
+
+    pub fn style(&self, mut style: taffy::Style) -> taffy::Style {
+        if let Some(props) = self.props {
+            if let Some(location) = props {
+                style.position = taffy::Position::Absolute;
+            }
+        }
+
+        style
     }
 
     pub fn fragment(text: String) -> JsResult<Self> {

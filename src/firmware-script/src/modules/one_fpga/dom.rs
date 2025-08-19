@@ -154,11 +154,12 @@ impl Root {
         let start = std::time::Instant::now();
         let mut rendering_context = rendering_context.borrow_mut();
         let t = tree.clone();
+
         tree.compute_layout_with_measure(
             self.root.0,
             taffy::Size {
                 width: AvailableSpace::Definite(self.buffer.borrow().size().width as f32),
-                height: AvailableSpace::MinContent,
+                height: AvailableSpace::Definite(self.buffer.borrow().size().height as f32),
             },
             |known_dimensions, available_space, node_id, node_context, _style| {
                 let parent = t.parent(node_id).and_then(|id| t.get_node_context(id));
@@ -168,7 +169,12 @@ impl Root {
                         n.calc_font(p);
                     }
 
-                    n.measure(known_dimensions, available_space, &mut rendering_context)
+                    n.measure(
+                        &t,
+                        known_dimensions,
+                        available_space,
+                        &mut rendering_context,
+                    )
                 } else {
                     taffy::Size::zero()
                 }
@@ -225,8 +231,10 @@ mod js {
     ) -> JsResult<super::Node> {
         tracing::trace!(?name, ?props, "Creating node");
 
+        let node = super::NodeInfo::tag(name, props)?;
+        let style = node.style((taffy::Style::default())?;
         let id = tree
-            .new_leaf_with_context(super::Style::default(), NodeInfo::tag(name, props)?)
+            .new_leaf_with_context(style, node)
             .map_err(JsError::from_rust)?;
 
         Ok(super::Node(id))
