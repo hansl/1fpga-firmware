@@ -1,4 +1,4 @@
-use crate::modules::one_fpga::dom::node::{NodeInfo, NodeType};
+use crate::modules::one_fpga::dom::node::NodeInfo;
 use crate::modules::one_fpga::dom::render::{RenderingContext, RenderingContextRef};
 use crate::AppRef;
 use boa_engine::interop::ContextData;
@@ -17,6 +17,7 @@ use tracing::debug;
 
 mod node;
 mod render;
+mod style;
 
 type Tree = TaffyTree<NodeInfo>;
 
@@ -78,6 +79,17 @@ impl Node {
 
         let result = tree.add_child(self.0, child.0).map_err(JsError::from_rust);
         result
+    }
+
+    pub fn update(
+        &self,
+        ContextData(mut tree): ContextData<TreeRef>,
+        new_props: JsValue,
+        context: &mut Context,
+    ) -> JsResult<()> {
+        tree.get_node_context_mut(self.0)
+            .ok_or_else(|| js_error!(ReferenceError: "Node does not have context."))?
+            .update(new_props, context)
     }
 
     #[boa(getter)]
@@ -150,8 +162,9 @@ impl Root {
         ContextData(mut tree): ContextData<TreeRef>,
         ContextData(rendering_context): ContextData<RenderingContextRef>,
     ) -> JsResult<()> {
-        debug!("layout");
         let start = std::time::Instant::now();
+
+        debug!("layout");
         let mut rendering_context = rendering_context.borrow_mut();
         let t = tree.clone();
 
@@ -166,7 +179,7 @@ impl Root {
 
                 if let Some(n) = node_context {
                     if let Some(p) = parent {
-                        n.calc_font(p);
+                        n.update_cache(p);
                     }
 
                     n.measure(
@@ -181,6 +194,8 @@ impl Root {
             },
         )
         .map_err(JsError::from_rust)?;
+
+        tree.print_tree(self.root.0);
 
         debug!("render");
 
@@ -213,9 +228,9 @@ mod globals {
 
 #[boa_module]
 mod js {
-    use crate::modules::one_fpga::dom::node::{NodeInfo, NodeProps};
+    use crate::modules::one_fpga::dom::node::NodeInfo;
     use boa_engine::interop::ContextData;
-    use boa_engine::{Context, JsError, JsResult};
+    use boa_engine::{Context, JsError, JsResult, JsValue};
 
     type Node = super::Node;
 
@@ -226,13 +241,13 @@ mod js {
     fn create_node(
         ContextData(mut tree): ContextData<super::TreeRef>,
         name: String,
-        props: NodeProps,
+        props: JsValue,
         context: &mut Context,
     ) -> JsResult<super::Node> {
         tracing::trace!(?name, ?props, "Creating node");
 
-        let node = super::NodeInfo::tag(name, props)?;
-        let style = node.style((taffy::Style::default())?;
+        let node = NodeInfo::tag(name, props, context)?;
+        let style = node.style(taffy::Style::default());
         let id = tree
             .new_leaf_with_context(style, node)
             .map_err(JsError::from_rust)?;

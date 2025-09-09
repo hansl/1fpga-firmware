@@ -75,7 +75,7 @@ export function createRenderer() {
       hostContext: HostContext,
       internalHandle: OpaqueHandle,
     ): Instance {
-      console.log('createNode', JSON.stringify(rootContainer));
+      console.log('createNode', JSON.stringify(type), JSON.stringify(props));
       try {
         return dom.createNode(type, props);
       } catch (e) {
@@ -155,8 +155,14 @@ export function createRenderer() {
      * This method happens **in the render phase**. Do not mutate the tree from it.
      */
     shouldSetTextContent(type: Type, props: Props): boolean {
-      console.log('shouldSetTextContent', type, JSON.stringify(props));
-      return false;
+      switch (type) {
+        case 'box':
+          return false;
+        case 't':
+          return true;
+        default:
+          return false;
+      }
     },
 
     /**
@@ -410,6 +416,7 @@ export function createRenderer() {
       console.log(
         `commitUpdate(${type}, ${JSON.stringify(prevProps)}, ${JSON.stringify(nextProps)})`,
       );
+      instance.update(nextProps);
 
       doRender();
     },
@@ -544,7 +551,7 @@ export function createRenderer() {
     } catch (e) {
       console.error(`Error happened in render: `, e);
     }
-  }, 16);
+  }, 10);
 
   return function render(element: React.ReactNode, callback: (() => void) | null) {
     if (!reactRoot) {

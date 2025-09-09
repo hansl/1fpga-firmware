@@ -1,5 +1,5 @@
 // Type definitions for `1fpga:dom` module.
-import type React from 'react';
+import type React, { PropsWithChildren } from 'react';
 
 /** Document Object Model for the 1FPGA UI. */
 declare module '1fpga:dom' {
@@ -7,6 +7,8 @@ declare module '1fpga:dom' {
 
   export class Node {
     append(child: Node | TextFragment): void;
+
+    update(newProps: PropsWithChildren): void;
 
     text: string | undefined;
     readonly tagName: string | undefined;

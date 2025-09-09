@@ -1,65 +1,137 @@
 use crate::modules::one_fpga::dom::render::{FontProp, RenderingContext};
 use crate::modules::one_fpga::dom::Tree;
-use boa_engine::{js_error, JsResult};
-use boa_macros::{TryFromJs, TryIntoJs};
+use boa_engine::value::{Convert, TryFromJs, TryIntoJs};
+use boa_engine::{js_error, Context, JsError, JsResult, JsValue};
+use boa_macros::js_str;
+use either::Either;
 use embedded_graphics::geometry::Point;
 use embedded_graphics::pixelcolor::BinaryColor;
 use firmware_ui::macguiver::buffer::OsdBuffer;
 use taffy::{AvailableSpace, Layout, Size as TaffySize};
 use tracing::debug;
-use u8g2_fonts::types::{FontColor, VerticalPosition};
+use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
 
-#[derive(Debug)]
-pub(crate) struct TextContext {
-    text: String,
+fn measure_text(
+    text: &str,
     font: FontProp,
+    _known_dimensions: TaffySize<Option<f32>>,
+    _available_space: TaffySize<AvailableSpace>,
+    context: &mut RenderingContext,
+) -> TaffySize<f32> {
+    let renderer = context.fonts.get_or_create(font);
+
+    let dimensions = renderer
+        .get_rendered_dimensions(text, Point::zero(), VerticalPosition::Baseline)
+        .expect("Failed to get rendered dimensions");
+
+    if let Some(bb) = dimensions.bounding_box {
+        // Use dimensions.advance.x to account for white spaces.
+        taffy::Size {
+            width: dimensions.advance.x as _,
+            height: bb.size.height as _,
+        }
+    } else {
+        taffy::Size {
+            width: dimensions.advance.x as _,
+            height: dimensions.advance.y as _,
+        }
+    }
 }
 
-impl TextContext {
-    pub(crate) fn measure(
-        &self,
-        _known_dimensions: TaffySize<Option<f32>>,
-        _available_space: TaffySize<AvailableSpace>,
-        context: &mut RenderingContext,
-    ) -> TaffySize<f32> {
-        let renderer = context.fonts.get_or_create(self.font);
+#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
+pub(crate) struct JsPoint(pub Point);
 
-        let dimensions = renderer
-            .get_rendered_dimensions(
-                self.text.as_str(),
-                Point::zero(),
-                VerticalPosition::Baseline,
-            )
-            .expect("Failed to get rendered dimensions");
-
-        if let Some(bb) = dimensions.bounding_box {
-            // Use dimensions.advance.x to account for white spaces.
-            taffy::Size {
-                width: dimensions.advance.x as _,
-                height: bb.size.height as _,
-            }
+impl TryFromJs for JsPoint {
+    fn try_from_js(value: &JsValue, context: &mut Context) -> JsResult<Self> {
+        if let Some(o) = value.as_object() {
+            let x = o.get(js_str!("x"), context)?.to_i32(context)?;
+            let y = o.get(js_str!("y"), context)?.to_i32(context)?;
+            Ok(Self(Point::new(x, y)))
         } else {
-            taffy::Size {
-                width: dimensions.advance.x as _,
-                height: dimensions.advance.y as _,
-            }
+            Err(js_error!(TypeError: "Point must be an object."))
+        }
+    }
+}
+
+impl From<Point> for JsPoint {
+    fn from(value: Point) -> Self {
+        JsPoint(value)
+    }
+}
+
+impl From<JsPoint> for Point {
+    fn from(value: JsPoint) -> Self {
+        value.0
+    }
+}
+
+impl JsPoint {
+    pub fn zero() -> Self {
+        Self(Point::zero())
+    }
+
+    pub fn new(x: i32, y: i32) -> Self {
+        Self(Point::new(x, y))
+    }
+}
+
+#[derive(Debug, TryFromJs)]
+pub(crate) struct BoxNodeProps {
+    font: Option<FontProp>,
+    location: Option<JsPoint>,
+}
+
+#[derive(Debug, TryFromJs)]
+pub(crate) struct TextNodeProps {
+    children: Option<Either<Vec<Convert<String>>, Convert<String>>>,
+    font: Option<FontProp>,
+}
+
+impl TextNodeProps {
+    pub(crate) fn inner_text(&self) -> Option<String> {
+        if let Some(children) = &self.children {
+            Some(children.as_ref().either(
+                |l| {
+                    l.iter().fold("".to_string(), |mut acc, el| {
+                        acc.push_str(el.0.as_str());
+                        acc
+                    })
+                },
+                |r| r.0.clone(),
+            ))
+        } else {
+            None
         }
     }
 }
 
 #[derive(Debug)]
-pub(crate) enum NodeType {
+pub(crate) enum NodeInfo {
     Root,
-    Box { calculated_font: Option<FontProp> },
-    Fragment(TextContext),
+    Box {
+        props: BoxNodeProps,
+        calculated_font: Option<FontProp>,
+        calculated_location: Option<JsPoint>,
+    },
+    Text {
+        props: TextNodeProps,
+        text: String,
+        calculated_font: Option<FontProp>,
+        calculated_location: Option<JsPoint>,
+    },
+    Fragment {
+        text: String,
+        font: FontProp,
+        calculated_location: Option<JsPoint>,
+    },
 }
 
-impl NodeType {
-    fn measure(
-        &mut self,
-        tree: &Tree,
-        known_dimensions: taffy::geometry::Size<Option<f32>>,
-        available_space: taffy::geometry::Size<AvailableSpace>,
+impl NodeInfo {
+    pub(crate) fn measure(
+        &self,
+        _tree: &Tree,
+        known_dimensions: TaffySize<Option<f32>>,
+        available_space: TaffySize<AvailableSpace>,
         context: &mut RenderingContext,
     ) -> taffy::geometry::Size<f32> {
         if let taffy::geometry::Size {
@@ -71,22 +143,70 @@ impl NodeType {
         }
 
         match self {
-            NodeType::Box { .. } | NodeType::Root => taffy::Size::zero(),
-            NodeType::Fragment(fragment) => {
-                fragment.measure(known_dimensions, available_space, context)
-            }
+            NodeInfo::Box { .. } | NodeInfo::Root => taffy::Size::zero(),
+            NodeInfo::Text {
+                text,
+                calculated_font,
+                ..
+            } => measure_text(
+                text.as_str(),
+                calculated_font.unwrap_or_default(),
+                known_dimensions,
+                available_space,
+                context,
+            ),
+            NodeInfo::Fragment { text, font, .. } => measure_text(
+                text.as_str(),
+                *font,
+                known_dimensions,
+                available_space,
+                context,
+            ),
         }
     }
 
-    pub(crate) fn render_to_osd(
+    pub fn render_to_osd(
         &self,
         layout: &Layout,
         target: &mut OsdBuffer,
         context: &mut RenderingContext,
     ) -> JsResult<()> {
         match self {
-            NodeType::Fragment(TextContext { text, font }) => {
-                debug!(?text, ?font, "Rendering text");
+            NodeInfo::Text {
+                text,
+                calculated_font,
+                ..
+            } => {
+                debug!(?text, ?calculated_font, "Rendering text");
+
+                let renderer = context
+                    .fonts
+                    .get_or_create(calculated_font.unwrap_or_default());
+
+                // Need to add height as `FontRenderer` renders "up".
+                let position = if let Some(p) = self.calculated_location() {
+                    p.into()
+                } else {
+                    Point::new(
+                        layout.location.x as i32,
+                        layout.location.y as i32 + layout.size.height as i32,
+                    )
+                };
+
+                renderer
+                    .render(
+                        text.as_str(),
+                        position,
+                        VerticalPosition::Baseline,
+                        FontColor::Transparent(BinaryColor::On),
+                        target,
+                    )
+                    .expect("Failed to render text");
+
+                Ok(())
+            }
+            NodeInfo::Fragment { text, font, .. } => {
+                debug!(?text, ?font, "Rendering fragment");
                 let renderer = context.fonts.get_or_create(*font);
 
                 // Need to add height as `FontRenderer` renders "up".
@@ -110,91 +230,101 @@ impl NodeType {
             _ => Ok(()),
         }
     }
-}
 
-#[derive(Debug, TryFromJs, TryIntoJs)]
-struct JsPoint {
-    x: i32,
-    y: i32,
-}
-
-#[derive(Debug, TryFromJs)]
-pub(crate) struct NodeProps {
-    font: Option<FontProp>,
-    location: Option<JsPoint>,
-}
-
-#[derive(Debug)]
-pub(crate) struct NodeInfo {
-    node_type: NodeType,
-    props: Option<NodeProps>,
-}
-
-impl NodeInfo {
     pub(crate) fn text(&self) -> Option<&'_ str> {
-        match &self.node_type {
-            NodeType::Fragment(TextContext { text, .. }) => Some(text.as_str()),
+        match self {
+            NodeInfo::Fragment { text, .. } => Some(text.as_str()),
             _ => None,
         }
     }
 
     pub fn tag_name(&self) -> Option<&'_ str> {
-        match &self.node_type {
-            NodeType::Box { .. } => Some("box"),
+        match self {
+            NodeInfo::Box { .. } => Some("box"),
             _ => None,
         }
     }
 
-    pub fn set_text(&mut self, text: String) -> JsResult<()> {
+    pub fn set_text(&mut self, new_text: String) -> JsResult<()> {
         match self {
-            NodeInfo {
-                node_type: NodeType::Fragment(old),
-                ..
-            } => {
-                old.text = text;
+            NodeInfo::Text { text, .. } => {
+                *text = new_text;
                 Ok(())
             }
-            _ => Err(js_error!(ReferenceError: "Node is not a Fragment.")),
+            NodeInfo::Fragment { text, .. } => {
+                *text = new_text;
+                Ok(())
+            }
+            _ => Err(js_error!(ReferenceError: "Node cannot set text directly.")),
         }
     }
 
-    pub fn measure(
-        &mut self,
-        tree: &Tree,
-        known_dimensions: TaffySize<Option<f32>>,
-        available_space: TaffySize<AvailableSpace>,
-        rendering_context: &mut RenderingContext,
-    ) -> TaffySize<f32> {
-        self.node_type
-            .measure(tree, known_dimensions, available_space, rendering_context)
+    pub fn update(&mut self, new_props: JsValue, context: &mut Context) -> JsResult<()> {
+        match self {
+            NodeInfo::Root => Err(js_error!(ReferenceError: "Cannot update props on Root")),
+            NodeInfo::Box { props, .. } => {
+                *props = BoxNodeProps::try_from_js(&new_props, context)?;
+                Ok(())
+            }
+            NodeInfo::Text { props, text, .. } => {
+                *props = TextNodeProps::try_from_js(&new_props, context)?;
+                *text = props.inner_text().unwrap_or_default();
+                Ok(())
+            }
+            NodeInfo::Fragment { .. } => {
+                Err(js_error!(ReferenceError: "Cannot update props on Text Fragment"))
+            }
+        }
     }
 
     pub fn can_append(&self) -> bool {
-        match &self.node_type {
-            NodeType::Root => true,
-            NodeType::Box { .. } => true,
-            NodeType::Fragment(_) => false,
+        match self {
+            NodeInfo::Root => true,
+            NodeInfo::Box { .. } => true,
+            NodeInfo::Text { .. } => true,
+            NodeInfo::Fragment { .. } => false,
         }
     }
 
-    pub fn tag(name: String, props: NodeProps) -> JsResult<Self> {
-        let node_type = match name.as_str() {
-            "box" => NodeType::Box {
-                calculated_font: None,
-            },
-            _ => return Err(js_error!("Unknown node type {}", name)),
-        };
-
-        Ok(NodeInfo {
-            node_type,
-            props: Some(props),
-        })
+    pub fn tag(name: String, props: JsValue, context: &mut Context) -> JsResult<Self> {
+        match name.as_str() {
+            "box" => {
+                let props = BoxNodeProps::try_from_js(&props, context)?;
+                Ok(NodeInfo::Box {
+                    props,
+                    calculated_font: None,
+                    calculated_location: None,
+                })
+            }
+            "t" => {
+                let props = TextNodeProps::try_from_js(&props, context)?;
+                let text = props.inner_text().unwrap_or_default();
+                Ok(NodeInfo::Text {
+                    props,
+                    text,
+                    calculated_font: None,
+                    calculated_location: None,
+                })
+            }
+            _ => Err(js_error!("Unknown node type {}", name)),
+        }
     }
 
     pub fn style(&self, mut style: taffy::Style) -> taffy::Style {
-        if let Some(props) = self.props {
-            if let Some(location) = props {
-                style.position = taffy::Position::Absolute;
+        match self {
+            NodeInfo::Root => {}
+            NodeInfo::Box { props, .. } => {
+                if props.location.is_some() {
+                    style.position = taffy::Position::Absolute;
+                }
+                style.size = taffy::Size {
+                    width: taffy::Dimension::auto(),
+                    height: taffy::Dimension::auto(),
+                };
+                style.display = taffy::Display::Block;
+            }
+            NodeInfo::Text { .. } | NodeInfo::Fragment { .. } => {
+                style.display = taffy::Display::Flex;
             }
         }
 
@@ -202,61 +332,92 @@ impl NodeInfo {
     }
 
     pub fn fragment(text: String) -> JsResult<Self> {
-        let context = TextContext {
+        Ok(Self::Fragment {
             text,
             font: FontProp::default(),
-        };
-
-        Ok(Self {
-            node_type: NodeType::Fragment(context),
-            props: None,
+            calculated_location: None,
         })
     }
 
     pub fn root() -> JsResult<Self> {
-        Ok(Self {
-            node_type: NodeType::Root,
-            props: None,
-        })
+        Ok(Self::Root)
     }
 
-    pub fn font_cache(&self) -> Option<FontProp> {
-        match self.node_type {
-            NodeType::Root => None,
-            NodeType::Box {
-                calculated_font: font_cache,
-            } => font_cache,
-            NodeType::Fragment(TextContext { font, .. }) => Some(font),
+    pub fn calculated_font(&self) -> Option<FontProp> {
+        match self {
+            NodeInfo::Root => None,
+            NodeInfo::Box {
+                calculated_font, ..
+            } => *calculated_font,
+            NodeInfo::Text {
+                calculated_font, ..
+            } => *calculated_font,
+            NodeInfo::Fragment { font, .. } => Some(*font),
         }
     }
 
-    /// Update font spec from the parent.
-    pub fn calc_font(&mut self, parent: &NodeInfo) {
-        match &mut self.node_type {
-            NodeType::Root => {}
-            NodeType::Box {
-                calculated_font: font_cache,
+    pub fn calculated_location(&self) -> Option<JsPoint> {
+        match self {
+            NodeInfo::Root => None,
+            NodeInfo::Box {
+                calculated_location: Some(l),
+                ..
+            } => Some(*l),
+            NodeInfo::Text {
+                calculated_location: Some(l),
+                ..
+            } => Some(*l),
+            NodeInfo::Fragment {
+                calculated_location: Some(l),
+                ..
+            } => Some(*l),
+            NodeInfo::Box { props, .. } => props.location,
+            _ => None,
+        }
+    }
+
+    /// Update all the cache from the node's props and parent.
+    pub fn update_cache(&mut self, parent: &NodeInfo) {
+        match self {
+            NodeInfo::Root => {}
+            NodeInfo::Box {
+                calculated_font,
+                props,
+                calculated_location,
+                ..
             } => {
-                if font_cache.is_none()
-                    && let Some(ref props) = self.props
-                    && let Some(ref parent) = parent.font_cache()
-                {
-                    *font_cache = Some(props.font.unwrap_or_default().inherits(*parent))
+                if calculated_font.is_none() {
+                    *calculated_font = Some(
+                        props
+                            .font
+                            .unwrap_or_default()
+                            .inherits(parent.calculated_font().unwrap_or_default()),
+                    );
+                }
+
+                if calculated_location.is_none() {
+                    let new_location = parent.calculated_location();
+                    *calculated_location = new_location;
                 }
             }
-            NodeType::Fragment(f) => {
+            NodeInfo::Fragment { font, .. } => {
                 // Always update it, but it's always equal to the parent.
-                f.font = parent.font_cache().unwrap_or_default()
+                *font = parent.calculated_font().unwrap_or_default()
+            }
+            NodeInfo::Text {
+                calculated_font,
+                props,
+                ..
+            } => {
+                if calculated_font.is_none() {
+                    *calculated_font = Some(
+                        props
+                            .font
+                            .unwrap_or_default()
+                            .inherits(parent.calculated_font().unwrap_or_default()),
+                    )
+                }
             }
         }
-    }
-
-    pub fn render_to_osd(
-        &self,
-        layout: &Layout,
-        target: &mut OsdBuffer,
-        context: &mut RenderingContext,
-    ) -> JsResult<()> {
-        self.node_type.render_to_osd(layout, target, context)
     }
 }

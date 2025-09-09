@@ -1,14 +1,6 @@
 import { render } from '@1fpga/react-osd';
 import { FunctionComponent, PropsWithChildren, useEffect, useState } from 'react';
 
-// namespace React {
-//   namespace JSX {
-//     interface IntrinsicElements {
-//       t: FunctionComponent<PropsWithChildren<{ font: string }>>;
-//     }
-//   }
-// }
-
 export function TestComponent({ state }: { state: { done: boolean } }) {
   setTimeout(() => {
     console.log(JSON.stringify(state));
@@ -26,16 +18,16 @@ export function TestComponent({ state }: { state: { done: boolean } }) {
 
   return (
     <box>
-      <box font="small">
+      <t style={{ font: 'small' }}>
         Node {count}. After. {'\n'}
-      </box>
-      <box font="medium" location={{ x: 10, y: 20 }}>
+      </t>
+      <t font="medium">
         Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut
         labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco
         laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in
         voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat
         cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
-      </box>
+      </t>
     </box>
   );
 }
