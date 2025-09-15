@@ -1,11 +1,7 @@
-/**
- * Font size options for the UI.
- */
+/** Font size options for the UI. */
 export type FontSize = 'small' | 'medium' | 'large';
 
-/**
- * Date and time format options for the toolbar.
- */
+/** Date and time format options for the toolbar. */
 export type DateTimeFormat = 'default' | 'short' | 'timeOnly' | 'hidden';
 
 const settings = {
@@ -50,27 +46,25 @@ export function setInvertToolbar(invert: boolean): void {
 
 /**
  * Ping the NTP server and update the current time.
+ *
  * @param tz The timezone to use, or null to use the system timezone.
  * @param updateTz Whether to update the timezone as well.
  */
 export function updateDateTime(tz?: string, updateTz?: boolean): void {}
 
-/**
- * Get a list of all available timezones.
- */
+/** Get a list of all available timezones. */
 export function listTimeZones(): string[] {
   return ['TimeZone 1', 'TimeZone 2', 'TimeZone 3', 'TimeZone 4', 'TimeZone 5'];
 }
 
-/**
- * Get the timezone to use.
- */
+/** Get the timezone to use. */
 export function getTimeZone(): string | null {
   return settings.timeZone;
 }
 
 /**
  * Set the timezone to use.
+ *
  * @param timeZone The timezone to use, or null to not change the system time zone.
  */
 export function setTimeZone(timeZone: string): void {
@@ -79,6 +73,7 @@ export function setTimeZone(timeZone: string): void {
 
 /**
  * Manually set the date and time.
+ *
  * @param dateTime The date and time to set.
  */
 export function setDateTime(dateTime: Date): void {

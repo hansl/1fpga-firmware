@@ -38,22 +38,19 @@ declare module '1fpga:video' {
   }
 
   /**
-   * Read the Extended Display Identification info from the platform.
-   * If running in a platform that cannot change / affect the display,
-   * this will return undefined.
+   * Read the Extended Display Identification info from the platform. If running in a platform that
+   * cannot change / affect the display, this will return undefined.
    */
   export function readEdid(): Edid | undefined;
 
   /**
    * Set the video mode.
+   *
    * @param mode A string representing the video mode to set.
    */
   export function setMode(mode: string): Promise<void>;
 
-  /**
-   * Get the current video resolution. When not in the menu core, this
-   * will return undefined.
-   */
+  /** Get the current video resolution. When not in the menu core, this will return undefined. */
   export function getResolution(): { width: number; height: number } | undefined;
 
   export function switchToTerm(): void;

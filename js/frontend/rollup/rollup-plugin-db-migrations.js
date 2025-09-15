@@ -5,8 +5,9 @@ import * as path from 'path';
 
 /**
  * Simplify the SQL content by removing comments and extra whitespace.
+ *
  * @param sql {string} The SQL content to simplify.
- * @returns {*}
+ * @returns {any}
  */
 function simplifySql(sql) {
   return sql

@@ -1,16 +1,14 @@
 // Type definitions for `1fpga:osd` module.
 
 /**
- * This module provides functions for creating and managing user interfaces in OSD.
- * This is a very descriptive API, where the JavaScript setup the OSD as a single panel,
- * and then give control to the firmware to manage the OSD until the User interacts
- * with it. For example, the `textMenu` function will create a menu with a list of
- * textual option, and the function will return the index of the selected option.
+ * This module provides functions for creating and managing user interfaces in OSD. This is a very
+ * descriptive API, where the JavaScript setup the OSD as a single panel, and then give control to
+ * the firmware to manage the OSD until the User interacts with it. For example, the `textMenu`
+ * function will create a menu with a list of textual option, and the function will return the index
+ * of the selected option.
  */
 declare module '1fpga:osd' {
-  /**
-   * Represents a textual menu item.
-   */
+  /** Represents a textual menu item. */
   export interface TextMenuItem<R> {
     label: string;
     marker?: string;
@@ -24,69 +22,53 @@ declare module '1fpga:osd' {
     ) => undefined | void | R | Promise<undefined | void | R>;
   }
 
-  /**
-   * Represents the options for the `textMenu` function.
-   */
+  /** Represents the options for the `textMenu` function. */
   export interface TextMenuOptions<R> {
-    /**
-     * The title to show at the top of the menu.
-     */
+    /** The title to show at the top of the menu. */
     title?: String;
 
-    /**
-     * All items.
-     */
+    /** All items. */
     items: (string | TextMenuItem<R>)[];
 
-    /**
-     * The value to return if the user presses the back button (or function to execute).
-     */
+    /** The value to return if the user presses the back button (or function to execute). */
     back?: R | (() => undefined | void | R | Promise<undefined | void | R>);
 
-    /**
-     * The value to return if the user presses the cancel button (or function to execute).
-     */
+    /** The value to return if the user presses the cancel button (or function to execute). */
     sort?: () => Partial<TextMenuOptions<R>> | void | Promise<Partial<TextMenuOptions<R>> | void>;
 
-    /**
-     * The label to show for the sort button.
-     */
+    /** The label to show for the sort button. */
     sort_label?: string;
 
-    /**
-     * The label to show for the detail button. If missing, it will not be shown.
-     */
+    /** The label to show for the detail button. If missing, it will not be shown. */
     details?: string;
 
     /**
-     * The index of the item to highlight when presenting the menu to the
-     * user. By default, the first item is highlighted. If a number is
-     * provided but the index is out of bounds, the last item is highlighted.
-     * If an unselectable item is highlighted, the next selectable item will
-     * be highlighted instead.
+     * The index of the item to highlight when presenting the menu to the user. By default, the
+     * first item is highlighted. If a number is provided but the index is out of bounds, the last
+     * item is highlighted. If an unselectable item is highlighted, the next selectable item will be
+     * highlighted instead.
      */
     highlighted?: number;
 
     /**
-     * The value of an item to select. This will execute the `select` function
-     * of the item with the given value. If multiple items have the same label,
-     * the first one will be selected. Provide a number for an index instead.
+     * The value of an item to select. This will execute the `select` function of the item with the
+     * given value. If multiple items have the same label, the first one will be selected. Provide a
+     * number for an index instead.
      */
     selected?: string | number;
   }
 
   /**
-   * Creates a textual menu with the given options and show it to the user,
-   * waiting for the user to select an option. The function will return a
-   * tuple with the action string and the `id` of the selected option.
+   * Creates a textual menu with the given options and show it to the user, waiting for the user to
+   * select an option. The function will return a tuple with the action string and the `id` of the
+   * selected option.
+   *
    * @param options The options for the textual menu.
    * @returns The result of the selected option, as a Promise.
    */
   export function textMenu<R>(options: TextMenuOptions<R>): Promise<R>;
 
-  /**
-   * Show an alert to the user, with OK.
-   */
+  /** Show an alert to the user, with OK. */
   export function alert(message: string): Promise<void>;
   export function alert(title: string, message: string): Promise<void>;
   export function alert(options: {
@@ -100,8 +82,8 @@ declare module '1fpga:osd' {
   }): Promise<null | number>;
 
   /**
-   * Show a prompt to the user, which the user can input any text, and an OK/Cancel
-   * choices.
+   * Show a prompt to the user, which the user can input any text, and an OK/Cancel choices.
+   *
    * @returns The user input, or `undefined` if the user canceled the operation.
    */
   export function prompt(message: string): Promise<undefined | string>;
@@ -113,6 +95,7 @@ declare module '1fpga:osd' {
 
   /**
    * Show a prompt to the user for a button/key password.
+   *
    * @param title The title of the prompt.
    * @param message The message (title) to show to the user.
    * @param length The length of the password.
@@ -124,15 +107,11 @@ declare module '1fpga:osd' {
     length: number,
   ): Promise<string[] | null>;
 
-  /**
-   * Update the OSD with a message but don't let the user interact with it.
-   */
+  /** Update the OSD with a message but don't let the user interact with it. */
   export function show(message: string): void;
   export function show(title: string, message: string): void;
 
-  /**
-   * Show a message to the user, with a QR Code.
-   */
+  /** Show a message to the user, with a QR Code. */
   export function qrCode(url: string, message: string): void;
   export function qrCode(url: string, title: string, message: string): void;
 
@@ -147,8 +126,8 @@ declare module '1fpga:osd' {
   }
 
   /**
-   * Select a file from the user's device. Return the path of the selected file,
-   * or `undefined` if the user canceled the operation.
+   * Select a file from the user's device. Return the path of the selected file, or `undefined` if
+   * the user canceled the operation.
    */
   export function selectFile(
     title: string,
@@ -156,27 +135,21 @@ declare module '1fpga:osd' {
     options: SelectFileOptions,
   ): Promise<string | undefined>;
 
-  /**
-   * Show the input tester panel.
-   */
+  /** Show the input tester panel. */
   export function inputTester(): Promise<void>;
 
-  /**
-   * Prompt the user for a shortcut.
-   */
+  /** Prompt the user for a shortcut. */
   export function promptShortcut(title?: string, message?: string): Promise<string | undefined>;
 
   /**
-   * Hide the OSD. This does not change the execution of the event loop,
-   * it is the responsibility of the caller to re-show the OSD later and
-   * manage events while hidden.
+   * Hide the OSD. This does not change the execution of the event loop, it is the responsibility of
+   * the caller to re-show the OSD later and manage events while hidden.
    */
   export function hideOsd(): Promise<void>;
 
   /**
-   * Show the OSD. This does not change the execution of the event loop,
-   * it is the responsibility of the caller to re-hide the OSD later and
-   * manage events while shown.
+   * Show the OSD. This does not change the execution of the event loop, it is the responsibility of
+   * the caller to re-hide the OSD later and manage events while shown.
    */
   export function showOsd(): Promise<void>;
 }

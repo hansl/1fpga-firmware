@@ -27,6 +27,7 @@ export function list(game?: ExtendedGamesRow): Promise<ScreenshotRow[]> {
 
 /**
  * Save a screenshot to the database.
+ *
  * @param game
  * @param path
  */

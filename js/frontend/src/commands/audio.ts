@@ -2,9 +2,7 @@ import * as core from '1fpga:core';
 
 import { db, settings } from '@/services';
 
-/**
- * A command to set the volume to 0.
- */
+/** A command to set the volume to 0. */
 export class VolumeMuteCommand extends db.GeneralCommandImpl {
   key = 'volumeMute';
   label = 'Mute volume';
@@ -26,9 +24,7 @@ export class VolumeMuteCommand extends db.GeneralCommandImpl {
   }
 }
 
-/**
- * A command to set the volume to 100%.
- */
+/** A command to set the volume to 100%. */
 export class VolumeMaxCommand extends db.GeneralCommandImpl {
   key = 'volumeMax';
   label = 'Max volume (100%)';
@@ -50,9 +46,7 @@ export class VolumeMaxCommand extends db.GeneralCommandImpl {
   }
 }
 
-/**
- * A command to raise the volume by 10%.
- */
+/** A command to raise the volume by 10%. */
 export class VolumeUpCommand extends db.GeneralCommandImpl {
   key = 'volumeUp';
   label = 'Volume up by 10%';
@@ -76,9 +70,7 @@ export class VolumeUpCommand extends db.GeneralCommandImpl {
   }
 }
 
-/**
- * A command to lower the volume by 10%.
- */
+/** A command to lower the volume by 10%. */
 export class VolumeDownCommand extends db.GeneralCommandImpl {
   key = 'volumeDown';
   label = 'Volume down by 10%';

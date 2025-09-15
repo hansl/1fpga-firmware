@@ -19,6 +19,7 @@ export interface GamesId {
 
 /**
  * Query a system to identify the first hit, returning it or undefined if missed.
+ *
  * @param sql1
  * @param sha
  * @param size
@@ -59,9 +60,10 @@ export interface IdentifyOptions {
 
 /**
  * Identify games from the systems in our database.
+ *
  * @param root The root path to identify.
  * @param create Create the entries instead of just returning them.
- * @return The list of all games identified.
+ * @returns The list of all games identified.
  */
 export async function identify(
   root: string,

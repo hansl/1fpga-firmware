@@ -7,8 +7,8 @@ import { DbStorage } from '../storage';
 import { User } from '../user';
 
 /**
- * The possible values for the `startOn` setting.
- * If you update this setting, remember to also update the `start-on.json` schema.
+ * The possible values for the `startOn` setting. If you update this setting, remember to also
+ * update the `start-on.json` schema.
  */
 export enum StartOnKind {
   MainMenu = 'main-menu',

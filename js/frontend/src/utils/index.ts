@@ -11,9 +11,7 @@ export * as versions from './versions';
 
 export * as assert from './assert';
 
-/**
- * Reset the database and all files downloaded for 1FPGA.
- */
+/** Reset the database and all files downloaded for 1FPGA. */
 export async function resetAll(restart = false): Promise<never> {
   await resetDb();
   await closeAllDb();

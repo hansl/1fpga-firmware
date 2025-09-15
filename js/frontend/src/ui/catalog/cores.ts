@@ -6,14 +6,10 @@ import * as remote from '@/services/remote';
 import { NormalizedCore } from '@/services/remote/catalog';
 
 export interface SelectCoresOptions {
-  /**
-   * A predicate to filter cores.
-   */
+  /** A predicate to filter cores. */
   predicate?: (core: remote.catalog.NormalizedCore) => boolean;
 
-  /**
-   * Show an option to install all cores.
-   */
+  /** Show an option to install all cores. */
   installAll?: boolean;
 }
 

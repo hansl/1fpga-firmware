@@ -14,20 +14,14 @@ interface UserRow {
   admin: number;
 }
 
-/**
- * Represents a user.
- */
+/** Represents a user. */
 export class User {
-  /**
-   * Log out the currently logged-in user.
-   */
+  /** Log out the currently logged-in user. */
   public static async logout() {
     loggedInUser = null;
   }
 
-  /**
-   * Convert a password from a prompt into a string.
-   */
+  /** Convert a password from a prompt into a string. */
   public static passwordToString(password: string[] | null): string | null {
     if (password === null) {
       return null;
@@ -38,6 +32,7 @@ export class User {
 
   /**
    * Get the currently logged-in user.
+   *
    * @param fail Whether to throw an error if no user is logged in.
    * @returns The logged-in user, or `null` if no user is logged in.
    */
@@ -67,10 +62,11 @@ export class User {
 
   /**
    * Log in a user.
+   *
    * @param username The username of the user to login.
    * @param force Whether to force the login, even if the user has a password.
-   * @returns The logged-in user, or `null` if the user could not be logged in
-   *          (e.g. invalid password).
+   * @returns The logged-in user, or `null` if the user could not be logged in (e.g. invalid
+   *   password).
    */
   public static async login(
     username: string = DEFAULT_USERNAME,
@@ -103,8 +99,8 @@ export class User {
   }
 
   /**
-   * Return whether the user is able to logout. Users can logout if there is
-   * more than one user, or if the user has a password.
+   * Return whether the user is able to logout. Users can logout if there is more than one user, or
+   * if the user has a password.
    */
   static async canLogOut() {
     const [{ count }] = await sql<{ count: number }>`SELECT COUNT(*) as count
@@ -129,9 +125,9 @@ export class User {
 
   /**
    * Create a new user. Please note that the user is not logged in after creation.
+   *
    * @param username The username of the new user.
-   * @param password The password of the new user, or `null` if the user should
-   *                 not have a password.
+   * @param password The password of the new user, or `null` if the user should not have a password.
    * @param admin Whether the new user should be an admin.
    * @returns The newly created user.
    * @throws If the user already exists or there is a problem adding the user.

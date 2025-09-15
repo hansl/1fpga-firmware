@@ -4,13 +4,13 @@ import { NormalizedCatalog, NormalizedSystem } from '@/services/remote/catalog';
 import { downloadAndCheck } from '@/services/remote/files';
 
 /**
- * Download a System from a catalog. The system contains information such as full
- * description, images, etc. It's essentially a SQLite file in itself.
+ * Download a System from a catalog. The system contains information such as full description,
+ * images, etc. It's essentially a SQLite file in itself.
  *
- * @todo Verify the schema of the database. For now, just assume we know what we're doing.
  * @param catalog The remote catalog.
  * @param system The remote system, normalized. It should be part of the catalog.
- * @return The path of the database downloaded.
+ * @returns The path of the database downloaded.
+ * @todo Verify the schema of the database. For now, just assume we know what we're doing.
  */
 export async function download(catalog: NormalizedCatalog, system: NormalizedSystem) {
   if (system.db) {

@@ -15,19 +15,13 @@ export function running() {
   return { game: runningGame, core: runningCore };
 }
 
-/**
- * Options when starting a core.
- */
+/** Options when starting a core. */
 export interface CoreOptions {
-  /**
-   * Show the OSD menu when the core starts.
-   */
+  /** Show the OSD menu when the core starts. */
   menu?: boolean;
 }
 
-/**
- * Launch a core, and the core loop. Does not show the menu.
- */
+/** Launch a core, and the core loop. Does not show the menu. */
 export async function core(coreRow: db.cores.CoreRow | string, { menu = false }: CoreOptions = {}) {
   const path = typeof coreRow === 'string' ? coreRow : coreRow.rbfPath;
   assert.not.null_(path, 'Core does not have an RBF path');
@@ -55,6 +49,7 @@ export async function core(coreRow: db.cores.CoreRow | string, { menu = false }:
 
 /**
  * Launch a game.
+ *
  * @param gameRow
  */
 export async function game(gameRow: db.games.ExtendedGamesRow) {

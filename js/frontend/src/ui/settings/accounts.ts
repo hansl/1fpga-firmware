@@ -99,6 +99,7 @@ async function manageUser(user: services.user.User) {
 
 /**
  * Show the account settings menu.
+ *
  * @returns Whether we need to refresh the main menu.
  */
 export async function accountsSettingsMenu(): Promise<boolean> {

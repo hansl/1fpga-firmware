@@ -12,6 +12,7 @@ import { NormalizedRelease } from './catalog';
 
 /**
  * Return the latest version of a tagged version.
+ *
  * @param releases List of releases.
  * @param tag The tag to look for.
  */
@@ -20,8 +21,9 @@ export const getLatestTagOf = (releases: NormalizedRelease[], tag: string) => {
 };
 
 /**
- * Get the latest version, which is either the highest version with the `latest` tag
- * or the highest version number that's not alpha/beta.
+ * Get the latest version, which is either the highest version with the `latest` tag or the highest
+ * version number that's not alpha/beta.
+ *
  * @param releases A list of releases, normalized.
  */
 export const latestOf = (releases: NormalizedRelease[]) => {
@@ -37,8 +39,9 @@ export const latestOf = (releases: NormalizedRelease[]) => {
 };
 
 /**
- * Upgrade the 1FPGA binary with the release specified. That the release corresponds to
- * the right binary list of releases is not verified, but a signature MUST be provided.
+ * Upgrade the 1FPGA binary with the release specified. That the release corresponds to the right
+ * binary list of releases is not verified, but a signature MUST be provided.
+ *
  * @param baseUrl
  * @param release
  * @param hooks List of functions to execute on certain events.
@@ -47,9 +50,7 @@ export async function upgradeOneFpga(
   baseUrl: string,
   release: NormalizedRelease,
   hooks: {
-    /**
-     * Execute this after the verification but before actual installation.
-     */
+    /** Execute this after the verification but before actual installation. */
     post?: () => Promise<void>;
   } = {},
 ) {

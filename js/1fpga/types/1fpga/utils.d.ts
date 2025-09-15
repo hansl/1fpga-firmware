@@ -1,12 +1,11 @@
 // Type definitions for `1fpga:utils` module.
 
-/**
- * Various utility functions.
- */
+/** Various utility functions. */
 declare module '1fpga:utils' {
   export interface IpsPatchOptions {
     /**
      * Whether to skip the checksum verification or not.
+     *
      * @default false
      */
     skipChecksum?: boolean;
@@ -14,6 +13,7 @@ declare module '1fpga:utils' {
 
   /**
    * Apply an IPS patch to a ROM. The patch will be applied in-place.
+   *
    * @param rom The ROM to patch.
    * @param ips The IPS patch to apply.
    * @param options The options for patching.

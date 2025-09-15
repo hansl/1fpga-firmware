@@ -53,18 +53,16 @@ export function parseRow(row: CatalogRow): {
 }
 
 /**
- * Return the difference between a catalog's latestJson and its initial JSON. If there's
- * no latestJson field, the diffed catalog will be empty. The difference will include
- * every core, system and other pieces of a catalog that need to be updated.
+ * Return the difference between a catalog's latestJson and its initial JSON. If there's no
+ * latestJson field, the diffed catalog will be empty. The difference will include every core,
+ * system and other pieces of a catalog that need to be updated.
  */
 export function latestDiff(row: CatalogRow): remote.catalog.NormalizedCatalog {
   const { current, latest } = parseRow(row);
   return remote.catalog.diff(current, latest);
 }
 
-/**
- * Return an ID-to-CatalogRow map from the database.
- */
+/** Return an ID-to-CatalogRow map from the database. */
 export async function map(): Promise<Map<number, CatalogRow>> {
   return new Map((await list()).map(row => [row.id, row]));
 }
@@ -113,6 +111,7 @@ export async function exists(url: string) {
 
 /**
  * Update the latest field in the catalog.
+ *
  * @param row
  * @param latest
  */

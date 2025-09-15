@@ -28,6 +28,7 @@ export interface FetchJsonAndValidateOptions {
 
 /**
  * Fetch a JSON file from the internet and validate it.
+ *
  * @param url The URL to fetch.
  * @param validate The validation function to use.
  * @param options Options for fetching the url.

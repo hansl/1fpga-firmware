@@ -1,8 +1,6 @@
 import { fail } from '@/utils/assert/error';
 
-/**
- * Assert that a value is not null, otherwise throw an exception.
- */
+/** Assert that a value is not null, otherwise throw an exception. */
 export function null_<T>(
   value: T | undefined | null,
   message?: string | (() => string),

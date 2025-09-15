@@ -15,29 +15,19 @@ const SORT_LABEL = {
 };
 
 export interface PickGameOptions {
-  /**
-   * The title of the game selection menu.
-   */
+  /** The title of the game selection menu. */
   title?: string;
 
-  /**
-   * Whether to include unplayed games in the list.
-   */
+  /** Whether to include unplayed games in the list. */
   includeUnplayed?: boolean;
 
-  /**
-   * Whether to allow the player to show details on a game.
-   */
+  /** Whether to allow the player to show details on a game. */
   details?: boolean;
 
-  /**
-   * The system to filter the games by.
-   */
+  /** The system to filter the games by. */
   system?: string;
 
-  /**
-   * Whether to allow the player to load a ROM directly.
-   */
+  /** Whether to allow the player to load a ROM directly. */
   allowFile?: boolean;
 }
 
@@ -51,6 +41,7 @@ function ellipses(max: number, end = false) {
 
 /**
  * Pick a game from the list of games available on the platform.
+ *
  * @param options Options for the game selection.
  * @returns The selected game, or `null` if no game was selected (e.g. "Back").
  */

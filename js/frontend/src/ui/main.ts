@@ -205,9 +205,7 @@ async function mainMenu(
   return false;
 }
 
-/**
- * Initialize the application.
- */
+/** Initialize the application. */
 async function initAll() {
   // Before setting commands (to avoid commands to interfere with the login menu),
   // we need to initialize the user.
@@ -246,6 +244,7 @@ async function initAll() {
 
 /**
  * Main function of the frontend.
+ *
  * @returns `true` if the application should exit.
  */
 export async function mainInner(): Promise<boolean> {

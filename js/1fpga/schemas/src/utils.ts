@@ -1,9 +1,6 @@
 import * as zod from 'zod';
 
-/**
- * A version number or version string. If a string, it is expected to
- * be semver-ish.
- */
+/** A version number or version string. If a string, it is expected to be semver-ish. */
 export const Version = zod
   .string()
   .min(1)

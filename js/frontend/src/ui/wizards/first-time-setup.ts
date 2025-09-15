@@ -30,9 +30,7 @@ import {
   wizard,
 } from './wizard';
 
-/**
- * A wizard step that prompts the user for a password.
- */
+/** A wizard step that prompts the user for a password. */
 function password(
   title: string,
   message: string,
@@ -49,9 +47,7 @@ function password(
   };
 }
 
-/**
- * A wizard step that prompts the user for a file or directory.
- */
+/** A wizard step that prompts the user for a file or directory. */
 function selectPath(
   title: string,
   options?: { initialDir?: string },
@@ -69,10 +65,7 @@ function selectPath(
   };
 }
 
-/**
- * A wizard step that prompts the user to set a password, verify it and
- * will succeed if both match.
- */
+/** A wizard step that prompts the user to set a password, verify it and will succeed if both match. */
 function passwordAndVerify(
   title: string = 'Set Password',
   length = 4,
@@ -330,9 +323,7 @@ const firstMessage = message(
   { choices: ["Let's Go!"], noCancel: true },
 );
 
-/**
- * Runs the first time setup wizard.
- */
+/** Runs the first time setup wizard. */
 export async function firstTimeSetup() {
   console.warn('Running first time setup.');
   await wizard<any>(

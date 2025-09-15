@@ -7,7 +7,6 @@ edition = "2024"
 
 [dependencies]
 image.workspace = true
-linuxfb.workspace = true
 one-fpga.workspace = true
 ouroboros.workspace = true
 reqwest.workspace = true

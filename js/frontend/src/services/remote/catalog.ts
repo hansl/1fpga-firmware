@@ -5,9 +5,7 @@ import * as osd from '1fpga:osd';
 import { latestOf } from '@/services/remote/releases';
 import { ValidationError, fetchJsonAndValidate, versions } from '@/utils';
 
-/**
- * A list of catalogs that are officially known.
- */
+/** A list of catalogs that are officially known. */
 export enum WellKnownCatalogs {
   // The basic stable 1FPGA catalog.
   OneFpga = 'https://catalog.1fpga.cloud/catalog.json',
@@ -20,10 +18,9 @@ export enum WellKnownCatalogs {
 }
 
 /**
- * Understand whether an inner object is a URL or versioned URL or actual
- * type. If this is a URL, the `_url` will be filled with the resolved
- * URL fetched, and if it's a versioned URL, the version will also be
- * set as the `_version` property.
+ * Understand whether an inner object is a URL or versioned URL or actual type. If this is a URL,
+ * the `_url` will be filled with the resolved URL fetched, and if it's a versioned URL, the version
+ * will also be set as the `_version` property.
  */
 async function fetchVersioned<InnerSchema extends schemas.ZodType>(
   baseUrl: string | undefined,
@@ -85,9 +82,7 @@ export type NormalizedRelease = Normalized<schemas.catalog.Release>;
 
 export type NormalizedReleases = Normalized<Record<string, NormalizedRelease[]>>;
 
-/**
- * A normalized catalog with cores.
- */
+/** A normalized catalog with cores. */
 export type NormalizedCatalog = Normalized<schemas.catalog.Catalog> & {
   cores?: NormalizedCores;
   systems?: NormalizedSystems;
@@ -182,13 +177,13 @@ export async function fetchAndNormalizeCatalog(url: string): Promise<NormalizedC
 }
 
 /**
- * Return the difference between a catalog's latestJson and its initial JSON. If there's
- * no latestJson field, the diffed catalog will be empty. The difference will include
- * every core, system and other pieces of a catalog that need to be updated.
+ * Return the difference between a catalog's latestJson and its initial JSON. If there's no
+ * latestJson field, the diffed catalog will be empty. The difference will include every core,
+ * system and other pieces of a catalog that need to be updated.
  *
- * If the two catalogs don't share the same name, url or anything, this might not do what
- * you want it to do. This function only works if both catalog and latest are from the
- * same catalog.
+ * If the two catalogs don't share the same name, url or anything, this might not do what you want
+ * it to do. This function only works if both catalog and latest are from the same catalog.
+ *
  * @param current The base normalized catalog.
  * @param latest The latest catalog to be diffed against the base.
  * @returns The difference between the current and latest that need to be updated.

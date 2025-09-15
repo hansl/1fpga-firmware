@@ -8,19 +8,17 @@ const PARTITION_TOO_LARGE_MSEC = 500;
 const PARTITION_TOO_SMALL_MSEC = 200;
 
 /**
- * Partition an array of items, and show progress while processing each
- * partition. This is useful when processing a large array of items, and you
- * want to show progress to the user.
+ * Partition an array of items, and show progress while processing each partition. This is useful
+ * when processing a large array of items, and you want to show progress to the user.
  *
- * The partition size is the number of items to process in each partition,
- * and can change over time if it takes too long to process each partition.
+ * The partition size is the number of items to process in each partition, and can change over time
+ * if it takes too long to process each partition.
  *
  * @param array The array to partition.
  * @param partitionSize The size of each partition.
  * @param title The title to show in the progress bar.
- * @param progressMessage A function that returns the message to show in the
- *                        progress bar, given the current index and total
- *                        number of items.
+ * @param progressMessage A function that returns the message to show in the progress bar, given the
+ *   current index and total number of items.
  * @param progress A function that processes each partition.
  */
 export async function partitionAndProgress<T>(

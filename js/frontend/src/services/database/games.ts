@@ -8,9 +8,7 @@ import { asArray, sql } from '@/utils';
 import { User } from '../user';
 import type { GamesId } from './games_identification';
 
-/**
- * A Row from the Games table.
- */
+/** A Row from the Games table. */
 export interface GamesRow extends Row {
   id: number;
   name: string;
@@ -22,8 +20,8 @@ export interface GamesRow extends Row {
 }
 
 /**
- * A Row from the ExtendedGamesView which links games with their systems and
- * other useful information.
+ * A Row from the ExtendedGamesView which links games with their systems and other useful
+ * information.
  */
 export interface ExtendedGamesRow extends Row {
   id: number;
@@ -48,18 +46,14 @@ export enum GameSortOrder {
 }
 
 export interface GamesListOptions {
-  /**
-   * The sort order.
-   */
+  /** The sort order. */
   sort?: GameSortOrder;
 
   limit?: number;
 
   index?: number;
 
-  /**
-   * Merge games with the same game identification.
-   */
+  /** Merge games with the same game identification. */
   includeUnplayed?: boolean;
   includeUnfavorites?: boolean;
   system?: string;
@@ -67,8 +61,8 @@ export interface GamesListOptions {
   playlist?: PlaylistsRow;
 
   /**
-   * Includes the number of played seconds by a user. If the user isn't
-   * specified, will include played seconds by ALL users.
+   * Includes the number of played seconds by a user. If the user isn't specified, will include
+   * played seconds by ALL users.
    */
   includeSecondsPlayed?: { userId?: number };
 }
@@ -122,8 +116,9 @@ export async function count(options: GamesListOptions = {}) {
 }
 
 /**
- * Get one or multiple extended games rows based on their IDs. If `id` is an array,
- * this will return the rows in the exact order they were received.
+ * Get one or multiple extended games rows based on their IDs. If `id` is an array, this will return
+ * the rows in the exact order they were received.
+ *
  * @param id
  * @param keys
  */
@@ -159,6 +154,7 @@ export async function getExtended<T extends keyof ExtendedGamesRow = keyof Exten
 
 /**
  * Returns a map of all IDs -> ExtendedGamesRow.
+ *
  * @param ids
  * @param keys
  */
@@ -187,9 +183,7 @@ export interface FirstOptions {
   sha256?: string | string[];
 }
 
-/**
- * Return the first game we can find.
- */
+/** Return the first game we can find. */
 export async function first({ sha256 }: FirstOptions = {}): Promise<ExtendedGamesRow | null> {
   if (sha256 !== undefined) {
     const [row] = await sql<ExtendedGamesRow>`

@@ -193,9 +193,7 @@ export const Button = forwardRef(function Button(
   );
 });
 
-/**
- * Expand the hit area to at least 44×44px on touch devices
- */
+/** Expand the hit area to at least 44×44px on touch devices */
 export function TouchTarget({ children }: { children: React.ReactNode }) {
   return (
     <>

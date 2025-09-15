@@ -1396,7 +1396,6 @@ dependencies = [
  "image",
  "ips",
  "liboptic_edid",
- "linuxfb",
  "mister-fpga",
  "mister-fpga-ini",
  "nix 0.30.1",

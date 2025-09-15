@@ -1,8 +1,6 @@
 // Type definitions for the `1fpga:fs` module.
 
-/**
- * File system functions.
- */
+/** File system functions. */
 declare module '1fpga:fs' {
   export function writeFile(path: string, data: string): Promise<void>;
   export function writeFile(path: string, data: Uint8Array): Promise<void>;
@@ -20,6 +18,7 @@ declare module '1fpga:fs' {
 
   /**
    * Create a directory.
+   *
    * @param path The path to the directory.
    * @param all Whether to create all directories in the path.
    */
@@ -27,6 +26,7 @@ declare module '1fpga:fs' {
 
   /**
    * Delete a directory.
+   *
    * @param path
    * @param recursive
    */
@@ -41,12 +41,14 @@ declare module '1fpga:fs' {
 
   /**
    * Get the SHA-256 hash of a file, in hexadecimal.
+   *
    * @param path The path to the file.
    */
   export function sha256(path: string): Promise<string>;
 
   /**
    * Get the SHA-256 hash of multiple files.
+   *
    * @param path The paths to the files.
    */
   export function sha256(path: string[]): Promise<string[]>;

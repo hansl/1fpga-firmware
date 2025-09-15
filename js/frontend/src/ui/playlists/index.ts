@@ -78,6 +78,7 @@ export async function manage(playlist: services.db.playlists.PlaylistsRow) {
 
 /**
  * Import a playlist into the database.
+ *
  * @param name The name of the playlist to replace or import.
  * @param systems An array of systems and sql tags (to save time) to query for the list of games.
  * @returns A list of missing items that were not imported, or null if the action was cancelled.
@@ -122,9 +123,7 @@ async function importPlaylist(
   return missing;
 }
 
-/**
- * Import a playlist from a catalog's system database.
- */
+/** Import a playlist from a catalog's system database. */
 export async function importPlaylistMenu() {
   const playlists = await services.local.listCatalogPlaylists();
 

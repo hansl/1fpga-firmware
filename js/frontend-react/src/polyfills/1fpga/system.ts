@@ -4,9 +4,7 @@ export function shutdown(): never {
   while (true) {}
 }
 
-/**
- * Restart is like shutdown here.
- */
+/** Restart is like shutdown here. */
 export function restart(): never {
   // This runs in the worker.
   postMessage({ kind: 'shutdown' });

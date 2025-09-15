@@ -1,15 +1,14 @@
 /**
- * This file contains the command system. It allows for the registration of commands
- * that can be executed by the user. Commands can be of two types:
- * - General: These are commands that can be executed by the user. They can have shortcuts
- *            associated with them.
- *            Example: "Show the core menu"
- * - Core: These are commands that are executed when a core is running.
- *         Example: "Quit to the main menu"
+ * This file contains the command system. It allows for the registration of commands that can be
+ * executed by the user. Commands can be of two types:
  *
- * `GeneralCommand` and `CoreCommand` are holders for the type of command they represent.
- * They do not hold any value. The value is stored in the `Shortcut` class, which isn't
- * public.
+ * - General: These are commands that can be executed by the user. They can have shortcuts associated
+ *   with them. Example: "Show the core menu"
+ * - Core: These are commands that are executed when a core is running. Example: "Quit to the main
+ *   menu"
+ *
+ * `GeneralCommand` and `CoreCommand` are holders for the type of command they represent. They do
+ * not hold any value. The value is stored in the `Shortcut` class, which isn't public.
  */
 import * as commands from '1fpga:commands';
 import * as core from '1fpga:core';
@@ -34,31 +33,25 @@ export type GeneralCommandHandler<T> = (
 export type CoreCommandHandler<T> = (core: core.OneFpgaCore, meta: T) => void | Promise<void>;
 
 /**
- * The implementation of a command handler. This will only be created
- * once per command (not per shortcut), and should not contain any
- * internal state.
+ * The implementation of a command handler. This will only be created once per command (not per
+ * shortcut), and should not contain any internal state.
  */
 export abstract class CommandImpl<T> {
   /**
-   * The default shortcut for this command. This will be used when the user
-   * first logs in and the command is created for the first time.
+   * The default shortcut for this command. This will be used when the user first logs in and the
+   * command is created for the first time.
    */
   default: string | string[] | undefined = undefined;
 
-  /**
-   * The key that identifies this command in the database.
-   * This MUST be unique.
-   */
+  /** The key that identifies this command in the database. This MUST be unique. */
   abstract get key(): string;
 
-  /**
-   * A human-readable label for this command, generally.
-   */
+  /** A human-readable label for this command, generally. */
   abstract get label(): string;
 
   /**
-   * The category that this command belongs to. This will be used to group
-   * commands in the UI. It is case-sensitive and free form.
+   * The category that this command belongs to. This will be used to group commands in the UI. It is
+   * case-sensitive and free form.
    */
   abstract get category(): string;
 
@@ -73,6 +66,7 @@ export abstract class CommandImpl<T> {
 
   /**
    * Inner version of execute.
+   *
    * @param core
    * @param v
    */
@@ -156,9 +150,7 @@ class Shortcuts {
   }
 }
 
-/**
- * A command that links shortcuts to a command implementation.
- */
+/** A command that links shortcuts to a command implementation. */
 export class Command<T = unknown> {
   public static async create<T>(def: CommandImpl<T>, firstTime = false): Promise<Command<T>> {
     const user = User.loggedInUser(true);
@@ -248,11 +240,13 @@ export class Commands {
 
   /**
    * Initialize the command subsystem;
-   *  - Register shortcuts that are in the database.
-   *  - Create the commands for both general and core.
+   *
+   * - Register shortcuts that are in the database.
+   * - Create the commands for both general and core.
+   *
    * @param user The logged-in user to use for registering commands.
-   * @param firstTime Whether this is the first time the commands are being initialized.
-   *                  This will set the default shortcuts for commands that have one.
+   * @param firstTime Whether this is the first time the commands are being initialized. This will
+   *   set the default shortcuts for commands that have one.
    */
   public static async login(user: User, firstTime = false) {
     assert.assert(!Commands.isInit, 'Commands already initialized.');
@@ -264,9 +258,7 @@ export class Commands {
     }
   }
 
-  /**
-   * Clear all commands and shortcuts. Used when logging out.
-   */
+  /** Clear all commands and shortcuts. Used when logging out. */
   public static async logout() {
     assert.assert(Commands.isInit, 'Commands not initialized.');
 
@@ -282,6 +274,7 @@ export class Commands {
 
   /**
    * Register a new command. Add the shortcuts to the system, if any.
+   *
    * @param Class The class of command to register.
    */
   public static async register<Json>(Class: { new (): CommandImpl<Json> }) {
@@ -297,9 +290,7 @@ export class Commands {
     }
   }
 
-  /**
-   * List all commands.
-   */
+  /** List all commands. */
   public static async list<T>(): Promise<Command<T>[]> {
     return Array.from(Commands.commands.values()) as Command<T>[];
   }

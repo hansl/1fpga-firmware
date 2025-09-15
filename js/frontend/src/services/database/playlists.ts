@@ -12,6 +12,7 @@ export interface PlaylistsRow extends Row {
 
 /**
  * Create a new playlist in the database.
+ *
  * @param name
  * @param owner
  * @param isPublic

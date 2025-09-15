@@ -1,8 +1,6 @@
 import { postMessageAndWait } from '@/utils/worker/postMessageAndWait';
 
-/**
- * Represents a textual menu item.
- */
+/** Represents a textual menu item. */
 export interface TextMenuItem<R> {
   label: string;
   marker?: string;
@@ -16,53 +14,38 @@ export interface TextMenuItem<R> {
   ) => undefined | void | R | Promise<undefined | void | R>;
 }
 
-/**
- * Represents the options for the `textMenu` function.
- */
+/** Represents the options for the `textMenu` function. */
 export interface TextMenuOptions<R> {
-  /**
-   * The title to show at the top of the menu.
-   */
+  /** The title to show at the top of the menu. */
   title?: String;
 
-  /**
-   * All items.
-   */
+  /** All items. */
   items: (string | TextMenuItem<R>)[];
 
-  /**
-   * The value to return if the user presses the back button (or function to execute).
-   */
+  /** The value to return if the user presses the back button (or function to execute). */
   back?: R | (() => undefined | void | R | Promise<undefined | void | R>);
 
-  /**
-   * The value to return if the user presses the cancel button (or function to execute).
-   */
+  /** The value to return if the user presses the cancel button (or function to execute). */
   sort?: () => Partial<TextMenuOptions<R>> | void | Promise<Partial<TextMenuOptions<R>> | void>;
 
-  /**
-   * The label to show for the sort button.
-   */
+  /** The label to show for the sort button. */
   sort_label?: string;
 
-  /**
-   * The label to show for the detail button. If missing, it will not be shown.
-   */
+  /** The label to show for the detail button. If missing, it will not be shown. */
   details?: string;
 
   /**
-   * The index of the item to highlight when presenting the menu to the
-   * user. By default, the first item is highlighted. If a number is
-   * provided but the index is out of bounds, the last item is highlighted.
-   * If an unselectable item is highlighted, the next selectable item will
-   * be highlighted instead.
+   * The index of the item to highlight when presenting the menu to the user. By default, the first
+   * item is highlighted. If a number is provided but the index is out of bounds, the last item is
+   * highlighted. If an unselectable item is highlighted, the next selectable item will be
+   * highlighted instead.
    */
   highlighted?: number;
 
   /**
-   * The value of an item to select. This will execute the `select` function
-   * of the item with the given value. If multiple items have the same label,
-   * the first one will be selected. Provide a number for an index instead.
+   * The value of an item to select. This will execute the `select` function of the item with the
+   * given value. If multiple items have the same label, the first one will be selected. Provide a
+   * number for an index instead.
    */
   selected?: string | number;
 }

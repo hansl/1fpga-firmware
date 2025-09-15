@@ -57,9 +57,9 @@ export function generate<T>(fn: () => Promise<WizardStep<T | undefined>>): Wizar
 export function generate<T>(fn: () => Promise<WizardStep<T | undefined>[]>): WizardStep<T[]>;
 
 /**
- * Generate a step from a function that returns a list of steps, at the time
- * the wizard is running. If this step is skipped, the function will not be
- * called and those steps will not be shown.
+ * Generate a step from a function that returns a list of steps, at the time the wizard is running.
+ * If this step is skipped, the function will not be called and those steps will not be shown.
+ *
  * @param fn
  */
 export function generate<T>(
@@ -157,9 +157,7 @@ export interface MessageOptions<T> {
   choices?: string[];
   map?: (choice: number) => T | undefined;
 
-  /**
-   * Allow user to cancel or not. If `true`, the user cannot cancel.
-   */
+  /** Allow user to cancel or not. If `true`, the user cannot cancel. */
   noCancel?: boolean;
 }
 

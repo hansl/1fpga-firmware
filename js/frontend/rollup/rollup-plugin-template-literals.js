@@ -15,14 +15,14 @@ function defaultTransformer(code) {
 
 /**
  * @typedef {Object} TransformerOptions
- * @property {ParserOptions} [parserOptions={}] - Parser options for Babel
- * @property {string[]} [tagsToProcess=[]] - List of named template tags to process
+ * @property {ParserOptions} [parserOptions={}] - Parser options for Babel. Default is `{}`
+ * @property {string[]} [tagsToProcess=[]] - List of named template tags to process. Default is `[]`
  * @property {defaultTransformer} [transformer] - Callback function for handling piece of code
  */
 
 /**
  * @param {string} content
- * @param {TransformerOptions} [options={}]
+ * @param {TransformerOptions} [options={}] Default is `{}`
  * @returns {string}
  */
 export function transformTaggedContent(content, options = {}) {
@@ -51,7 +51,7 @@ export function transformTaggedContent(content, options = {}) {
 
 /**
  * @type {rollup.Plugin}
- * @param {TransformerOptions} [options={}]
+ * @param {TransformerOptions} [options={}] Default is `{}`
  */
 export function transformTaggedTemplate(options = {}) {
   return {

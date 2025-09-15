@@ -4,20 +4,8 @@
     "baseUrl": ".",
     "module": "ESNext",
     "outDir": "dist",
-    "rootDirs": [
-      "src",
-      "codegen"
-    ],
-    "lib": [
-      "ES5",
-      "ES6",
-      "ES7",
-      "ES2020",
-      "ES2021",
-      "ES2022",
-      "ES2023",
-      "ES2024"
-    ],
+    "rootDirs": ["src", "codegen"],
+    "lib": ["ES5", "ES6", "ES7", "ES2020", "ES2021", "ES2022", "ES2023", "ES2024"],
     "jsx": "react-jsx",
     "strict": true,
     "resolveJsonModule": true,
@@ -25,18 +13,11 @@
     "moduleResolution": "Bundler",
     "skipLibCheck": true,
     "paths": {
-      "@/*": [
-        "./src/*"
-      ],
-      "1fpga:*": [
-        "../1fpga/types/1fpga/*"
-      ],
-      "consts:*": [
-        "../1fpga/types/consts"
-      ],
-      "@:migrations": [
-        "types/migrations"
-      ]
+      "@/*": ["./src/*"],
+      "1fpga:*": ["../1fpga/types/1fpga/*"],
+      "consts:*": ["../1fpga/types/consts"],
+      "@:migrations": ["types/migrations"]
     }
-  }
+  },
+  "files": ["src/jsx.d.ts", "src/main.ts"]
 }

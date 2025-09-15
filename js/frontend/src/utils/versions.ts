@@ -1,6 +1,4 @@
-/**
- * A versioned schema that may contain a version field or a normalized version number.
- */
+/** A versioned schema that may contain a version field or a normalized version number. */
 export type Versioned =
   | { version?: string | number | null; _version?: string | number | null }
   | string
@@ -20,11 +18,11 @@ export function versionOf(a: Versioned): string | undefined {
 
 /**
  * Compare two versions in the catalog JSONs.
+ *
  * @param a The first version.
  * @param b The second version.
- * @returns `<= -1` if `a` is smaller than `b`,
- *          `== 0` if `a` is equal to `b`,
- *          `>= 1` if `a` is greater than `b`.
+ * @returns `<= -1` if `a` is smaller than `b`, `== 0` if `a` is equal to `b`, `>= 1` if `a` is
+ *   greater than `b`.
  */
 export function compare(a: Versioned, b: Versioned): number {
   a = versionOf(a);
@@ -62,7 +60,7 @@ export function compare(a: Versioned, b: Versioned): number {
 }
 
 /**
- * A comparator for a simpler way to call compare on normalized schemas. Will return the
- * reverse of the `compare` function and can be used to sort descending.
+ * A comparator for a simpler way to call compare on normalized schemas. Will return the reverse of
+ * the `compare` function and can be used to sort descending.
  */
 export const compareDesc = (a: Versioned, b: Versioned) => -compare(a, b);

@@ -9,6 +9,7 @@ import { assert, versions } from '@/utils';
 
 /**
  * Download and install the 1FPGA binary.
+ *
  * @param currentVersion
  * @param baseUrl
  * @param releases
@@ -41,8 +42,9 @@ export async function updateOneFpga(baseUrl: string, releases: remote.catalog.No
 }
 
 /**
- * Check for one or all catalogs to update. This will update the database for the
- * catalog(s) that have newer versions available.
+ * Check for one or all catalogs to update. This will update the database for the catalog(s) that
+ * have newer versions available.
+ *
  * @param catalog The catalog to check for updates. If missing, all catalogs will be checked.
  */
 export async function check(catalog?: db.catalog.CatalogRow): Promise<boolean> {

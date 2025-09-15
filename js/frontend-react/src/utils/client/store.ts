@@ -1,8 +1,6 @@
 import { Dispatch, SetStateAction, useSyncExternalStore } from 'react';
 
-/**
- * A global store that can be used across
- */
+/** A global store that can be used across */
 export interface GlobalStore<T> {
   subscribe(listener: () => void): () => void;
 
@@ -17,9 +15,10 @@ export interface GlobalStore<T> {
 
 /**
  * Create a global store that updates across React roots.
+ *
  * @param defaultValue The default value of the store.
- * @param localStorageKey If specified, this will persist the value in localStorage.
- *                        This uses `JSON.stringify` and `JSON.parse` for serialization.
+ * @param localStorageKey If specified, this will persist the value in localStorage. This uses
+ *   `JSON.stringify` and `JSON.parse` for serialization.
  */
 export function createGlobalStore<T>(defaultValue: T, localStorageKey?: string): GlobalStore<T> {
   let value: T = defaultValue;

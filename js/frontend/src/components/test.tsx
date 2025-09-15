@@ -1,5 +1,5 @@
 import { render } from '@1fpga/react-osd';
-import { FunctionComponent, PropsWithChildren, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 
 export function TestComponent({ state }: { state: { done: boolean } }) {
   setTimeout(() => {

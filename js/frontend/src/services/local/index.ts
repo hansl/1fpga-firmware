@@ -32,9 +32,7 @@ export async function listCatalogPlaylists(): Promise<
 export interface GamesPlaylistsRow extends oneFpgaDb.Row {
   playlistsName: string;
   gamesFullname: string;
-  /**
-   * This is JSON
-   */
+  /** This is JSON */
   sha256: string;
   priority: number | null;
 }

@@ -14,6 +14,7 @@
     "build:schemas": "npm run -w @1fpga/schemas build",
     "build:frontend": "npm run -w @1fpga/frontend build",
     "patreon": "npm run -w patreon output",
+    "prettier": "prettier -w js/* scripts/patreon",
     "start": "npm run build:frontend && npm run -w frontend-react dev",
     "test": "npm test -w @1fpga/schemas && npm test -w @1fpga/frontend"
   },

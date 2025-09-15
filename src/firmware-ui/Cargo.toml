@@ -10,7 +10,6 @@ embedded-menu.workspace = true
 embedded-text.workspace = true
 
 image.workspace = true
-linuxfb.workspace = true
 one-fpga.workspace = true
 ouroboros.workspace = true
 sdl3.workspace = true
@@ -40,6 +39,9 @@ u8g2-fonts.workspace = true
 
 [dev-dependencies]
 tempdir = "0.3.7"
+
+[target."armv7-unknown-linux-gnueabihf".dependencies]
+linuxfb.workspace = true
 
 [features]
 default = ["platform_de10"]
