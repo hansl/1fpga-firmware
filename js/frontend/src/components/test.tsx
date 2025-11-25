@@ -21,7 +21,7 @@ export function TestComponent({ state }: { state: { done: boolean } }) {
       <t style={{ font: 'small' }}>
         Node {count}. After. {'\n'}
       </t>
-      <t font="medium">
+      <t style={{ font: 'medium' }}>
         Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut
         labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco
         laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in

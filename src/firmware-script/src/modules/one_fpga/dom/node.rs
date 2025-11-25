@@ -1,5 +1,6 @@
 use crate::modules::one_fpga::dom::render::{FontProp, RenderingContext};
-use crate::modules::one_fpga::dom::Tree;
+use crate::modules::one_fpga::dom::style::Location;
+use crate::modules::one_fpga::dom::{style, Tree};
 use boa_engine::value::{Convert, TryFromJs, TryIntoJs};
 use boa_engine::{js_error, Context, JsError, JsResult, JsValue};
 use boa_macros::js_str;
@@ -38,53 +39,15 @@ fn measure_text(
     }
 }
 
-#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
-pub(crate) struct JsPoint(pub Point);
-
-impl TryFromJs for JsPoint {
-    fn try_from_js(value: &JsValue, context: &mut Context) -> JsResult<Self> {
-        if let Some(o) = value.as_object() {
-            let x = o.get(js_str!("x"), context)?.to_i32(context)?;
-            let y = o.get(js_str!("y"), context)?.to_i32(context)?;
-            Ok(Self(Point::new(x, y)))
-        } else {
-            Err(js_error!(TypeError: "Point must be an object."))
-        }
-    }
-}
-
-impl From<Point> for JsPoint {
-    fn from(value: Point) -> Self {
-        JsPoint(value)
-    }
-}
-
-impl From<JsPoint> for Point {
-    fn from(value: JsPoint) -> Self {
-        value.0
-    }
-}
-
-impl JsPoint {
-    pub fn zero() -> Self {
-        Self(Point::zero())
-    }
-
-    pub fn new(x: i32, y: i32) -> Self {
-        Self(Point::new(x, y))
-    }
-}
-
 #[derive(Debug, TryFromJs)]
 pub(crate) struct BoxNodeProps {
-    font: Option<FontProp>,
-    location: Option<JsPoint>,
+    style: Option<style::BoxStyle>,
 }
 
 #[derive(Debug, TryFromJs)]
 pub(crate) struct TextNodeProps {
     children: Option<Either<Vec<Convert<String>>, Convert<String>>>,
-    font: Option<FontProp>,
+    style: Option<style::TStyle>,
 }
 
 impl TextNodeProps {
@@ -111,18 +74,18 @@ pub(crate) enum NodeInfo {
     Box {
         props: BoxNodeProps,
         calculated_font: Option<FontProp>,
-        calculated_location: Option<JsPoint>,
+        calculated_location: Option<Point>,
     },
     Text {
         props: TextNodeProps,
         text: String,
         calculated_font: Option<FontProp>,
-        calculated_location: Option<JsPoint>,
+        calculated_location: Option<Point>,
     },
     Fragment {
         text: String,
         font: FontProp,
-        calculated_location: Option<JsPoint>,
+        calculated_location: Option<Point>,
     },
 }
 
@@ -241,6 +204,7 @@ impl NodeInfo {
     pub fn tag_name(&self) -> Option<&'_ str> {
         match self {
             NodeInfo::Box { .. } => Some("box"),
+            NodeInfo::Text { .. } => Some("t"),
             _ => None,
         }
     }
@@ -289,7 +253,9 @@ impl NodeInfo {
     pub fn tag(name: String, props: JsValue, context: &mut Context) -> JsResult<Self> {
         match name.as_str() {
             "box" => {
+                eprintln!("box {}", props.display());
                 let props = BoxNodeProps::try_from_js(&props, context)?;
+                eprintln!("box2");
                 Ok(NodeInfo::Box {
                     props,
                     calculated_font: None,
@@ -297,8 +263,11 @@ impl NodeInfo {
                 })
             }
             "t" => {
+                eprintln!("t {}", props.display());
                 let props = TextNodeProps::try_from_js(&props, context)?;
+                eprintln!("t2");
                 let text = props.inner_text().unwrap_or_default();
+                eprintln!("t3");
                 Ok(NodeInfo::Text {
                     props,
                     text,
@@ -314,7 +283,9 @@ impl NodeInfo {
         match self {
             NodeInfo::Root => {}
             NodeInfo::Box { props, .. } => {
-                if props.location.is_some() {
+                if let Some(s) = props.style
+                    && s.location.is_some()
+                {
                     style.position = taffy::Position::Absolute;
                 }
                 style.size = taffy::Size {
@@ -356,7 +327,7 @@ impl NodeInfo {
         }
     }
 
-    pub fn calculated_location(&self) -> Option<JsPoint> {
+    pub fn calculated_location(&self) -> Option<Point> {
         match self {
             NodeInfo::Root => None,
             NodeInfo::Box {
@@ -371,7 +342,10 @@ impl NodeInfo {
                 calculated_location: Some(l),
                 ..
             } => Some(*l),
-            NodeInfo::Box { props, .. } => props.location,
+            NodeInfo::Box {
+                props: BoxNodeProps { style: Some(s) },
+                ..
+            } => s.location.map(Into::into),
             _ => None,
         }
     }
@@ -389,6 +363,9 @@ impl NodeInfo {
                 if calculated_font.is_none() {
                     *calculated_font = Some(
                         props
+                            .style
+                            .clone()
+                            .unwrap_or_default()
                             .font
                             .unwrap_or_default()
                             .inherits(parent.calculated_font().unwrap_or_default()),
@@ -412,6 +389,9 @@ impl NodeInfo {
                 if calculated_font.is_none() {
                     *calculated_font = Some(
                         props
+                            .style
+                            .clone()
+                            .unwrap_or_default()
                             .font
                             .unwrap_or_default()
                             .inherits(parent.calculated_font().unwrap_or_default()),

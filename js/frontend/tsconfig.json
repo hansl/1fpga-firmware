@@ -10,7 +10,7 @@
     "strict": true,
     "resolveJsonModule": true,
     "esModuleInterop": true,
-    "moduleResolution": "Bundler",
+    "moduleResolution": "bundler",
     "skipLibCheck": true,
     "paths": {
       "@/*": ["./src/*"],
@@ -18,6 +18,5 @@
       "consts:*": ["../1fpga/types/consts"],
       "@:migrations": ["types/migrations"]
     }
-  },
-  "files": ["src/jsx.d.ts", "src/main.ts"]
+  }
 }
