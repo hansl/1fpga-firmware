@@ -10,6 +10,7 @@ embedded-menu.workspace = true
 embedded-text.workspace = true
 
 image.workspace = true
+libc.workspace = true
 linuxfb.workspace = true
 one-fpga.workspace = true
 ouroboros.workspace = true
@@ -26,7 +27,6 @@ chrono = "0.4.26"
 de10-nano = { path = "../de10-nano", optional = true }
 humansize = "2.1.3"
 itertools = "0.12.0"
-libc = { version = "0.2.150" }
 mister-fpga = { path = "../mister-fpga", version = "0.1" }
 network-interface = "1.0.1"
 num-traits = "0.2.15"

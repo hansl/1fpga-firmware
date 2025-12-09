@@ -1358,10 +1358,6 @@ dependencies = [
  "calloop",
  "embedded-graphics",
  "embedded-graphics-framebuf",
- "embedded-layout",
- "embedded-menu",
- "embedded-text",
- "libc 1.0.0-alpha.1",
  "linuxfb",
  "memmap",
  "one-fpga",
@@ -1424,7 +1420,7 @@ dependencies = [
  "humansize",
  "image",
  "itertools 0.12.1",
- "libc 0.2.174",
+ "libc 1.0.0-alpha.1",
  "linuxfb",
  "mister-fpga",
  "network-interface",
@@ -5389,6 +5385,15 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "video-test"
+version = "0.1.0"
+dependencies = [
+ "embedded-graphics",
+ "sdl3",
+ "u8g2-fonts",
+]
 
 [[package]]
 name = "walkdir"

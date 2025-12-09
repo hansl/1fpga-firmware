@@ -13,6 +13,7 @@ members = [
     "src/mister-fpga",
     "src/mister-fpga-ini",
     "src/taser",
+    "src/video-test",
 ]
 
 [profile.release]

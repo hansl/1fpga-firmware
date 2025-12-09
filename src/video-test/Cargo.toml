@@ -1,0 +1,13 @@
+[package]
+name = "video-test"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "video-test"
+path = "src/main.rs"
+
+[dependencies]
+embedded-graphics.workspace = true
+sdl3.workspace = true
+u8g2-fonts = { version = "0.3.0", features = ["embedded_graphics_textstyle"] }
