@@ -1,119 +1,108 @@
-//! Video test binary - displays moving text using SDL3 at 640x480 32-bit color.
+//! Video test binary - displays moving text using direct /dev/fb0 framebuffer.
 
-use embedded_graphics::draw_target::DrawTarget;
-use embedded_graphics::geometry::Size;
 use embedded_graphics::pixelcolor::Rgb888;
 use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
-use sdl3::pixels::PixelFormat;
-use sdl3::render::{Canvas, Texture, TextureCreator};
-use sdl3::sys::pixels::SDL_PIXELFORMAT_RGB24;
-use sdl3::video::WindowContext;
+use embedded_graphics_framebuf::backends::FrameBufferBackend;
+use embedded_graphics_framebuf::FrameBuf;
+use linuxfb::TerminalMode;
+use std::time::{Duration, Instant};
 use u8g2_fonts::types::{FontColor, VerticalPosition};
 use u8g2_fonts::FontRenderer;
 
-const SCREEN_WIDTH: u32 = 640;
-const SCREEN_HEIGHT: u32 = 480;
-
-/// Simple framebuffer that implements DrawTarget for embedded-graphics.
-struct Framebuffer {
-    data: Vec<u8>,
-    size: Size,
+struct LinuxFramebuffer {
+    _buffer: linuxfb::Framebuffer,
+    _mmap: memmap::MmapMut,
+    /// This is self-referential to mmap for performance.
+    slice: &'static mut [Rgb888],
+    width: u32,
+    height: u32,
 }
 
-impl Framebuffer {
-    fn new(width: u32, height: u32) -> Self {
-        let size = Size::new(width, height);
-        let data = vec![0u8; (width * height * 3) as usize];
-        Self { data, size }
+impl LinuxFramebuffer {
+    fn new(path: impl AsRef<std::path::Path>) -> Result<Self, String> {
+        // Set TTY to graphics mode to hide cursor and text console
+        let tty = std::fs::File::open("/dev/tty1")
+            .map_err(|e| format!("Failed to open /dev/tty1: {e}"))?;
+        linuxfb::set_terminal_mode(&tty, TerminalMode::Graphics).map_err(|e| format!("{e:?}"))?;
+        drop(tty);
+
+        let buffer = linuxfb::Framebuffer::new(path).map_err(|err| format!("{err:?}"))?;
+        let (width, height) = buffer.get_size();
+        let bytes_per_pixel = buffer.get_bytes_per_pixel();
+        let size = width * height * bytes_per_pixel;
+
+        eprintln!(
+            "Framebuffer: {}x{} @ {} bpp",
+            width,
+            height,
+            bytes_per_pixel * 8
+        );
+
+        let mut mmap = buffer.map().map_err(|e| format!("{e:?}"))?;
+
+        // SAFETY: We keep mmap alive for the lifetime of the struct
+        let slice = unsafe {
+            let (p, slice, s) = mmap.align_to_mut::<Rgb888>();
+            assert_eq!(p.len(), 0, "Framebuffer not aligned properly");
+            assert_eq!(
+                slice.len(),
+                (size / bytes_per_pixel) as usize,
+                "Slice size mismatch"
+            );
+            assert_eq!(s.len(), 0, "Framebuffer has trailing bytes");
+            std::slice::from_raw_parts_mut::<'static, Rgb888>(
+                slice.as_mut_ptr(),
+                (width * height) as usize,
+            )
+        };
+
+        Ok(Self {
+            _buffer: buffer,
+            _mmap: mmap,
+            slice,
+            width,
+            height,
+        })
+    }
+
+    fn size(&self) -> Size {
+        Size::new(self.width, self.height)
     }
 
     fn clear(&mut self, color: Rgb888) {
-        for chunk in self.data.chunks_exact_mut(3) {
-            chunk[0] = color.r();
-            chunk[1] = color.g();
-            chunk[2] = color.b();
+        for pixel in self.slice.iter_mut() {
+            *pixel = color;
         }
-    }
-
-    fn as_slice(&self) -> &[u8] {
-        &self.data
     }
 }
 
-impl DrawTarget for Framebuffer {
+impl FrameBufferBackend for &'_ mut LinuxFramebuffer {
     type Color = Rgb888;
-    type Error = core::convert::Infallible;
 
-    fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
-    where
-        I: IntoIterator<Item = Pixel<Self::Color>>,
-    {
-        let width = self.size.width as i32;
-        let height = self.size.height as i32;
-
-        for Pixel(point, color) in pixels {
-            if point.x >= 0 && point.x < width && point.y >= 0 && point.y < height {
-                let index = ((point.y as u32 * self.size.width + point.x as u32) * 3) as usize;
-                self.data[index] = color.r();
-                self.data[index + 1] = color.g();
-                self.data[index + 2] = color.b();
-            }
-        }
-        Ok(())
+    fn set(&mut self, index: usize, color: Self::Color) {
+        self.slice[index] = color;
     }
-}
 
-impl OriginDimensions for Framebuffer {
-    fn size(&self) -> Size {
-        self.size
+    fn get(&self, index: usize) -> Self::Color {
+        self.slice[index]
+    }
+
+    fn nr_elements(&self) -> usize {
+        self.slice.len()
     }
 }
 
 fn main() {
-    unsafe {
-        const SDL_VIDEO_DRIVER_VARNAME: &str = "SDL_VIDEO_DRIVER";
-        const SDL_VIDEO_DRIVER_DEFAULT: &str = "evdev";
-        std::env::set_var(SDL_VIDEO_DRIVER_VARNAME, SDL_VIDEO_DRIVER_DEFAULT);
-    }
+    let mut fb = LinuxFramebuffer::new("/dev/fb0").expect("Failed to open framebuffer");
+    let size = fb.size();
 
-    // Initialize SDL3
-    let sdl_context = sdl3::init().expect("Failed to initialize SDL3");
-    let video_subsystem = sdl_context
-        .video()
-        .expect("Failed to initialize video subsystem");
+    eprintln!("Running video test at {}x{}", size.width, size.height);
 
-    // Create window at 640x480
-    let window = video_subsystem
-        .window("Video Test - Moving Text", SCREEN_WIDTH, SCREEN_HEIGHT)
-        .position_centered()
-        .fullscreen()
-        .build()
-        .expect("Failed to create window");
-
-    // Create canvas (renderer)
-    let mut canvas: Canvas<sdl3::video::Window> = window.into_canvas();
-
-    // Create texture for streaming pixel data
-    let texture_creator: TextureCreator<WindowContext> = canvas.texture_creator();
-    let mut texture: Texture = texture_creator
-        .create_texture_streaming(
-            unsafe { PixelFormat::from_ll(SDL_PIXELFORMAT_RGB24) },
-            SCREEN_WIDTH,
-            SCREEN_HEIGHT,
-        )
-        .expect("Failed to create texture");
-
-    // Create our framebuffer
-    let mut framebuffer = Framebuffer::new(SCREEN_WIDTH, SCREEN_HEIGHT);
-
-    // Create font renderer using a built-in u8g2 font
+    // Create font renderers
     let font_renderer = FontRenderer::new::<u8g2_fonts::fonts::u8g2_font_ncenB24_tr>();
     let small_font_renderer =
         FontRenderer::new::<u8g2_fonts::fonts::u8g2_font_haxrcorp4089_t_cyrillic>();
-
-    // Event pump for input handling
-    let mut event_pump = sdl_context.event_pump().expect("Failed to get event pump");
 
     // Animation state
     let mut x: f32 = 100.0;
@@ -122,25 +111,34 @@ fn main() {
     let mut dy: f32 = 1.5;
 
     let text = "1FPGA";
-    let info_text = "640x480 32-bit - Press ESC to quit";
+    let info_text = format!("{}x{} 32-bit - Direct Framebuffer", size.width, size.height);
 
     // Get approximate text dimensions for bouncing
-    let text_width: i32 = 120; // Approximate width for "1FPGA" with this font
-    let text_height: i32 = 30; // Approximate height
+    let text_width: i32 = 120;
+    let text_height: i32 = 30;
 
-    // Main loop
-    'running: loop {
-        // Handle events
-        event_pump.pump_events();
-        for event in event_pump.poll_iter() {
-            match event {
-                sdl3::event::Event::Quit { .. } => break 'running,
-                sdl3::event::Event::KeyDown {
-                    scancode: Some(sdl3::keyboard::Scancode::Escape),
-                    ..
-                } => break 'running,
-                _ => {}
-            }
+    let target_frame_time = Duration::from_millis(16); // ~60 FPS
+
+    // FPS tracking
+    let mut frame_count: u32 = 0;
+    let mut fps_timer = Instant::now();
+    let mut fps_text = String::from("FPS: --");
+
+    // Run for a limited time (20 seconds) since we don't have input handling
+    let start_time = Instant::now();
+    let run_duration = Duration::from_secs(20);
+
+    while start_time.elapsed() < run_duration {
+        let frame_start = Instant::now();
+
+        // Update FPS counter
+        frame_count += 1;
+        let fps_elapsed = fps_timer.elapsed();
+        if fps_elapsed >= Duration::from_secs(1) {
+            let fps = frame_count as f32 / fps_elapsed.as_secs_f32();
+            fps_text = format!("FPS: {:.1}", fps);
+            frame_count = 0;
+            fps_timer = Instant::now();
         }
 
         // Update position
@@ -148,25 +146,28 @@ fn main() {
         y += dy;
 
         // Bounce off walls
-        if x <= 0.0 || x + text_width as f32 >= SCREEN_WIDTH as f32 {
+        if x <= 0.0 || x + text_width as f32 >= size.width as f32 {
             dx = -dx;
-            x = x.clamp(0.0, SCREEN_WIDTH as f32 - text_width as f32);
+            x = x.clamp(0.0, size.width as f32 - text_width as f32);
         }
-        if y - text_height as f32 <= 0.0 || y >= SCREEN_HEIGHT as f32 {
+        if y - text_height as f32 <= 0.0 || y >= size.height as f32 {
             dy = -dy;
-            y = y.clamp(text_height as f32, SCREEN_HEIGHT as f32);
+            y = y.clamp(text_height as f32, size.height as f32);
         }
 
         // Clear framebuffer to dark blue
-        framebuffer.clear(Rgb888::new(0, 0, 40));
+        fb.clear(Rgb888::new(0, 0, 40));
+
+        // Create a FrameBuf wrapper for drawing
+        let mut frame_buf = FrameBuf::new(&mut fb, size.width as usize, size.height as usize);
 
         // Draw a border rectangle
         Rectangle::new(
             Point::new(5, 5),
-            Size::new(SCREEN_WIDTH - 10, SCREEN_HEIGHT - 10),
+            Size::new(size.width - 10, size.height - 10),
         )
         .into_styled(PrimitiveStyle::with_stroke(Rgb888::new(100, 100, 200), 2))
-        .draw(&mut framebuffer)
+        .draw(&mut frame_buf)
         .unwrap();
 
         // Draw the moving text
@@ -176,33 +177,40 @@ fn main() {
                 Point::new(x as i32, y as i32),
                 VerticalPosition::Baseline,
                 FontColor::Transparent(Rgb888::new(255, 255, 0)),
-                &mut framebuffer,
+                &mut frame_buf,
             )
             .unwrap();
 
         // Draw info text at bottom
         small_font_renderer
             .render(
-                info_text,
-                Point::new(10, SCREEN_HEIGHT as i32 - 15),
+                info_text.as_str(),
+                Point::new(10, size.height as i32 - 15),
                 VerticalPosition::Baseline,
                 FontColor::Transparent(Rgb888::new(150, 150, 150)),
-                &mut framebuffer,
+                &mut frame_buf,
             )
             .unwrap();
 
-        // Update texture with framebuffer data
-        texture
-            .update(None, framebuffer.as_slice(), (SCREEN_WIDTH * 3) as usize)
-            .expect("Failed to update texture");
+        // Draw FPS counter in top-right corner
+        small_font_renderer
+            .render(
+                fps_text.as_str(),
+                Point::new(size.width as i32 - 80, 20),
+                VerticalPosition::Baseline,
+                FontColor::Transparent(Rgb888::new(0, 255, 0)),
+                &mut frame_buf,
+            )
+            .unwrap();
 
-        // Copy texture to canvas and present
-        canvas
-            .copy(&texture, None, None)
-            .expect("Failed to copy texture");
-        canvas.present();
-
-        // Cap frame rate (~60 FPS)
-        std::thread::sleep(std::time::Duration::from_millis(16));
+        // Cap frame rate
+        let elapsed = frame_start.elapsed();
+        if elapsed < target_frame_time {
+            std::thread::sleep(target_frame_time - elapsed);
+        }
     }
+
+    // Clear to black before exiting
+    fb.clear(Rgb888::BLACK);
+    eprintln!("Video test complete.");
 }

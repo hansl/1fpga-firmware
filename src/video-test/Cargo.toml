@@ -9,5 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 embedded-graphics.workspace = true
-sdl3.workspace = true
+embedded-graphics-framebuf.workspace = true
+linuxfb.workspace = true
+memmap = "0.7.0"
 u8g2-fonts = { version = "0.3.0", features = ["embedded_graphics_textstyle"] }

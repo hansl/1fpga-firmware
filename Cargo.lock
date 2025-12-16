@@ -5391,7 +5391,9 @@ name = "video-test"
 version = "0.1.0"
 dependencies = [
  "embedded-graphics",
- "sdl3",
+ "embedded-graphics-framebuf",
+ "linuxfb",
+ "memmap",
  "u8g2-fonts",
 ]
 
