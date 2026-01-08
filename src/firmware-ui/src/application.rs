@@ -5,11 +5,11 @@ use crate::input::shortcut::Shortcut;
 use crate::input::InputState;
 use crate::macguiver::application::EventLoopState;
 use crate::macguiver::buffer::DrawBuffer;
+use crate::osd::Osd;
 use crate::platform::de10::De10Platform;
 use crate::platform::WindowManager;
 use embedded_graphics::draw_target::DrawTarget;
 use embedded_graphics::pixelcolor::{BinaryColor, Rgb888};
-use embedded_graphics::prelude::DrawTargetExt;
 use embedded_graphics::Drawable;
 use sdl3::event::Event;
 use sdl3::gamepad::Gamepad;
@@ -25,15 +25,13 @@ mod widgets;
 
 pub struct OneFpgaApp {
     platform: De10Platform,
+    osd: Osd,
 
     toolbar: Toolbar,
 
     render_toolbar: bool,
 
     gamepads: [Option<Gamepad>; 32],
-
-    toolbar_buffer: Option<DrawBuffer<BinaryColor>>,
-    osd_buffer: Option<DrawBuffer<BinaryColor>>,
 
     input_state: InputState,
     shortcuts: RefCell<HashMap<Shortcut, CommandId>>,
@@ -45,9 +43,6 @@ impl OneFpgaApp {
     pub fn new() -> Self {
         let platform = WindowManager::default();
 
-        let toolbar_size = platform.toolbar_dimensions();
-        let osd_size = platform.osd_dimensions();
-
         // Due to a limitation in Rust language right now, None does not implement Copy
         // when Option<T> does not. This means we can't use it in an array. So we use a
         // constant to work around this.
@@ -57,12 +52,11 @@ impl OneFpgaApp {
         };
 
         let mut app = Self {
+            osd: Osd::new(),
             toolbar: Toolbar::new(),
             render_toolbar: true,
             gamepads,
             platform,
-            toolbar_buffer: Some(DrawBuffer::new(toolbar_size)),
-            osd_buffer: Some(DrawBuffer::new(osd_size)),
             input_state: InputState::default(),
             shortcuts: Default::default(),
             ui_settings: UiSettings::default(),
@@ -89,10 +83,7 @@ impl OneFpgaApp {
     }
 
     pub fn osd_buffer(&mut self) -> &mut DrawBuffer<BinaryColor> {
-        self.osd_buffer.get_or_insert_with(|| {
-            let osd_size = self.platform.osd_dimensions();
-            DrawBuffer::new(osd_size)
-        })
+        self.osd.main_mut()
     }
 
     pub fn platform_mut(&mut self) -> &mut WindowManager {
@@ -116,33 +107,24 @@ impl OneFpgaApp {
     }
 
     fn draw_inner<R>(&mut self, drawer_fn: impl FnOnce(&mut Self) -> R) -> R {
-        if let Some(osd_buffer) = self.osd_buffer.clone().as_mut() {
-            osd_buffer.clear(BinaryColor::Off).unwrap();
-            let result = drawer_fn(self);
+        let osd_buffer = self.osd_buffer();
+        osd_buffer.clear(BinaryColor::Off).unwrap();
+        let result = drawer_fn(self);
 
-            if self.render_toolbar {
-                if let Some(toolbar_buffer) = self.toolbar_buffer.clone().as_mut() {
-                    toolbar_buffer.clear(BinaryColor::Off).unwrap();
-                    self.toolbar.update(*self.ui_settings());
-                    self.toolbar.draw(toolbar_buffer).unwrap();
+        if self.render_toolbar {
+            let mut toolbar_buffer = self.osd.title().clone();
+            toolbar_buffer.clear(BinaryColor::Off).unwrap();
+            self.toolbar.update(*self.ui_settings());
+            self.toolbar.draw(&mut toolbar_buffer).unwrap();
 
-                    if self.ui_settings.invert_toolbar() {
-                        toolbar_buffer.invert();
-                    }
-
-                    self.platform.update_toolbar(toolbar_buffer);
-                }
+            if self.ui_settings.invert_toolbar() {
+                toolbar_buffer.invert();
             }
-
-            self.platform.update_osd(&osd_buffer);
-            osd_buffer
-                .draw(&mut self.platform.main_buffer().color_converted())
-                .unwrap();
-
-            result
-        } else {
-            drawer_fn(self)
         }
+
+        self.osd.update(self.platform.core_manager_mut().fpga_mut());
+
+        result
     }
 
     pub fn draw_once<R>(&mut self, drawer_fn: impl FnOnce(&mut Self) -> R) -> R {
