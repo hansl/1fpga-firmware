@@ -6,3 +6,5 @@ pub mod macguiver;
 pub mod platform;
 
 pub mod core_manager;
+
+pub mod osd;

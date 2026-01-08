@@ -13,6 +13,7 @@ members = [
     "src/mister-fpga",
     "src/mister-fpga-ini",
     "src/taser",
+    "src/video-test",
 ]
 
 [profile.release]
@@ -83,6 +84,6 @@ mister-fpga-ini = { path = "src/mister-fpga-ini" }
 taser = { path = "src/taser" }
 
 [workspace.dependencies.sdl3]
-version = "0.14.2"
+version = "0.16.2"
 features = ["static-link", "build-from-source-static", "build-from-source-unix-console"]
 

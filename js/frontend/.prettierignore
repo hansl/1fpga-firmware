@@ -1,5 +1,6 @@
 # Ignore artifacts:
 build/
+docker/
 coverage/
 codegen/
 dist/

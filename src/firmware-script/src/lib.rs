@@ -5,6 +5,8 @@ use boa_engine::property::Attribute;
 use boa_engine::{js_string, Context, JsObject, JsResult, JsValue, Module, Source};
 use boa_macros::{js_str, Finalize, JsData, Trace};
 use firmware_ui::application::OneFpgaApp;
+use std::cell::Cell;
+use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::path::Path;
 use std::rc::Rc;
@@ -18,16 +20,20 @@ mod console;
 mod modules;
 
 /// The application type for HostDefined information.
+/// SAFETY INVARIANTS:
+/// 1. AppRef is only created on the main thread
+/// 2. The app pointer is valid for the entire duration of script execution
+/// 3. No references to App escape beyond the script execution scope
+/// 4. All access is single-threaded (no Send/Sync)
 #[derive(Clone, Trace, Finalize, JsData)]
-pub(crate) struct AppRef(
-    // TODO: remove the pointer. This is safe because the JS code
-    //       stops execution before the App is dropped, but it would
-    //       be better to have a safe way to handle this.
-    //       A RefCell isn't good enough because it's recursive.
+pub(crate) struct AppRef {
     /// The 1FPGA application.
     #[unsafe_ignore_trace]
-    Rc<*mut OneFpgaApp>,
-);
+    inner: Rc<Cell<OneFpgaApp>>,
+
+    // Prevent Send/Sync
+    _marker: PhantomData<*mut ()>,
+}
 
 impl std::fmt::Debug for AppRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -38,13 +44,23 @@ impl std::fmt::Debug for AppRef {
 impl Deref for AppRef {
     type Target = OneFpgaApp;
     fn deref(&self) -> &Self::Target {
-        unsafe { self.0.as_ref().as_ref().unwrap() }
+        unsafe { &*self.inner.as_ptr() }
     }
 }
 
 impl DerefMut for AppRef {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { self.0.as_mut().unwrap() }
+        unsafe { &mut *self.inner.as_ptr() }
+    }
+}
+
+impl AppRef {
+    /// Create a new reference to an application.
+    pub fn new(app: OneFpgaApp) -> Self {
+        Self {
+            inner: Rc::new(Cell::new(app)),
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -90,9 +106,7 @@ fn create_context(
 }
 
 pub fn run(script: Option<&impl AsRef<Path>>) -> Result<(), Box<dyn std::error::Error>> {
-    let mut app = OneFpgaApp::new();
-    let app = Rc::new((&mut app) as *mut OneFpgaApp);
-    let host_defined = AppRef(app);
+    let host_defined = AppRef::new(OneFpgaApp::new());
 
     debug!("Loading JavaScript...");
     let start = Instant::now();

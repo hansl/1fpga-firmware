@@ -3,6 +3,8 @@ use boa_macros::boa_module;
 
 mod filesystem;
 
+pub use js::UiMenuOptions;
+
 #[boa_module]
 #[boa(rename_all = "camelCase")]
 mod js {
@@ -183,7 +185,7 @@ mod js {
     #[boa(skip)]
     /// Menu options being passed to [`text_menu`].
     #[derive(Debug, Trace, Finalize, JsData, boa_macros::TryFromJs)]
-    struct UiMenuOptions {
+    pub struct UiMenuOptions {
         title: Option<String>,
         items: Vec<TextMenuItem>,
         back: Option<JsValue>,

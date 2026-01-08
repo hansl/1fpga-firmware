@@ -10,13 +10,16 @@ endif
 
 build-frontend: js/frontend/dist/main.js
 
-.PHONY: target/armv7-unknown-linux-gnueabihf/release/one_fpga_bin
-.PHONY: target/armv7-unknown-linux-gnueabihf/release/one_fpga
+build/1fpga-armv7: docker/armv7/de10nano.Dockerfile
+	docker build -f ./docker/armv7/de10nano.Dockerfile . -t 1fpga:armv7
+	@mkdir build || true
+	@touch build/1fpga-armv7
 
 # Do not replace the main.js with a different file or wildcard.
-target/armv7-unknown-linux-gnueabihf/release/one_fpga_bin: $(wildcard src/**/*.rs) js/frontend/dist/main.js
-	docker build -f ./build/armv7/de10nano.Dockerfile . -t 1fpga:armv7
-	docker run -it -e "TERM=xterm-256color" -v "$(PWD)":/app 1fpga:armv7
+RUST_SOURCES := $(shell find src -type f -name '*.rs')
+target/armv7-unknown-linux-gnueabihf/release/one_fpga_bin: $(RUST_SOURCES) js/frontend/dist/main.js build/1fpga-armv7
+	docker run -it -e "TERM=xterm-256color" -v "$(PWD)":/app 1fpga:armv7 --bin one_fpga_bin
+	@touch target/armv7-unknown-linux-gnueabihf/release/one_fpga_bin
 
 target/armv7-unknown-linux-gnueabihf/release/one_fpga: target/armv7-unknown-linux-gnueabihf/release/one_fpga_bin
 	cp target/armv7-unknown-linux-gnueabihf/release/one_fpga_bin target/armv7-unknown-linux-gnueabihf/release/one_fpga

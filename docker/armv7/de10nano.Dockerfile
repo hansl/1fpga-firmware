@@ -34,7 +34,7 @@ RUN apt-get install --assume-yes linux-headers-5.10.0-35-common
 RUN ln -s /usr/include/asm-generic /usr/include/asm
 
 WORKDIR /app
-COPY build/armv7/config.toml /app/.cargo/config.toml
+COPY docker/armv7/config.toml /app/.cargo/config.toml
 COPY rust-toolchain.toml /app/rust-toolchain.toml
 COPY --from=planner /app/recipe.json recipe.json
 
@@ -45,4 +45,4 @@ RUN rustup component add rustfmt rustc rust-std clippy
 
 RUN cargo chef cook --release --target armv7-unknown-linux-gnueabihf --recipe-path recipe.json
 
-CMD ["cargo", "build", "--target", "armv7-unknown-linux-gnueabihf", "--release", "--bin", "one_fpga_bin", "--no-default-features", "--features=platform_de10"]
+ENTRYPOINT ["cargo", "build", "--target", "armv7-unknown-linux-gnueabihf", "--release", "--no-default-features", "--features=platform_de10"]
