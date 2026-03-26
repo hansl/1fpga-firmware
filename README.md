@@ -4,14 +4,13 @@ This repo is the main code repo for the 1FPGA Firmware and its companion librari
 
 ## Crates
 
-This repo is a monorepo, containing multiple crates.
+This repo is a monorepo, containing multiple Rust crates and JavaScript/TypeScript packages.
 The main crate is `firmware` (binary named `one_fpga`), which is the actual firmware for 1FPGA.
 It is meant as a drop-in replacement for MiSTer.
 
-This repo also contains the twin packages `senior` and `junior`, which are the client and server respectively.
-They are meant to be used together to replace the MiSTer firmware into a client/server architecture to help debug and develop cores and firmware features that don't require user interface.
-Basically, running `junior` on the DE10-Nano, it starts a webserver and does not provide an interactive interface.
-The webserver provides a full REST API to interact with the FPGA, and the `senior` client can be used as a client CLI to interact with it (though not needed).
+The Rust crates live in `src/` and include libraries for Cyclone V FPGA programming, DE10-Nano board support, MiSTer core compatibility, UI rendering, and a JavaScript scripting engine (via [Boa](https://boajs.dev/)).
+
+The TypeScript packages live in `js/` and include the main frontend (which runs inside the Boa engine on device), shared schemas and type definitions, and a React-based development frontend for working without hardware.
 
 ## FAQ
 
@@ -26,15 +25,14 @@ From MiSTer's [wiki](https://github.com/MiSTer-devel/Wiki_MiSTer/wiki):
 
 ### What are you doing to it?
 
-The MiSTer code is currently coded in legacy C and C++.
+The original MiSTer code is written in legacy C and C++.
 It is hard to maintain, hard to build, and hard to contribute to.
 
-1FPGA is written in easier-to-maintain (but still Open Source) Rust.
+1FPGA is written in easier-to-maintain (but still Open Source) Rust, with a TypeScript frontend for the user interface.
 The design of the application has been made from top down to enable contributions and maintenance.
 It is easier to read this code.
 
 This is also an opportunity to improve the user experience greatly.
-For example,
 
 ### How can I help?
 
@@ -42,37 +40,51 @@ Try it, get up to speed with the MiSTer project itself, and get ready to contrib
 
 ## Development
 
-There are currently two parts to this repo; a Rust library that is then linked with the C++ code.
-
 ### Structure
 
-The current structure is still in flux, but essentially the `rust` code is in the `src` directory, while the C++ code is in the root.
-C++ dependencies are located in the `lib/` folder, and the `support/` folder contains various code necessary to run the cores.
+The Rust code is in the `src/` directory, organized as a Cargo workspace with 13 crates.
+The main entry point is `src/firmware/`, which handles CLI parsing, logging, and launches the JavaScript scripting engine.
+
+The JavaScript/TypeScript code is in the `js/` directory, organized as NPM workspaces.
+The main frontend (`js/frontend/`) is compiled via Rollup and bundled into the firmware.
+
+Other directories:
+
+- `docker/` contains the Dockerfile for ARM cross-compilation.
+- `docs/` contains internal documentation (memory model, OSD protocol, startup sequence).
+- `scripts/` contains utility scripts.
 
 ### Prerequisites
 
-To build the `rust` library portion of this code, you'll need to install the `rust` toolchain.
-The easiest way to do this is to use `rustup`.
-Instructions can be found [here](https://rustup.rs/).
+You'll need the following installed:
 
-### Building MiSTer for DE10-Nano
+- The Rust toolchain. The easiest way to do this is to use `rustup`.
+  Instructions can be found [here](https://rustup.rs/).
+  The repo includes a `rust-toolchain.toml` that will install the right version automatically.
+- [Node.js](https://nodejs.org/) and npm, for building the TypeScript frontend.
+- [Docker](https://www.docker.com), for cross-compiling the ARM binary.
+- `cmake`, needed by some native Rust dependencies.
 
-To build the DE10 target executable, you will also need [Docker](https://www.docker.com) and [`cross`](https://https://github.com/cross-rs/cross?tab=readme-ov-file) installed.
+### Building for DE10-Nano
 
-Assuming you have Docker installed, you can install `cross` with the following command:
-
-```bash
-cargo install cross --git https://github.com/cross-rs/cross
-```
-
-Then, you can build the firmware with the following command:
+The easiest way to build everything is with Make:
 
 ```bash
-cross build --bin one_fpga --target=armv7-unknown-linux-gnueabihf --no-default-features --features=platform_de10 --release
+make build
 ```
 
-If everything goes well, this will output the executable in `./target/armv7-unknown-linux-gnueabihf/release/one_fpga`. Simply copy that binary to your device and execute it.
+This will build the TypeScript frontend first, then cross-compile the Rust firmware for ARM inside a Docker container.
+If everything goes well, this will output the executable in `./target/armv7-unknown-linux-gnueabihf/release/one_fpga`.
 
+You can also build the pieces separately:
+
+```bash
+make build-frontend   # Build just the TypeScript frontend
+make build-1fpga      # Build just the ARM binary (requires frontend to be built first)
+make build-and-sign   # Build and sign the binary with an RSA key
+```
+
+Simply copy the binary to your device and execute it.
 The following commands can help:
 
 ```bash
@@ -95,7 +107,8 @@ This version should help develop some features that don't require an FPGA (like 
 
 ### Tests
 
-Tests can be run with `cargo test` as you would.
+Rust tests can be run with `cargo test` as you would.
+JavaScript tests can be run with `npm test`.
 
 # Contributing
 
@@ -112,4 +125,3 @@ We use the Rust CoC currently because it is the most complete and well thought o
 We might fork it locally in the future.
 
 Thank you for understanding.
-
