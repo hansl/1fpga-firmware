@@ -1,4 +1,4 @@
-FROM rust:bullseye AS chef
+FROM rust:bookworm AS chef
 USER root
 RUN cargo install cargo-chef
 WORKDIR /app
@@ -29,16 +29,19 @@ RUN apt-get install --assume-yes libusb-dev
 RUN apt-get install --assume-yes libevdev-dev
 RUN apt-get install --assume-yes libudev-dev
 RUN apt-get install --assume-yes libclang-dev
-RUN apt-get install --assume-yes linux-headers-5.10.0-35-common
+RUN apt-get install --assume-yes linux-libc-dev
+RUN apt-get install --assume-yes mold
 
-RUN ln -s /usr/include/asm-generic /usr/include/asm
+RUN [ -d /usr/include/asm ] || ln -s /usr/include/asm-generic /usr/include/asm
+RUN ln -s /usr/bin/mold /usr/arm-linux-gnueabihf/bin/ld.mold
 
 WORKDIR /app
-COPY docker/armv7/config.toml /app/.cargo/config.toml
+COPY docker/armv7/config.toml /usr/local/cargo/config.toml
 COPY rust-toolchain.toml /app/rust-toolchain.toml
 COPY --from=planner /app/recipe.json recipe.json
 
-ENV CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc CC_armv7_unknown_Linux_gnueabihf=arm-linux-gnueabihf-gcc CXX_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-g++
+ENV CC_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-gcc \
+    CXX_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-g++
 RUN rustup target add armv7-unknown-linux-gnueabihf
 RUN rustup component add --target armv7-unknown-linux-gnueabihf rust-std
 RUN rustup component add rustfmt rustc rust-std clippy
