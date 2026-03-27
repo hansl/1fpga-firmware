@@ -3,6 +3,7 @@
   "workspaces": [
     "js/frontend",
     "js/frontend-react",
+    "js/ui-menu",
     "js/1fpga/schemas",
     "js/1fpga/types",
     "scripts/patreon"

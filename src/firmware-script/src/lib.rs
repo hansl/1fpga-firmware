@@ -1,6 +1,6 @@
 use crate::console::TracingLogger;
 use crate::module_loader::OneFpgaModuleLoader;
-use crate::modules::CommandMap;
+use crate::modules::{CommandMap, DomState};
 use boa_engine::property::Attribute;
 use boa_engine::{js_string, Context, JsObject, JsResult, JsValue, Module, Source};
 use boa_macros::{js_str, Finalize, JsData, Trace};
@@ -107,13 +107,20 @@ fn create_context(
 }
 
 pub fn run(script: Option<&impl AsRef<Path>>) -> Result<(), Box<dyn std::error::Error>> {
-    let host_defined = AppRef::new(OneFpgaApp::new());
+    // When a custom script is provided, don't load the menu core.
+    // The new React UI renders directly to /dev/fb0.
+    let host_defined = if script.is_some() {
+        AppRef::new(OneFpgaApp::new_without_menu())
+    } else {
+        AppRef::new(OneFpgaApp::new())
+    };
 
     debug!("Loading JavaScript...");
     let start = Instant::now();
 
     let (mut context, loader) = create_context(script)?;
     context.insert_data(CommandMap::default());
+    context.insert_data(DomState::new());
     context.insert_data(host_defined);
 
     boa_runtime::register(

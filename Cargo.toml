@@ -13,6 +13,7 @@ members = [
     "src/mister-fpga",
     "src/mister-fpga-ini",
     "src/taser",
+    "src/ui-fb",
     "src/video-test",
 ]
 
@@ -81,6 +82,7 @@ one-fpga = { path = "src/one-fpga", version = "0.1.0" }
 mister-fpga = { path = "src/mister-fpga" }
 mister-fpga-ini = { path = "src/mister-fpga-ini" }
 taser = { path = "src/taser" }
+ui-fb = { path = "src/ui-fb" }
 
 [workspace.dependencies.sdl3]
 version = "0.16.2"

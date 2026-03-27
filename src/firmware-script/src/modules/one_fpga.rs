@@ -9,6 +9,7 @@ mod commands;
 mod controllers;
 mod core;
 mod db;
+mod dom;
 mod fs;
 mod gui;
 mod net;
@@ -22,6 +23,7 @@ mod video;
 mod globals;
 
 pub use commands::CommandMap;
+pub use dom::DomState;
 pub use globals::classes::*;
 
 pub(super) fn register_modules(
@@ -33,6 +35,7 @@ pub(super) fn register_modules(
         controllers::create_module,
         core::create_module,
         db::create_module,
+        dom::create_module,
         fs::create_module,
         gui::create_module,
         net::create_module,

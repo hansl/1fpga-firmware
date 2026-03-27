@@ -66,6 +66,28 @@ impl OneFpgaApp {
         app
     }
 
+    /// Create without loading the menu core. For use with the new
+    /// framebuffer-based React UI which renders directly to /dev/fb0.
+    pub fn new_without_menu() -> Self {
+        let platform = WindowManager::default();
+
+        let gamepads = {
+            const NONE: Option<Gamepad> = None;
+            [NONE; 32]
+        };
+
+        Self {
+            osd: Osd::new(),
+            toolbar: Toolbar::new(),
+            render_toolbar: true,
+            gamepads,
+            platform,
+            input_state: InputState::default(),
+            shortcuts: Default::default(),
+            ui_settings: UiSettings::default(),
+        }
+    }
+
     pub fn add_shortcut(&self, shortcut: Shortcut, command: CommandId) {
         self.shortcuts.borrow_mut().insert(shortcut, command);
     }

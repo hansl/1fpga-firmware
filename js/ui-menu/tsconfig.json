@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "baseUrl": ".",
+    "module": "ESNext",
+    "outDir": "dist",
+    "rootDirs": ["src"],
+    "lib": [],
+    "strict": true,
+    "jsx": "react",
+    "jsxFactory": "React.createElement",
+    "jsxFragmentFactory": "React.Fragment",
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "moduleResolution": "Bundler",
+    "skipLibCheck": true,
+    "paths": {
+      "@/*": ["./src/*"],
+      "1fpga:*": ["../1fpga/types/1fpga/*"],
+      "1fpga:dom": ["./types/dom"]
+    }
+  },
+  "include": ["src/**/*", "types/**/*"]
+}

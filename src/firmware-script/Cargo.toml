@@ -6,13 +6,16 @@ edition = "2024"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+embedded-graphics-framebuf.workspace = true
 image.workspace = true
 linuxfb.workspace = true
 one-fpga.workspace = true
+ui-fb = { workspace = true, features = ["linux-fb"] }
 ouroboros.workspace = true
 reqwest.workspace = true
 time.workspace = true
 strum.workspace = true
+sdl3.workspace = true
 tracing.workspace = true
 
 boa_engine = { git = "https://github.com/boa-dev/boa.git", rev = "8c057dc14af5696aff9065035951f5989ae68460", features = ["either"] }

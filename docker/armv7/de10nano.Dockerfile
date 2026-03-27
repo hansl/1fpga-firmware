@@ -1,5 +1,11 @@
-FROM rust:bookworm AS chef
+FROM debian:bullseye AS chef
 USER root
+
+# Install Rust via rustup (not the rust: image, so we get Bullseye's glibc 2.31)
+RUN apt update && apt install -y curl build-essential
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+ENV PATH="/root/.cargo/bin:${PATH}"
+
 RUN cargo install cargo-chef
 WORKDIR /app
 
@@ -30,13 +36,11 @@ RUN apt-get install --assume-yes libevdev-dev
 RUN apt-get install --assume-yes libudev-dev
 RUN apt-get install --assume-yes libclang-dev
 RUN apt-get install --assume-yes linux-libc-dev
-RUN apt-get install --assume-yes mold
 
 RUN [ -d /usr/include/asm ] || ln -s /usr/include/asm-generic /usr/include/asm
-RUN ln -s /usr/bin/mold /usr/arm-linux-gnueabihf/bin/ld.mold
 
 WORKDIR /app
-COPY docker/armv7/config.toml /usr/local/cargo/config.toml
+COPY docker/armv7/config.toml /root/.cargo/config.toml
 COPY rust-toolchain.toml /app/rust-toolchain.toml
 COPY --from=planner /app/recipe.json recipe.json
 

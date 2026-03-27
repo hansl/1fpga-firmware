@@ -1,0 +1,21 @@
+[package]
+name = "ui-fb"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+linux-fb = ["dep:linuxfb", "dep:memmap"]
+
+[dependencies]
+embedded-graphics.workspace = true
+embedded-graphics-framebuf.workspace = true
+image.workspace = true
+tracing.workspace = true
+
+taffy = "0.7"
+u8g2-fonts = { version = "0.3.0", features = ["embedded_graphics_textstyle"] }
+
+# Linux framebuffer (optional, Linux-only)
+linuxfb = { workspace = true, optional = true }
+memmap = { version = "0.7.0", optional = true }
