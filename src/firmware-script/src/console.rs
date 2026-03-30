@@ -2,8 +2,7 @@
 //! `tracing` for logging instead of `println!`.
 
 use boa_engine::{Context, JsResult, JsString};
-use boa_gc::Trace;
-use boa_macros::Finalize;
+use boa_gc::{Finalize, Trace};
 use boa_runtime::{ConsoleState, Logger};
 use tracing::{debug, error, info, warn};
 

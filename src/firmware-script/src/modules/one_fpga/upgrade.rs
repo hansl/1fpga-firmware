@@ -29,7 +29,7 @@ mod js {
     use crate::AppRef;
     use boa_engine::interop::ContextData;
     use boa_engine::object::builtins::{JsPromise, JsUint8Array};
-    use boa_engine::{js_error, Context, JsError, JsValue};
+    use boa_engine::{js_error, Context, JsError, JsResult, JsValue};
     use firmware_ui::application::panels::alert::alert;
     use std::process::Command;
 
@@ -37,7 +37,7 @@ mod js {
         path: String,
         signature: JsUint8Array,
         context: &mut Context,
-    ) -> JsPromise {
+    ) -> JsResult<JsPromise> {
         match verify_inner_(path, signature, context) {
             Ok(result) => JsPromise::resolve(JsValue::from(result), context),
             Err(err) => JsPromise::reject(err, context),
@@ -50,7 +50,7 @@ mod js {
         path: String,
         signature: Option<JsUint8Array>,
         context: &mut Context,
-    ) -> JsPromise {
+    ) -> JsResult<JsPromise> {
         // Only support 1fpga upgrade right now.
         if name != "1fpga" {
             return JsPromise::reject(js_error!("Unsupported upgrade"), context);

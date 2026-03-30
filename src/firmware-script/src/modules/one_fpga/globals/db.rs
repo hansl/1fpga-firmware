@@ -2,9 +2,7 @@ use boa_engine::builtins::typed_array::TypedArray;
 use boa_engine::class::Class;
 use boa_engine::object::builtins::{JsArray, JsPromise, JsUint8Array};
 use boa_engine::value::{TryFromJs, TryIntoJs};
-use boa_engine::{
-    js_error, Context, JsObject, JsResult, JsString, JsValue, JsVariant, TryIntoJsResult,
-};
+use boa_engine::{js_error, Context, JsObject, JsResult, JsString, JsValue, JsVariant};
 use boa_macros::{boa_class, Finalize, JsData, Trace};
 use ouroboros::self_referencing;
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, Value, ValueRef};
@@ -147,14 +145,16 @@ fn create_row_object_array<'a>(mut statement: Statement, ctx: &mut Context) -> J
         .into_iter()
         .map(String::from)
         .collect::<Vec<_>>();
-    let row_results = JsArray::new(ctx);
 
     let mut rows = statement.raw_query();
+    let mut row_vec = Vec::new();
+
     while let Some(row) = rows.next().map_err(|e| js_error!("SQL Error: {}", e))? {
-        row_results.push(create_row_object(row, &mappings, ctx)?, ctx)?;
+        let r = create_row_object(row, &mappings, ctx)?.into();
+        row_vec.push(r);
     }
 
-    Ok(row_results)
+    Ok(JsArray::from_iter(row_vec, ctx))
 }
 
 pub fn db_root() -> PathBuf {
@@ -235,7 +235,7 @@ impl JsDbInner {
         query: &String,
         bindings: Option<Vec<SqlValue>>,
         context: &mut Context,
-    ) -> JsPromise {
+    ) -> JsResult<JsPromise> {
         JsPromise::new(
             move |fns, context| {
                 let connection = self.connection(tx)?;
@@ -322,16 +322,10 @@ impl JsDbInner {
     }
 }
 
-#[derive(Trace, Finalize, JsData)]
+#[derive(Clone, Trace, Finalize, JsData)]
 pub struct JsDb {
     #[unsafe_ignore_trace]
     inner: Rc<RefCell<JsDbInner>>,
-}
-
-impl TryIntoJsResult for JsDb {
-    fn try_into_js_result(self, context: &mut Context) -> JsResult<JsValue> {
-        Ok(JsDb::from_data(self, context)?.into())
-    }
 }
 
 #[boa_class(rename = "Db")]
@@ -367,7 +361,7 @@ impl JsDb {
         query: String,
         bindings: Option<Vec<SqlValue>>,
         context: &mut Context,
-    ) -> JsPromise {
+    ) -> JsResult<JsPromise> {
         self.inner.borrow().query(None, &query, bindings, context)
     }
 
@@ -406,7 +400,7 @@ impl JsDb {
             .execute_many(None, &query, bindings, context)
     }
 
-    fn begin_transaction(&self, context: &mut Context) -> JsPromise {
+    fn begin_transaction(&self, context: &mut Context) -> JsResult<JsPromise> {
         JsPromise::new(
             move |fns, context| {
                 let tx_id = self.inner.borrow_mut().create_transaction()?;
@@ -447,7 +441,7 @@ impl JsDbTransaction {
         query: String,
         bindings: Option<Vec<SqlValue>>,
         context: &mut Context,
-    ) -> JsPromise {
+    ) -> JsResult<JsPromise> {
         self.inner
             .borrow()
             .query(Some(self.tx_id), &query, bindings, context)
@@ -490,7 +484,7 @@ impl JsDbTransaction {
         self.inner.borrow().execute_raw(Some(self.tx_id), query)
     }
 
-    pub fn commit(&mut self, context: &mut Context) -> JsPromise {
+    pub fn commit(&mut self, context: &mut Context) -> JsResult<JsPromise> {
         JsPromise::new(
             move |fns, context| {
                 self.inner
@@ -509,7 +503,7 @@ impl JsDbTransaction {
         )
     }
 
-    pub fn rollback(&mut self, context: &mut Context) -> JsPromise {
+    pub fn rollback(&mut self, context: &mut Context) -> JsResult<JsPromise> {
         JsPromise::new(
             move |fns, context| {
                 self.inner

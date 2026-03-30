@@ -7,7 +7,7 @@ mod js {
     use crate::AppRef;
     use boa_engine::interop::ContextData;
     use boa_engine::object::builtins::JsDate;
-    use boa_engine::value::TryFromJs;
+    use boa_engine::value::{TryFromJs, TryIntoJs};
     use boa_engine::{js_error, js_string, Context, JsResult, JsString, JsValue};
     use firmware_ui::application::menu::style::MenuStyleFontSize;
     use firmware_ui::data::settings::DateTimeFormat;
@@ -17,15 +17,15 @@ mod js {
     struct JsDatetimeFormat(DateTimeFormat);
 
     #[boa(skip)]
-    impl From<JsDatetimeFormat> for JsValue {
-        fn from(val: JsDatetimeFormat) -> Self {
-            match val.0 {
+    impl TryIntoJs for JsDatetimeFormat {
+        fn try_into_js(&self, _context: &mut Context) -> JsResult<JsValue> {
+            Ok(match self.0 {
                 DateTimeFormat::Default => js_string!("default"),
                 DateTimeFormat::Short => js_string!("short"),
                 DateTimeFormat::TimeOnly => js_string!("timeOnly"),
                 DateTimeFormat::Hidden => js_string!("hidden"),
             }
-            .into()
+            .into())
         }
     }
 
@@ -78,14 +78,14 @@ mod js {
     }
 
     #[boa(skip)]
-    impl From<FontSize> for JsValue {
-        fn from(val: FontSize) -> Self {
-            match val {
+    impl TryIntoJs for FontSize {
+        fn try_into_js(&self, _context: &mut Context) -> JsResult<JsValue> {
+            Ok(match self {
                 FontSize::Small => js_string!("small"),
                 FontSize::Medium => js_string!("medium"),
                 FontSize::Large => js_string!("large"),
             }
-            .into()
+            .into())
         }
     }
 

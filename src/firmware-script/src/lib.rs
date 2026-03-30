@@ -4,7 +4,7 @@ use crate::modules::{CommandMap, DomState};
 use boa_engine::property::Attribute;
 use boa_engine::{js_string, Context, JsObject, JsResult, JsValue, Module, Source};
 use boa_macros::{js_str, Finalize, JsData, Trace};
-use boa_runtime::RegisterOptions;
+use boa_runtime::extensions::ConsoleExtension;
 use firmware_ui::application::OneFpgaApp;
 use std::cell::Cell;
 use std::marker::PhantomData;
@@ -97,7 +97,7 @@ fn create_context(
         version
     };
 
-    let one_fpga = JsObject::default();
+    let one_fpga = JsObject::default(context.intrinsics());
     one_fpga.set(js_str!("name"), js_string!("1FPGA"), false, &mut context)?;
     one_fpga.set(js_str!("version"), version, false, &mut context)?;
 
@@ -124,8 +124,9 @@ pub fn run(script: Option<&impl AsRef<Path>>) -> Result<(), Box<dyn std::error::
     context.insert_data(host_defined);
 
     boa_runtime::register(
+        ConsoleExtension(TracingLogger),
+        None,
         &mut context,
-        RegisterOptions::new().with_console_logger(TracingLogger),
     )?;
 
     modules::register_modules(loader.clone(), &mut context)?;

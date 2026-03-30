@@ -28,7 +28,7 @@ pub trait SpiCommandExt: Sized {
         &mut self,
         command: impl IntoLowLevelSpiCommand,
         out: &mut u16,
-    ) -> SpiCommandGuard<Self>;
+    ) -> SpiCommandGuard<'_, Self>;
     fn write(&mut self, word: u16) -> &mut Self;
     fn write_read(&mut self, word: u16, out: &mut u16) -> &mut Self;
     fn write_read_b(&mut self, byte: u8, out: &mut u8) -> &mut Self;

@@ -448,10 +448,10 @@ mod js {
 
         debug!(?exit_value, "DOM render loop exited");
 
-        Ok(JsPromise::resolve(
+        JsPromise::resolve(
             JsValue::from(JsString::from(exit_value.as_str())),
             context,
-        ))
+        )
     }
 
     #[boa(skip)]
