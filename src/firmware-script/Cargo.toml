@@ -15,11 +15,10 @@ time.workspace = true
 strum.workspace = true
 tracing.workspace = true
 
-boa_engine = { git = "https://github.com/boa-dev/boa.git", rev = "8c057dc14af5696aff9065035951f5989ae68460", features = ["either"] }
-boa_gc = { git = "https://github.com/boa-dev/boa.git", rev = "8c057dc14af5696aff9065035951f5989ae68460" }
-boa_interop = { git = "https://github.com/boa-dev/boa.git", rev = "8c057dc14af5696aff9065035951f5989ae68460" }
-boa_macros = { git = "https://github.com/boa-dev/boa.git", rev = "8c057dc14af5696aff9065035951f5989ae68460" }
-boa_runtime = { git = "https://github.com/boa-dev/boa.git", rev = "8c057dc14af5696aff9065035951f5989ae68460", features = ["all"] }
+boa_engine = { git = "https://github.com/boa-dev/boa.git", rev = "b6e0fb4d8c142db7dc8f3be03a12109f3f4af298", features = ["either"] }
+boa_gc = { git = "https://github.com/boa-dev/boa.git", rev = "b6e0fb4d8c142db7dc8f3be03a12109f3f4af298" }
+boa_macros = { git = "https://github.com/boa-dev/boa.git", rev = "b6e0fb4d8c142db7dc8f3be03a12109f3f4af298" }
+boa_runtime = { git = "https://github.com/boa-dev/boa.git", rev = "b6e0fb4d8c142db7dc8f3be03a12109f3f4af298", features = ["all"] }
 
 directories = "6.0.0"
 ed25519 = "2.2.3"

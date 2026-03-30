@@ -42,7 +42,7 @@ mod js {
             error!("Truncation is not supported yet.");
         }
 
-        Ok(JsPromise::resolve(JsValue::undefined(), context))
+        JsPromise::resolve(JsValue::undefined(), context)
     }
 }
 

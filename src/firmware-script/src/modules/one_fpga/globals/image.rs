@@ -1,10 +1,10 @@
 use crate::AppRef;
 use boa_engine::class::Class;
+use boa_engine::interop::ContextData;
 use boa_engine::object::builtins::JsPromise;
 use boa_engine::value::TryFromJs;
-use boa_engine::{js_error, Context, JsObject, JsResult, JsString, JsValue};
-use boa_interop::ContextData;
-use boa_macros::{boa_class, js_str, Finalize, JsData, Trace};
+use boa_engine::{Context, JsObject, JsResult, JsString, JsValue, js_error};
+use boa_macros::{Finalize, JsData, Trace, boa_class, js_str};
 use image::DynamicImage;
 use mister_fpga::core::AsMisterCore;
 use std::rc::Rc;
@@ -154,19 +154,19 @@ impl JsImage {
     pub fn save(&self, path: String, context: &mut Context) -> JsResult<JsPromise> {
         debug!("Save image to {}", path);
         let inner = self.inner.clone();
-        let promise = JsPromise::new(
+        JsPromise::new(
             |fns, context| match inner.save(path) {
                 Ok(()) => fns.resolve.call(&JsValue::null(), &[], context),
                 Err(e) => fns.reject.call(
                     &JsValue::null(),
-                    &[js_error!("Failed to save image: {}", e).to_opaque(context)],
+                    &[js_error!("Failed to save image: {}", e)
+                        .into_opaque(context)
+                        .expect("into_opaque")],
                     context,
                 ),
             },
             context,
-        );
-
-        Ok(promise)
+        )
     }
 
     /// Put the image as the background, if on the menu core.

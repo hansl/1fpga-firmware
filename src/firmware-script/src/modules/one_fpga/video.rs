@@ -1,8 +1,8 @@
 use boa_engine::value::TryIntoJs;
-use boa_engine::{js_string, Context, JsResult, JsString, JsValue, Module, TryIntoJsResult};
-use boa_macros::{boa_module, js_value, Finalize, Trace};
-use liboptic_edid::structures::basic_info::vsi::VideoSignalInterface;
+use boa_engine::{Context, JsResult, JsString, JsValue, Module, js_string};
+use boa_macros::{Finalize, Trace, boa_module, js_value};
 use liboptic_edid::structures::basic_info::SizeOrRatio;
+use liboptic_edid::structures::basic_info::vsi::VideoSignalInterface;
 use liboptic_edid::structures::id::{Date, Manufacturer};
 use liboptic_edid::structures::std_timings::{STiming, StandardAspectRatio};
 use std::os::fd::AsRawFd;
@@ -145,21 +145,15 @@ impl From<liboptic_edid::Edid> for Edid {
     }
 }
 
-impl TryIntoJsResult for Edid {
-    fn try_into_js_result(self, context: &mut Context) -> JsResult<JsValue> {
-        self.try_into_js(context)
-    }
-}
-
 #[boa_module]
 mod js {
     use crate::AppRef;
+    use boa_engine::interop::ContextData;
     use boa_engine::value::TryIntoJs;
-    use boa_engine::{js_error, Context, JsError, JsResult, JsString, JsValue};
-    use boa_interop::ContextData;
+    use boa_engine::{Context, JsError, JsResult, JsString, JsValue, js_error};
     use firmware_gui::{EventState, Hooks};
-    use mister_fpga::core::video::edid::{get_edid, DefaultVideoMode};
     use mister_fpga::core::AsMisterCore;
+    use mister_fpga::core::video::edid::{DefaultVideoMode, get_edid};
     use mister_fpga::fpga::user_io::SetFramebufferToHpsOutput;
     use mister_fpga_ini::resolution;
     use std::str::FromStr;

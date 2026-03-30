@@ -3,10 +3,10 @@ use crate::modules::one_fpga::globals::classes::JsImage;
 use crate::modules::CommandMap;
 use crate::AppRef;
 use boa_engine::class::Class;
+use boa_engine::interop::{ContextData, JsClass};
 use boa_engine::object::builtins::{JsFunction, JsPromise, JsUint8Array};
 use boa_engine::value::TryFromJs;
 use boa_engine::{js_error, Context, JsError, JsResult, JsString, JsValue, TryIntoJsResult};
-use boa_interop::{ContextData, JsClass};
 use boa_macros::{boa_class, Finalize, JsData, Trace};
 use enum_map::{Enum, EnumMap};
 use firmware_ui::application::panels::core_loop::run_core_loop;
@@ -201,7 +201,7 @@ impl JsCore {
             );
         });
 
-        result.map(|_| JsPromise::resolve(JsValue::undefined(), *cx.borrow_mut()))
+        JsPromise::from_result(result, *cx.borrow_mut())
     }
 
     fn show_osd(
@@ -253,7 +253,7 @@ impl JsCore {
     fn screenshot(&self, context: &mut Context) -> JsResult<JsPromise> {
         let screenshot = self.core.screenshot().map_err(JsError::from_rust)?;
         let image = JsImage::from_data(JsImage::new(screenshot), context)?;
-        Ok(JsPromise::resolve(image, context))
+        JsPromise::resolve(image, context)
     }
 
     fn file_select(&mut self, id: u32, path: JsString) -> JsResult<()> {

@@ -2,11 +2,9 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use boa_engine::module::{ModuleLoader, Referrer, SimpleModuleLoader};
-use boa_engine::{Context, JsResult, JsString, Module};
-use boa_interop::embed_module;
-use boa_interop::loaders::HashMapModuleLoader;
-use boa_interop::loaders::embedded::EmbeddedModuleLoader;
+use boa_engine::module::embedded::EmbeddedModuleLoader;
+use boa_engine::module::{MapModuleLoader, ModuleLoader, ModuleRequest, Referrer, SimpleModuleLoader};
+use boa_engine::{Context, JsResult, JsString, Module, embed_module};
 
 fn create_root_dirs() -> Result<(), std::io::Error> {
     std::fs::create_dir_all("/media/fat/1fpga/scripts/")?;
@@ -17,7 +15,7 @@ fn create_root_dirs() -> Result<(), std::io::Error> {
 /// A module loader that also understands "freestanding" modules and
 /// special resolution.
 pub struct OneFpgaModuleLoader {
-    named_modules: RefCell<Rc<HashMapModuleLoader>>,
+    named_modules: RefCell<Rc<MapModuleLoader>>,
     embedded: Rc<EmbeddedModuleLoader>,
     root: Option<Rc<SimpleModuleLoader>>,
 
@@ -32,7 +30,7 @@ impl Default for OneFpgaModuleLoader {
         let _ = create_root_dirs();
 
         Self {
-            named_modules: RefCell::new(Rc::new(HashMapModuleLoader::default())),
+            named_modules: RefCell::new(Rc::new(MapModuleLoader::new())),
             embedded: Rc::new(embed_module!("../../js/frontend/dist/")),
             root: None,
             scripts: Rc::new(SimpleModuleLoader::new("/media/fat/1fpga/scripts/").unwrap()),
@@ -46,7 +44,7 @@ impl OneFpgaModuleLoader {
         let _ = create_root_dirs();
 
         Self {
-            named_modules: RefCell::new(Rc::new(HashMapModuleLoader::default())),
+            named_modules: RefCell::new(Rc::new(MapModuleLoader::new())),
             embedded: Rc::new(EmbeddedModuleLoader::from_iter(vec![])),
             root: Some(Rc::new(
                 SimpleModuleLoader::new(root).expect("Could not find the script folder."),
@@ -64,7 +62,7 @@ impl OneFpgaModuleLoader {
     /// Inserts a module in the named module map.
     #[inline]
     pub fn insert_named(&self, name: JsString, module: Module) {
-        self.named_modules.borrow_mut().register(name, module);
+        self.named_modules.borrow_mut().insert(name.to_std_string_lossy(), module);
     }
 }
 
@@ -72,14 +70,14 @@ impl ModuleLoader for OneFpgaModuleLoader {
     async fn load_imported_module(
         self: Rc<Self>,
         referrer: Referrer,
-        specifier: JsString,
+        request: ModuleRequest,
         context: &RefCell<&mut Context>,
     ) -> JsResult<Module> {
         if let Ok(module) = self
             .named_modules
             .borrow()
             .clone()
-            .load_imported_module(referrer.clone(), specifier.clone(), context)
+            .load_imported_module(referrer.clone(), request.clone(), context)
             .await
         {
             Ok(module)
@@ -87,12 +85,12 @@ impl ModuleLoader for OneFpgaModuleLoader {
             // If there is a root_loader, completely ignore the embedded module.
             root_loader
                 .clone()
-                .load_imported_module(referrer.clone(), specifier.clone(), context)
+                .load_imported_module(referrer.clone(), request.clone(), context)
                 .await
         } else {
             self.embedded
                 .clone()
-                .load_imported_module(referrer, specifier, context)
+                .load_imported_module(referrer, request, context)
                 .await
         }
     }

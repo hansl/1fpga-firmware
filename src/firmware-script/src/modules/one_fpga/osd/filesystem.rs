@@ -4,10 +4,10 @@ use std::path::Path;
 use crate::commands::maybe_call_command;
 use crate::modules::CommandMap;
 use crate::AppRef;
+use boa_engine::interop::ContextData;
 use boa_engine::object::builtins::JsPromise;
 use boa_engine::value::TryFromJs;
 use boa_engine::{Context, JsError, JsNativeError, JsResult, JsString, JsValue, TryIntoJsResult};
-use boa_interop::ContextData;
 use boa_macros::{Finalize, JsData, Trace};
 use firmware_ui::application::menu::filesystem::{select_file_path_menu, FilesystemMenuOptions};
 use regex::Regex;
@@ -66,7 +66,7 @@ pub fn select(
     ContextData(command_map): ContextData<CommandMap>,
     ContextData(mut app): ContextData<AppRef>,
     context: &mut Context,
-) -> JsPromise {
+) -> JsResult<JsPromise> {
     JsPromise::new(
         move |fns, mut context| {
             let result = options
@@ -91,9 +91,11 @@ pub fn select(
 
             match result {
                 Ok(v) => fns.resolve.call(&JsValue::undefined(), &[v], context),
-                Err(e) => fns
-                    .reject
-                    .call(&JsValue::undefined(), &[e.to_opaque(context)], context),
+                Err(e) => fns.reject.call(
+                    &JsValue::undefined(),
+                    &[e.into_opaque(context).expect("into_opaque")],
+                    context,
+                ),
             }
         },
         context,

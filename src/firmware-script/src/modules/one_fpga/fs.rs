@@ -1,11 +1,11 @@
-use boa_engine::{js_string, Context, JsResult, JsString, Module};
+use boa_engine::{Context, JsResult, JsString, Module, js_string};
 use boa_macros::boa_module;
 
 #[boa_module]
 #[boa(rename_all = "camelCase")]
 mod js {
     use boa_engine::object::builtins::{JsArray, JsArrayBuffer, JsPromise, JsUint8Array};
-    use boa_engine::{js_error, Context, JsError, JsResult, JsString, JsValue};
+    use boa_engine::{Context, JsError, JsResult, JsString, JsValue, js_error};
     use boa_macros::TryFromJs;
     use either::Either;
     use sha2::Digest;
@@ -30,18 +30,17 @@ mod js {
             Err(js_error!("Invalid data type"))
         }?;
 
-        let promise = JsPromise::new(
+        JsPromise::new(
             |resolvers, context| {
                 std::fs::create_dir_all(path.parent().unwrap()).map_err(JsError::from_rust)?;
                 std::fs::write(&path, &data).map_err(JsError::from_rust)?;
                 resolvers.resolve.call(&JsValue::undefined(), &[], context)
             },
             context,
-        );
-        Ok(promise)
+        )
     }
 
-    fn read_file(file: JsString, context: &mut Context) -> JsPromise {
+    fn read_file(file: JsString, context: &mut Context) -> JsResult<JsPromise> {
         let path = PathBuf::from(file.to_std_string_escaped());
 
         JsPromise::new(
@@ -53,7 +52,9 @@ mod js {
                         .call(&JsValue::undefined(), &[buffer.into()], context)
                 }
                 Err(e) => {
-                    let v: JsValue = js_error!("{}", e).to_opaque(context);
+                    let v: JsValue = js_error!("{}", e)
+                        .into_opaque(context)
+                        .expect("Error could not be converted to opaque.");
                     resolvers.reject.call(&JsValue::undefined(), &[v], context)
                 }
             },
@@ -61,7 +62,7 @@ mod js {
         )
     }
 
-    fn read_text_file(file: JsString, context: &mut Context) -> JsPromise {
+    fn read_text_file(file: JsString, context: &mut Context) -> JsResult<JsPromise> {
         let path = PathBuf::from(file.to_std_string_escaped());
 
         JsPromise::new(
@@ -73,7 +74,9 @@ mod js {
                         .call(&JsValue::undefined(), &[buffer.into()], context)
                 }
                 Err(e) => {
-                    let v: JsValue = js_error!("{}", e).to_opaque(context);
+                    let v: JsValue = js_error!("{}", e)
+                        .into_opaque(context)
+                        .expect("into_opaque");
                     resolvers.reject.call(&JsValue::undefined(), &[v], context)
                 }
             },
@@ -81,14 +84,16 @@ mod js {
         )
     }
 
-    fn delete_file(file: JsString, context: &mut Context) -> JsPromise {
+    fn delete_file(file: JsString, context: &mut Context) -> JsResult<JsPromise> {
         let path = PathBuf::from(file.to_std_string_escaped());
 
         JsPromise::new(
             |resolvers, context| match std::fs::remove_file(&path) {
                 Ok(_) => resolvers.resolve.call(&JsValue::undefined(), &[], context),
                 Err(e) => {
-                    let v: JsValue = js_error!("{}", e).to_opaque(context);
+                    let v: JsValue = js_error!("{}", e)
+                        .into_opaque(context)
+                        .expect("into_opaque");
                     resolvers.reject.call(&JsValue::undefined(), &[v], context)
                 }
             },
@@ -96,7 +101,7 @@ mod js {
         )
     }
 
-    fn read_dir(file: JsString, context: &mut Context) -> JsPromise {
+    fn read_dir(file: JsString, context: &mut Context) -> JsResult<JsPromise> {
         let path = PathBuf::from(file.to_std_string_escaped());
 
         JsPromise::new(
@@ -104,7 +109,9 @@ mod js {
                 let entries = match std::fs::read_dir(&path) {
                     Ok(entries) => entries,
                     Err(e) => {
-                        let v: JsValue = js_error!("{}", e).to_opaque(context);
+                        let v: JsValue = js_error!("{}", e)
+                            .into_opaque(context)
+                            .expect("into_opaque");
                         return resolvers.reject.call(&JsValue::undefined(), &[v], context);
                     }
                 };
@@ -114,7 +121,9 @@ mod js {
                         let entry = match entry {
                             Ok(entry) => entry,
                             Err(e) => {
-                                let v: JsValue = js_error!("{}", e).to_opaque(context);
+                                let v: JsValue = js_error!("{}", e)
+                                    .into_opaque(context)
+                                    .expect("into_opaque");
                                 return Some(v);
                             }
                         };
@@ -133,7 +142,7 @@ mod js {
         )
     }
 
-    fn is_file(file: JsString, context: &mut Context) -> JsPromise {
+    fn is_file(file: JsString, context: &mut Context) -> JsResult<JsPromise> {
         let path = PathBuf::from(file.to_std_string_escaped());
 
         JsPromise::new(
@@ -150,7 +159,7 @@ mod js {
         )
     }
 
-    fn mkdir(dir: JsString, all: Option<bool>, context: &mut Context) -> JsPromise {
+    fn mkdir(dir: JsString, all: Option<bool>, context: &mut Context) -> JsResult<JsPromise> {
         let path = PathBuf::from(dir.to_std_string_escaped());
 
         JsPromise::new(
@@ -164,7 +173,9 @@ mod js {
                 match result {
                     Ok(_) => resolvers.resolve.call(&JsValue::undefined(), &[], context),
                     Err(e) => {
-                        let v: JsValue = js_error!("{}", e).to_opaque(context);
+                        let v: JsValue = js_error!("{}", e)
+                            .into_opaque(context)
+                            .expect("into_opaque");
                         resolvers.reject.call(&JsValue::undefined(), &[v], context)
                     }
                 }
@@ -173,7 +184,7 @@ mod js {
         )
     }
 
-    fn rmdir(dir: JsString, recursive: Option<bool>, context: &mut Context) -> JsPromise {
+    fn rmdir(dir: JsString, recursive: Option<bool>, context: &mut Context) -> JsResult<JsPromise> {
         let path = PathBuf::from(dir.to_std_string_escaped());
 
         JsPromise::new(
@@ -187,7 +198,9 @@ mod js {
                 match result {
                     Ok(_) => resolvers.resolve.call(&JsValue::undefined(), &[], context),
                     Err(e) => {
-                        let v: JsValue = js_error!("{}", e).to_opaque(context);
+                        let v: JsValue = js_error!("{}", e)
+                            .into_opaque(context)
+                            .expect("into_opaque");
                         resolvers.reject.call(&JsValue::undefined(), &[v], context)
                     }
                 }
@@ -196,7 +209,7 @@ mod js {
         )
     }
 
-    fn is_dir(file: JsString, context: &mut Context) -> JsPromise {
+    fn is_dir(file: JsString, context: &mut Context) -> JsResult<JsPromise> {
         let path = PathBuf::from(file.to_std_string_escaped());
 
         JsPromise::new(
@@ -223,7 +236,7 @@ mod js {
         root: String,
         options: Option<FindAllFilesOptions>,
         context: &mut Context,
-    ) -> JsPromise {
+    ) -> JsResult<JsPromise> {
         JsPromise::new(
             |fns, context| {
                 let extensions = options
@@ -264,7 +277,7 @@ mod js {
         )
     }
 
-    fn sha256(paths: Either<String, Vec<String>>, context: &mut Context) -> JsPromise {
+    fn sha256(paths: Either<String, Vec<String>>, context: &mut Context) -> JsResult<JsPromise> {
         JsPromise::new(
             |fns, context| {
                 let value: JsValue = match paths {
@@ -303,7 +316,7 @@ mod js {
         )
     }
 
-    fn file_size(paths: Either<String, Vec<String>>, context: &mut Context) -> JsPromise {
+    fn file_size(paths: Either<String, Vec<String>>, context: &mut Context) -> JsResult<JsPromise> {
         JsPromise::new(
             |fns, context| {
                 let value: JsValue = match paths {

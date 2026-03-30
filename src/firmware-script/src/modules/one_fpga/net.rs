@@ -130,12 +130,14 @@ mod js {
             .filter(|i| i.family.is_some() || i.address.is_some())
             .collect::<Vec<_>>();
 
-        result
-            .into_iter()
-            .map(|i| i.to_js_object(ctx))
-            .collect::<Vec<_>>()
-            .try_into_js_result(ctx)
-            .map(|interfaces| JsPromise::resolve(interfaces, ctx))
+        JsPromise::from_result(
+            result
+                .into_iter()
+                .map(|i| i.to_js_object(ctx))
+                .collect::<JsResult<Vec<_>>>()
+                .and_then(|x| x.try_into_js_result(ctx)),
+            ctx,
+        )
     }
 
     fn fetch_json(url: String, ctx: &mut Context) -> JsResult<JsPromise> {
@@ -150,10 +152,8 @@ mod js {
                     ctx,
                 )
             });
-        Ok(match result {
-            Ok(v) => JsPromise::resolve(v, ctx),
-            Err(e) => JsPromise::reject(e, ctx),
-        })
+
+        JsPromise::from_result(result, ctx)
     }
 
     fn download(url: String, destination: Option<String>) -> JsResult<JsString> {
@@ -199,7 +199,7 @@ mod js {
         Ok(JsString::from(path.display().to_string()))
     }
 
-    fn is_online(ctx: &mut Context) -> JsPromise {
+    fn is_online(ctx: &mut Context) -> JsResult<JsPromise> {
         let is_online = ping::ping(
             [1, 1, 1, 1].into(),
             Some(Duration::from_secs(1)),

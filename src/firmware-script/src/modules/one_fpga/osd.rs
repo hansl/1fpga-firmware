@@ -11,13 +11,13 @@ mod js {
     use crate::commands::maybe_call_command;
     use crate::modules::CommandMap;
     use crate::AppRef;
+    use boa_engine::interop::ContextData;
     use boa_engine::object::builtins::{JsArray, JsPromise};
     use boa_engine::value::TryFromJs;
     use boa_engine::{
         js_string, Context, Finalize, JsData, JsNativeError, JsObject, JsResult, JsString, JsValue,
         JsVariant, Trace, TryIntoJsResult,
     };
-    use boa_interop::ContextData;
     use either::Either;
     use firmware_ui::application::menu;
     use firmware_ui::application::panels::password::enter_password;
@@ -30,7 +30,7 @@ mod js {
         command_map_data: ContextData<CommandMap>,
         app_data: ContextData<AppRef>,
         context: &mut Context,
-    ) -> JsPromise {
+    ) -> JsResult<JsPromise> {
         super::filesystem::select(
             title,
             initial_dir,
@@ -306,7 +306,7 @@ mod js {
                         if let Some(v) =
                             call_callable(Some((&mut options.items[i], i)), select, context)?
                         {
-                            return Ok(JsPromise::resolve(v, context));
+                            return JsPromise::resolve(v, context);
                         }
                     }
                 }
@@ -315,7 +315,7 @@ mod js {
                         if let Some(v) =
                             call_callable(Some((&mut options.items[i], i)), details, context)?
                         {
-                            return Ok(JsPromise::resolve(v, context));
+                            return JsPromise::resolve(v, context);
                         }
                     }
                 }
@@ -331,7 +331,7 @@ mod js {
                             let Ok(mut new_options): JsResult<UiMenuOptions> =
                                 result.try_js_into(context)
                             else {
-                                return Ok(JsPromise::resolve(result, context));
+                                return JsPromise::resolve(result, context);
                             };
 
                             options.sort_label = new_options.sort_label.clone();
@@ -345,7 +345,7 @@ mod js {
                 MenuAction::Back => {
                     if let Some(maybe_callable) = options.back.clone() {
                         if let Some(v) = call_callable(None, maybe_callable, context)? {
-                            return Ok(JsPromise::resolve(v, context));
+                            return JsPromise::resolve(v, context);
                         }
                     }
                 }
@@ -369,7 +369,7 @@ mod js {
         title: Option<String>,
         ContextData(mut app): ContextData<AppRef>,
         context: &mut Context,
-    ) -> JsPromise {
+    ) -> JsResult<JsPromise> {
         let (message, title, choices, selected, timeout) = match message {
             Either::Left(message) => {
                 if let Some(real_message) = title {
@@ -418,7 +418,7 @@ mod js {
         maybe_message: Option<String>,
         ContextData(mut app): ContextData<AppRef>,
         context: &mut Context,
-    ) -> JsPromise {
+    ) -> JsResult<JsPromise> {
         let (message, title, default) = match message {
             Either::Left(ref message) => {
                 // Swap title and message if title is specified.
@@ -452,7 +452,7 @@ mod js {
         length: u8,
         ContextData(mut app): ContextData<AppRef>,
         context: &mut Context,
-    ) -> JsPromise {
+    ) -> JsResult<JsPromise> {
         let result = enter_password(&mut app, &title, &message, length);
 
         if let Some(result) = result {
@@ -496,7 +496,10 @@ mod js {
         firmware_ui::application::panels::qrcode::qrcode_alert(&mut app, &title, &message, &url);
     }
 
-    fn input_tester(ContextData(mut app): ContextData<AppRef>, ctx: &mut Context) -> JsPromise {
+    fn input_tester(
+        ContextData(mut app): ContextData<AppRef>,
+        ctx: &mut Context,
+    ) -> JsResult<JsPromise> {
         firmware_ui::application::panels::input_tester::input_tester(&mut app);
 
         JsPromise::resolve(JsValue::undefined(), ctx)
@@ -507,7 +510,7 @@ mod js {
         title: Option<String>,
         message: Option<String>,
         context: &mut Context,
-    ) -> JsPromise {
+    ) -> JsResult<JsPromise> {
         let result = firmware_ui::application::panels::shortcut::prompt_shortcut(
             &mut app,
             title.unwrap_or("Pick a shortcut".to_string()).as_str(),
@@ -521,12 +524,18 @@ mod js {
         }
     }
 
-    fn hide_osd(ContextData(mut app): ContextData<AppRef>, context: &mut Context) -> JsPromise {
+    fn hide_osd(
+        ContextData(mut app): ContextData<AppRef>,
+        context: &mut Context,
+    ) -> JsResult<JsPromise> {
         app.platform_mut().core_manager_mut().hide_osd();
         JsPromise::resolve(JsValue::undefined(), context)
     }
 
-    fn show_osd(ContextData(mut app): ContextData<AppRef>, context: &mut Context) -> JsPromise {
+    fn show_osd(
+        ContextData(mut app): ContextData<AppRef>,
+        context: &mut Context,
+    ) -> JsResult<JsPromise> {
         app.platform_mut().core_manager_mut().show_osd();
         JsPromise::resolve(JsValue::undefined(), context)
     }
