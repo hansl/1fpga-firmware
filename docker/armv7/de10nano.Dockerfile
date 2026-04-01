@@ -50,6 +50,6 @@ RUN rustup target add armv7-unknown-linux-gnueabihf
 RUN rustup component add --target armv7-unknown-linux-gnueabihf rust-std
 RUN rustup component add rustfmt rustc rust-std clippy
 
-RUN cargo chef cook --release --target armv7-unknown-linux-gnueabihf --recipe-path recipe.json
+RUN cargo chef cook --target armv7-unknown-linux-gnueabihf --recipe-path recipe.json
 
-ENTRYPOINT ["cargo", "build", "--target", "armv7-unknown-linux-gnueabihf", "--release", "--no-default-features", "--features=platform_de10"]
+ENTRYPOINT ["cargo", "build", "--target", "armv7-unknown-linux-gnueabihf", "--no-default-features", "--features=platform_de10"]
