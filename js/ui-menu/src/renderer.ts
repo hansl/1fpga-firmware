@@ -30,7 +30,6 @@ const reconciler = Reconciler({
   supportsHydration: false,
 
   createInstance(type: string, props: Props): Instance {
-    console.log('createInstance', type);
     const nodeId = dom.createElement(type);
     applyProps(nodeId, {}, props);
     return nodeId;

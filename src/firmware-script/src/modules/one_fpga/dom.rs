@@ -4,7 +4,6 @@ use boa_macros::boa_module;
 use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::rc::Rc;
-
 use boa_macros::{Finalize, JsData, Trace};
 use ui_fb::{AnimationController, DomTree, LayoutEngine, Renderer};
 
@@ -130,6 +129,12 @@ mod js {
 
     fn request_render(ContextData(state): ContextData<DomState>) {
         state.inner.borrow_mut().render_requested = true;
+    }
+
+    /// Flush pending JS jobs (microtasks, async jobs, and timeout jobs).
+    /// Flush pending JS jobs.
+    fn flush_jobs(context: &mut Context) -> JsResult<()> {
+        context.run_jobs()
     }
 
     fn exit_render_loop(value: Option<JsString>, ContextData(state): ContextData<DomState>) {

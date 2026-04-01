@@ -24,6 +24,9 @@ boa_macros = { git = "https://github.com/boa-dev/boa.git", rev = "b6e0fb4d8c142d
 boa_runtime = { git = "https://github.com/boa-dev/boa.git", rev = "b6e0fb4d8c142db7dc8f3be03a12109f3f4af298", features = ["all"] }
 
 directories = "6.0.0"
+futures-concurrency = "7"
+futures-lite = "2"
+portable-atomic = "1"
 ed25519 = "2.2.3"
 ed25519-dalek = { version = "2.1.1", features = ["pem"] }
 either = "1"

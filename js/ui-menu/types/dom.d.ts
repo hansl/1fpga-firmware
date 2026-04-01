@@ -9,6 +9,7 @@ declare module '1fpga:dom' {
   export function setTextContent(nodeId: number, text: string): void;
   export function getRootNode(): number;
   export function requestRender(): void;
+  export function flushJobs(): void;
   export function exitRenderLoop(value?: string): void;
   export function animate(
     nodeId: number,

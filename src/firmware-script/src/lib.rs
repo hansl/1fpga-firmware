@@ -14,6 +14,7 @@ use std::rc::Rc;
 use std::time::Instant;
 use tracing::{debug, error, info};
 
+mod job_executor;
 mod module_loader;
 
 mod commands;
@@ -77,7 +78,11 @@ fn create_context(
         None => Rc::new(OneFpgaModuleLoader::default()),
     };
 
-    let mut context = Context::builder().module_loader(loader.clone()).build()?;
+    let executor = Rc::new(job_executor::ImmediateJobExecutor::default());
+    let mut context = Context::builder()
+        .module_loader(loader.clone())
+        .job_executor(executor)
+        .build()?;
 
     let version = {
         let major = env!("CARGO_PKG_VERSION_MAJOR")

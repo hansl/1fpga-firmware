@@ -41,4 +41,16 @@ export default {
       : []),
   ],
   external: [/^1fpga:/],
+  onLog(level, log, handler) {
+    // Suppress TypeScript warnings about custom JSX elements (view, text, image)
+    // conflicting with React's SVG type definitions.
+    if (log.code === 'PLUGIN_WARNING' && log.plugin === 'typescript' && log.message?.includes('TS2322')) {
+      return;
+    }
+    // Suppress missing type declaration for react-reconciler
+    if (log.code === 'PLUGIN_WARNING' && log.plugin === 'typescript' && log.message?.includes('TS7016')) {
+      return;
+    }
+    handler(level, log);
+  },
 };

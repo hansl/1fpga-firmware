@@ -14,7 +14,7 @@ export function Menu({ items, focused }: MenuProps) {
   return (
     <view
       flexDirection="column"
-      backgroundColor={[0, 0, 0]}
+      backgroundColor={[128, 0, 0]}
       opacity={0.85}
       padding={24}
       gap={8}

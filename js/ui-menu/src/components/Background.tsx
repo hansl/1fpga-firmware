@@ -7,8 +7,8 @@ export function Background({ src }: { src: string }) {
       position="absolute"
       top={0}
       left={0}
-      width={1920}
-      height={1080}
+      width={640}
+      height={480}
     />
   );
 }

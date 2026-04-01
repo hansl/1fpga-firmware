@@ -1,13 +1,15 @@
 // Custom JSX element types for the 1FPGA React renderer.
 // These map to Rust DOM node types via the react-reconciler bridge.
+// We use module augmentation to override React's built-in SVG element types.
 
-declare namespace React {
+import 'react';
+
+declare module 'react' {
   namespace JSX {
     interface IntrinsicElements {
       view: {
         key?: string | number;
         children?: any;
-        // Layout
         width?: number;
         height?: number;
         flexDirection?: 'row' | 'column';
@@ -29,7 +31,6 @@ declare namespace React {
         left?: number;
         right?: number;
         bottom?: number;
-        // Visual
         backgroundColor?: number[] | string;
         opacity?: number;
         borderRadius?: number;

@@ -1,88 +1,63 @@
+// Polyfills MUST be imported before React so the scheduler sees them.
+import './polyfills';
+
+import * as React from 'react';
 import * as dom from '1fpga:dom';
 import * as core from '1fpga:core';
-
-// Polyfill for Boa compatibility
-(globalThis as any).performance = {
-  now: () => Date.now(),
-};
+import { render } from './renderer';
+import { App } from './components/App';
 
 export async function main() {
-  console.log('1FPGA React Menu starting (direct DOM test)');
+  console.log('1FPGA React Menu starting');
 
-  const root = dom.getRootNode();
-  console.log('Root node:', root);
+  let selectedAction: string | null = null;
+  const inputRef: React.MutableRefObject<((event: string) => void) | null> = { current: null };
 
-  // Build DOM tree directly (no React, testing the pipeline)
-  // Background image
-  const bg = dom.createElement('image');
-  dom.setProp(bg, 'src', 'embedded:background');
-  dom.setProp(bg, 'position', 'absolute');
-  dom.setProp(bg, 'top', 0);
-  dom.setProp(bg, 'left', 0);
-  dom.setProp(bg, 'width', 640);
-  dom.setProp(bg, 'height', 480);
-  dom.appendChild(root, bg);
+  function handleSelect(action: string) {
+    selectedAction = action;
+    dom.exitRenderLoop(action);
+  }
 
-  // Container for menu
-  const container = dom.createElement('view');
-  dom.setProp(container, 'flexDirection', 'column');
-  dom.setProp(container, 'width', 640);
-  dom.setProp(container, 'height', 480);
-  dom.setProp(container, 'justifyContent', 'center');
-  dom.setProp(container, 'alignItems', 'center');
-  dom.appendChild(root, container);
+  // Render the React tree into the Rust DOM
+  try {
+    console.log('Creating React element...');
+    const element = React.createElement(App, { onSelect: handleSelect, inputRef });
+    console.log('Calling render...');
+    render(element);
+    console.log('Render complete, flushing jobs...');
+  } catch (e) {
+    console.error('React render failed:', e);
+    throw e;
+  }
 
-  // Menu box
-  const menuBox = dom.createElement('view');
-  dom.setProp(menuBox, 'flexDirection', 'column');
-  dom.setProp(menuBox, 'backgroundColor', [0, 0, 0]);
-  dom.setProp(menuBox, 'opacity', 0.85);
-  dom.setProp(menuBox, 'padding', 24);
-  dom.setProp(menuBox, 'gap', 8);
-  dom.setProp(menuBox, 'alignItems', 'center');
-  dom.appendChild(container, menuBox);
+  // Flush React's scheduled work so the DOM tree is populated before entering the render loop
+  try {
+    console.log('Flushing jobs...');
+    dom.flushJobs();
+    console.log('Jobs flushed successfully');
+  } catch (e) {
+    console.error('flushJobs failed:', e);
+    throw e;
+  }
 
-  // Start button (focused)
-  const startBtn = dom.createElement('view');
-  dom.setProp(startBtn, 'backgroundColor', [80, 80, 220]);
-  dom.setProp(startBtn, 'padding', 12);
-  dom.setProp(startBtn, 'width', 200);
-  dom.setProp(startBtn, 'alignItems', 'center');
-  dom.appendChild(menuBox, startBtn);
+  console.log('React render flushed, entering render loop');
 
-  const startText = dom.createText('Start');
-  dom.appendChild(startBtn, startText);
-
-  // Quit button
-  const quitBtn = dom.createElement('view');
-  dom.setProp(quitBtn, 'padding', 12);
-  dom.setProp(quitBtn, 'width', 200);
-  dom.setProp(quitBtn, 'alignItems', 'center');
-  dom.appendChild(menuBox, quitBtn);
-
-  const quitText = dom.createText('Quit');
-  dom.appendChild(quitBtn, quitText);
-
-  dom.requestRender();
-  console.log('DOM tree built, entering render loop');
-
-  let focused = 0;
-  const items = ['start', 'quit'];
-
-  // Enter the Rust render loop
+  // Enter the Rust render loop. This blocks until exitRenderLoop is called.
   await dom.startRenderLoop((event: string) => {
-    if (event === 'up' && focused > 0) {
-      focused--;
-      dom.setProp(startBtn, 'backgroundColor', focused === 0 ? [80, 80, 220] : undefined);
-      dom.setProp(quitBtn, 'backgroundColor', focused === 1 ? [80, 80, 220] : undefined);
-    } else if (event === 'down' && focused < items.length - 1) {
-      focused++;
-      dom.setProp(startBtn, 'backgroundColor', focused === 0 ? [80, 80, 220] : undefined);
-      dom.setProp(quitBtn, 'backgroundColor', focused === 1 ? [80, 80, 220] : undefined);
-    } else if (event === 'select') {
-      dom.exitRenderLoop(items[focused]);
+    // Dispatch input to the React component tree
+    if (inputRef.current) {
+      inputRef.current(event);
     }
+    // Flush React updates triggered by setState
+    dom.flushJobs();
   });
 
-  console.log('Exited render loop');
+  console.log('Menu selected:', selectedAction);
+
+  if (selectedAction === 'start') {
+    const c = await core.load({
+      core: { type: 'Path', path: '/media/fat/memtest.rbf' },
+    });
+    await (c as any).loop();
+  }
 }
