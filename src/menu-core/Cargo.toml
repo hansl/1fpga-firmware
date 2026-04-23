@@ -1,0 +1,26 @@
+[package]
+name = "menu-core"
+version = "0.1.0"
+edition = "2024"
+authors = ["Hans Larsen <hans.larsen@gmail.com>"]
+description = "Host-side driver for the 1FPGA menu-core FPGA bitstream (2D GPU for the main menu)"
+license = "Apache-2.0"
+repository = "https://github.com/1fpga/firmware.git"
+
+[[bin]]
+name = "one_fpga_menu_core"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+clap = { version = "4.3.5", features = ["derive"] }
+clap-verbosity-flag = "2.0.1"
+core_affinity = "0.8.1"
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+pretty_assertions = "1.4"

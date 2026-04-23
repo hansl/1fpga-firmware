@@ -3327,6 +3327,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "menu-core"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "clap-verbosity-flag",
+ "core_affinity",
+ "pretty_assertions",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "merg"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

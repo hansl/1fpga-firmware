@@ -10,6 +10,7 @@ members = [
     "src/firmware-ui",
     "src/games-db-converter",
     "src/one-fpga",
+    "src/menu-core",
     "src/mister-fpga",
     "src/mister-fpga-ini",
     "src/taser",
