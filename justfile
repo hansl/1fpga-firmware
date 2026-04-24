@@ -49,3 +49,29 @@ new-migration name:
 # Update Patreon credits
 patreon:
     LAST_RELEASE=$(git tag | sort -r | head -n1) npm run patreon
+
+# Build the Quartus 17.0.2 Docker image (auto-downloads ~8.8 GB from Intel CDN)
+menu-core-image:
+    docker build --platform linux/amd64 -t one-fpga-quartus:17.0.2 docker/quartus
+
+# Build the menu-core .rbf via the Quartus Docker image
+build-menu-core:
+    docker run --rm -t \
+        --platform linux/amd64 \
+        -u "$(id -u):$(id -g)" \
+        -v "{{justfile_directory()}}/cores/menu-core":/work \
+        one-fpga-quartus:17.0.2 \
+        --flow compile menu_core.qpf
+
+# Open an interactive shell in the Quartus container
+quartus-shell:
+    docker run --rm -it \
+        --platform linux/amd64 \
+        -u "$(id -u):$(id -g)" \
+        -v "{{justfile_directory()}}/cores/menu-core":/work \
+        --entrypoint /bin/bash \
+        one-fpga-quartus:17.0.2
+
+# Deploy the built menu-core .rbf to the device
+deploy-menu-core: build-menu-core
+    scp cores/menu-core/output_files/menu_core.rbf root@{{mister_ip}}:/media/fat/menu_core.rbf
