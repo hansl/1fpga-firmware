@@ -51,9 +51,28 @@ RUN dpkg --add-architecture i386 \
 ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
 WORKDIR /tmp/quartus-tar
-RUN curl -fSL -o installer.tar "$QUARTUS_TAR_URL" \
- && tar xf installer.tar \
- && rm installer.tar
+# Intel's CDN (Akamai) occasionally resets connections mid-transfer on
+# large files like this 8.8 GB tarball. curl 7.68.0 on Ubuntu 20.04
+# predates `--retry-all-errors` (added in 7.71.0), so we drive the
+# retries from the shell. Each attempt resumes from the partial file
+# via `-C -`, so a single build can absorb multiple resets without
+# re-downloading the whole thing.
+RUN set -eu; \
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do \
+      echo "=== Download attempt $attempt ==="; \
+      if curl -fSL -C - --connect-timeout 30 -o installer.tar "$QUARTUS_TAR_URL"; then \
+        echo "=== Download succeeded on attempt $attempt ==="; \
+        break; \
+      fi; \
+      if [ "$attempt" = "10" ]; then \
+        echo "=== All 10 download attempts exhausted ==="; \
+        exit 1; \
+      fi; \
+      echo "=== Attempt $attempt failed; sleeping 15s before retrying ==="; \
+      sleep 15; \
+    done; \
+    tar xf installer.tar; \
+    rm installer.tar
 
 # Unattended install. The disable-components list selects Cyclone V as
 # the only device family (skips Arria II, Cyclone III/IV, Cyclone 10 LP,
