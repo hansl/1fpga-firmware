@@ -82,36 +82,29 @@ would be lost on the next re-sync.
 just menu-core-image
 ```
 
-This downloads the ~8.8 GB Quartus 17.0.2 bundle directly from
-Intel's CDN (no account required) and installs only the Cyclone V
-device pack via a scripted `expect` run. Final image is ~4 GB.
+This pulls `theypsilon/quartus-lite-c5:17.0.2` from Docker Hub
+(~2.8 GB) — a community-maintained Quartus 17.0.2 image pre-loaded
+with Cyclone V device support. Build time is dominated by the image
+pull (typically a few minutes on broadband).
 
-**Apple Silicon (M-series Mac): this build does not currently work
-locally.** We confirmed two dead ends on 2026-04-24:
+**Background:** we originally built Quartus ourselves from Intel's
+tarball. Intel's 17.0.2 installer has a reproducible deadlock in
+unattended mode that reliably hangs after ~10-30 minutes on both
+macOS/QEMU and native amd64 Linux (confirmed 2026-04-24 on a Steam
+Deck). The community image sidesteps this entirely.
 
-- **Rosetta 2:** `setup.sh` crashes with `rosetta error: bss_size
-  overflow` — a known Rosetta limitation with x86 binaries that have
-  large BSS sections. Quartus's installer trips it.
-- **QEMU (Rosetta disabled):** setup.sh starts, does ~20 minutes of
-  real work, then deadlocks silently with no further output. Both
-  interactive (via `expect`) and `--mode unattended` runs hang the same
-  way at ~30 min elapsed. VM load drops to idle; no output; no
-  completion. Tested repeatedly.
+**Apple Silicon (M-series Mac):** Docker Desktop's QEMU emulation of
+x86_64 has separately been shown to hang Quartus's compile tools.
+Build on a real amd64 host (Linux box, Steam Deck, cloud VM, CI).
+Once the RBF is produced, deployment to the DE10-Nano is identical
+regardless of where it was compiled.
 
-For now, **build the image on a real amd64 Linux machine** (local VM,
-cloud instance, or CI runner). Once built, the resulting RBF and
-intermediate files transfer to the DE10-Nano exactly as on amd64 — the
-device doesn't care where the bitstream was compiled. A practical
-split: Rust host development on the Mac, FPGA build pipeline on a
-remote amd64 shell.
-
-If someone figures out a reliable QEMU path for the 17.0.2 installer
-on Apple Silicon (possibly a newer Docker Desktop with better QEMU
-integration, or a different base image), please update this section.
-
-Advanced: override the Quartus version or download URL with Docker
-build args. See the header of `docker/quartus/Dockerfile` for the
-available knobs.
+Advanced: if you need to pin a different Quartus version, update the
+`FROM` line in `docker/quartus/Dockerfile` to another tag (upstream
+publishes 17.0, 17.0.2, 17.1, 18.0, 18.1, 19.1; the `-heavy` suffix
+keeps docs/examples/extra device packs). MiSTer's framework
+specifically requires the 17.0.x series — do not upgrade without
+understanding the project-file compatibility implications.
 
 ### Build the core
 
@@ -160,16 +153,15 @@ skeleton — tracked in a later milestone.)
 
 ## Troubleshooting
 
-**Docker image build fails at `curl` step**  
-Intel's CDN may be slow or momentarily unavailable. Retry with
-`just menu-core-image` — the download layer is cached once it
-completes. To probe connectivity directly:
+**Docker image pull fails or is very slow**  
+The base image (`theypsilon/quartus-lite-c5:17.0.2`) is hosted on
+Docker Hub. Rate limits or transient network issues can slow the
+pull. Retry `just menu-core-image` — layers are cached once pulled.
+To probe connectivity:
 
 ```sh
-curl -sI https://downloads.intel.com/akdlm/software/acdsinst/17.0std.2/602/ib_tar/Quartus-lite-17.0.2.602-linux.tar
+docker manifest inspect theypsilon/quartus-lite-c5:17.0.2
 ```
-
-Expect `HTTP/1.0 200 OK` and `Content-Length: 8764528640`.
 
 **"sys_top is not a synthesizable entity"**  
 The `sys/sys.tcl` pipeline didn't run. Verify `menu_core.qsf` still
