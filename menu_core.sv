@@ -197,14 +197,23 @@ assign BUTTONS   = 2'b00;
 ////////////////////////////////////////////////////////////////////////////
 // System clock.
 //
-// For M1 we run the (minimal) core logic directly off the 50 MHz reference.
-// Once the blit engine and command fetcher land, add a PLL in rtl/pll/ to
-// produce a 150 MHz blit clock and 148.5 MHz pixel clock. With no PLL
-// instantiated, `derive_pll_clocks` in the SDC derives nothing — which is
-// fine because no internal clock domains exist yet.
+// Cyclone V's clock-select blocks in sys_top require a PLL output on
+// inclk[3] (synthesis error 15836 if driven by a raw input pin). We
+// therefore instantiate a 50→50 MHz pass-through PLL here. When the blit
+// engine and command fetcher land, retune the PLL parameters (or add
+// additional outputs) for the blit and pixel clocks; see rtl/pll/pll.v.
 ////////////////////////////////////////////////////////////////////////////
 
-wire clk_sys = CLK_50M;
+wire clk_sys;
+wire pll_locked;
+
+pll pll_inst (
+	.refclk   (CLK_50M),
+	.rst      (1'b0),
+	.outclk_0 (clk_sys),
+	.locked   (pll_locked)
+);
+
 assign CLK_VIDEO = clk_sys;
 
 ////////////////////////////////////////////////////////////////////////////
@@ -245,7 +254,8 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 wire _unused_ok = &{1'b0, status, buttons_hps, forced_scandoubler,
                     HDMI_WIDTH, HDMI_HEIGHT, FB_VBL, FB_LL, OSD_STATUS,
                     UART_CTS, UART_RXD, UART_DSR, USER_IN, SD_MISO, SD_CD,
-                    DDRAM_BUSY, DDRAM_DOUT, DDRAM_DOUT_READY, RESET, 1'b0};
+                    DDRAM_BUSY, DDRAM_DOUT, DDRAM_DOUT_READY, RESET,
+                    pll_locked, 1'b0};
 
 ////////////////////////////////////////////////////////////////////////////
 // MISTER_FB configuration — this is the whole of the menu core for M1.
