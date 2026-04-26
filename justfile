@@ -50,13 +50,11 @@ new-migration name:
 patreon:
     LAST_RELEASE=$(git tag | sort -r | head -n1) npm run patreon
 
-# Build the Quartus 17.0.2 Docker image (auto-downloads ~8.8 GB from Intel CDN)
+# Pull pre-built Quartus 17.0.2 image (theypsilon/quartus-lite-c5)
 menu-core-image:
     docker build --platform linux/amd64 -t one-fpga-quartus:17.0.2 docker/quartus
 
-# Build the menu-core .rbf via the Quartus Docker image.
-# Expects the private FPGA repo to be checked out at cores/menu-core-fpga/
-# (clone it: git clone git@github.com:one-retro/1fpga-menu-core.git cores/menu-core-fpga)
+# Compile the menu-core FPGA bitstream (requires cores/menu-core-fpga/ checkout)
 build-menu-core:
     @test -f cores/menu-core-fpga/menu_core.qpf || \
         (echo "ERROR: cores/menu-core-fpga/ not found. Clone the FPGA repo first:" && \
