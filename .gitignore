@@ -188,7 +188,7 @@ fabric.properties
 .LSOverride
 
 # Icon must end with two \r
-Icon
+Icon
 
 # Thumbnails
 ._*
@@ -767,7 +767,3 @@ $RECYCLE.BIN/
 *.lnk
 
 # End of https://www.toptal.com/developers/gitignore/api/rust,node,intellij,vs,vim,emacs,macos,windows,linux
-
-# FPGA half of menu-core lives in a separate private repo (one-retro/1fpga-menu-core).
-# Convention: clone it as a sibling under cores/menu-core-fpga/. See cores/menu-core/README.md.
-/cores/menu-core-fpga/

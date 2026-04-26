@@ -1,0 +1,3 @@
+[submodule "cores/menu-core-fpga"]
+	path = cores/menu-core-fpga
+	url = git@github.com:one-retro/1fpga-menu-core.git

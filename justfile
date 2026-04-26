@@ -54,11 +54,11 @@ patreon:
 menu-core-image:
     docker build --platform linux/amd64 -t one-fpga-quartus:17.0.2 docker/quartus
 
-# Compile the menu-core FPGA bitstream (requires cores/menu-core-fpga/ checkout)
+# Compile the menu-core FPGA bitstream (requires cores/menu-core-fpga submodule)
 build-menu-core:
     @test -f cores/menu-core-fpga/menu_core.qpf || \
-        (echo "ERROR: cores/menu-core-fpga/ not found. Clone the FPGA repo first:" && \
-         echo "  git clone git@github.com:one-retro/1fpga-menu-core.git cores/menu-core-fpga" && \
+        (echo "ERROR: cores/menu-core-fpga submodule not initialized. Run:" && \
+         echo "  git submodule update --init --recursive" && \
          exit 1)
     docker run --rm -t \
         --platform linux/amd64 \
