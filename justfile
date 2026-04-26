@@ -54,12 +54,18 @@ patreon:
 menu-core-image:
     docker build --platform linux/amd64 -t one-fpga-quartus:17.0.2 docker/quartus
 
-# Build the menu-core .rbf via the Quartus Docker image
+# Build the menu-core .rbf via the Quartus Docker image.
+# Expects the private FPGA repo to be checked out at cores/menu-core-fpga/
+# (clone it: git clone git@github.com:one-retro/1fpga-menu-core.git cores/menu-core-fpga)
 build-menu-core:
+    @test -f cores/menu-core-fpga/menu_core.qpf || \
+        (echo "ERROR: cores/menu-core-fpga/ not found. Clone the FPGA repo first:" && \
+         echo "  git clone git@github.com:one-retro/1fpga-menu-core.git cores/menu-core-fpga" && \
+         exit 1)
     docker run --rm -t \
         --platform linux/amd64 \
         -u "$(id -u):$(id -g)" \
-        -v "{{justfile_directory()}}/cores/menu-core":/work \
+        -v "{{justfile_directory()}}/cores/menu-core-fpga":/work \
         one-fpga-quartus:17.0.2 \
         --flow compile menu_core.qpf
 
@@ -68,10 +74,10 @@ quartus-shell:
     docker run --rm -it \
         --platform linux/amd64 \
         -u "$(id -u):$(id -g)" \
-        -v "{{justfile_directory()}}/cores/menu-core":/work \
+        -v "{{justfile_directory()}}/cores/menu-core-fpga":/work \
         --entrypoint /bin/bash \
         one-fpga-quartus:17.0.2
 
 # Deploy the built menu-core .rbf to the device
 deploy-menu-core: build-menu-core
-    scp cores/menu-core/output_files/menu_core.rbf root@{{mister_ip}}:/media/fat/menu_core.rbf
+    scp cores/menu-core-fpga/output_files/menu_core.rbf root@{{mister_ip}}:/media/fat/menu_core.rbf
