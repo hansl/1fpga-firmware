@@ -17,8 +17,12 @@ build-frontend:
 docker-image:
     docker build -f ./docker/armv7/de10nano.Dockerfile . -t 1fpga:armv7
 
+# Build the cross-compile image only if it isn't already present.
+_ensure-docker-image:
+    @docker image inspect 1fpga:armv7 > /dev/null 2>&1 || just docker-image
+
 # Build the ARM binary via Docker
-build-1fpga mode="release-dev":
+build-1fpga mode="release-dev": _ensure-docker-image
     docker run -it -e "TERM=xterm-256color" -v "{{justfile_directory()}}":/app 1fpga:armv7 --bin one_fpga_bin --profile {{mode}}
     cp target/armv7-unknown-linux-gnueabihf/{{mode}}/one_fpga_bin target/armv7-unknown-linux-gnueabihf/{{mode}}/one_fpga
 
@@ -56,8 +60,12 @@ patreon:
 menu-core-image:
     docker build --platform linux/amd64 -t one-fpga-quartus:17.0.2 docker/quartus
 
+# Build the Quartus image only if it isn't already present.
+_ensure-menu-core-image:
+    @docker image inspect one-fpga-quartus:17.0.2 > /dev/null 2>&1 || just menu-core-image
+
 # Compile the menu-core FPGA bitstream (requires cores/menu-core-fpga submodule)
-build-menu-core:
+build-menu-core: _ensure-menu-core-image
     @test -f cores/menu-core-fpga/menu_core.qpf || \
         (echo "ERROR: cores/menu-core-fpga submodule not initialized. Run:" && \
          echo "  git submodule update --init --recursive" && \
@@ -83,7 +91,7 @@ deploy-menu-core: build-menu-core
     scp cores/menu-core-fpga/output_files/menu_core.rbf root@{{mister_ip}}:/media/fat/menu_core.rbf
 
 # Cross-compile the menu-core host probe binary for armv7
-build-menu-core-host mode="release-dev":
+build-menu-core-host mode="release-dev": _ensure-docker-image
     docker run -it -e "TERM=xterm-256color" -v "{{justfile_directory()}}":/app 1fpga:armv7 --bin one_fpga_menu_core --profile {{mode}}
 
 # Deploy the host probe binary to the device
