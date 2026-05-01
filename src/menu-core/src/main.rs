@@ -211,9 +211,24 @@ fn probe() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("CONTROL scratch round-trip: OK");
 
-    // Pattern-test the rest of the R/W slots. Slots that are read-only
-    // in M2a (ID, STATUS, ERROR_INFO at 0x00/0x04/0x0C) are skipped.
-    let read_only = [registers::ID, registers::STATUS, registers::ERROR_INFO];
+    // Pattern-test the rest of the R/W slots. Skip slots whose write
+    // semantics aren't full-word scratch:
+    //   - ID / STATUS / ERROR_INFO       — read-only constants/sideband
+    //   - CONTROL                         — only bit 0 latches; tested above
+    //   - VSYNC_COUNT / FRAME_COUNT       — read-only sideband counters
+    //   - RING_HEAD / FENCE_VALUE         — read-only sideband from fetcher
+    //   - RING_KICK                       — write-only pulse (read returns 0)
+    let read_only = [
+        registers::ID,
+        registers::STATUS,
+        registers::CONTROL,
+        registers::ERROR_INFO,
+        registers::VSYNC_COUNT,
+        registers::FRAME_COUNT,
+        registers::RING_HEAD,
+        registers::RING_KICK,
+        registers::FENCE_VALUE,
+    ];
     let mut tested = 0usize;
     let mut failed = 0usize;
     for off in (0..registers::REGISTER_WINDOW_SIZE).step_by(4) {
