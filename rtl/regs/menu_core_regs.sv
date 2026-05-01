@@ -1,24 +1,29 @@
 //============================================================================
 //
-//  menu-core control register file (M2a).
+//  menu-core control register file.
 //
 //  Decodes accesses on the LW_H2F window mapped to PROTOCOL.md §3.1.
 //  Register block base is 0xFF210000 from the host's perspective; this
 //  module sees offsets within the 2 MiB LW_H2F window — we react only to
 //  hits in the 0x10000..0x100FF range and otherwise return zero.
 //
-//  M2a behaviour:
+//  Behaviour by register (M2b):
 //    - ID            (0x00) read-only constant 32'h1FFA_0001
-//    - STATUS        (0x04) read-only constant 0
-//    - CONTROL       (0x08) R/W; CONTROL[0] is exposed as `enable_o`
-//                           for downstream modules (e.g. heartbeat)
-//    - ERROR_INFO    (0x0C) read-only 0
-//    - all other 4-byte slots in 0x00..0xFF: R/W scratch (default 0)
-//
-//  Real semantics for the remaining registers (RING_*, FB*_ADDR,
-//  FENCE_VALUE, perf counters, etc.) are added in M2b/M2c. Treating them
-//  as scratch in M2a lets the host probe drive a write/read pattern over
-//  the entire window to validate the LW_H2F path end-to-end.
+//    - STATUS        (0x04) read-only, bit 0 = ER, bit 1 = BZ; driven
+//                           by ring_fetcher sideband inputs
+//    - CONTROL       (0x08) R/W; CONTROL[0] is `enable_o`. CONTROL[2]
+//                           is a self-clearing pulse on `clear_error_o`
+//                           (host writes 1 to clear ER + reset fetcher).
+//    - ERROR_INFO    (0x0C) read-only, fed by `error_info_i`
+//    - VSYNC_COUNT   (0x10) read-only, M2b returns 0 (real in M2c)
+//    - FRAME_COUNT   (0x14) read-only, fed by `frame_count_i`
+//    - RING_BASE     (0x30) R/W; surfaced as `ring_base_o`
+//    - RING_SIZE     (0x34) R/W; surfaced as `ring_size_o`
+//    - RING_HEAD     (0x38) read-only, fed by `ring_head_i`
+//    - RING_TAIL     (0x3C) R/W; surfaced as `ring_tail_o`
+//    - RING_KICK     (0x40) write-only pulse → `ring_kick_o`
+//    - FENCE_VALUE   (0x48) read-only, fed by `fence_value_i`
+//    - all other slots in 0x00..0xFF: R/W scratch
 //
 //============================================================================
 
@@ -34,66 +39,127 @@ module menu_core_regs (
     input  logic [3:0]  req_byteenable,
     output logic [31:0] req_readdata,
 
-    // Sideband: software-controlled enable bit (CONTROL[0]).
-    output logic        enable_o
+    // Sideband out: software-controlled bits.
+    output logic        enable_o,         // CONTROL[0]
+    output logic        clear_error_o,    // 1-cycle pulse from CONTROL[2]
+    output logic [31:0] ring_base_o,
+    output logic [31:0] ring_size_o,
+    output logic [31:0] ring_tail_o,
+    output logic        ring_kick_o,      // 1-cycle pulse on RING_KICK write
+
+    // Sideband in: FPGA-driven views.
+    input  logic [31:0] ring_head_i,
+    input  logic [31:0] fence_value_i,
+    input  logic [31:0] frame_count_i,
+    input  logic [31:0] error_info_i,
+    input  logic        status_busy_i,
+    input  logic        status_error_i
 );
+
+    // Register-file index constants matching PROTOCOL.md §3.1 offsets.
+    localparam logic [5:0] IDX_ID          = 6'h00;
+    localparam logic [5:0] IDX_STATUS      = 6'h01;
+    localparam logic [5:0] IDX_CONTROL     = 6'h02;
+    localparam logic [5:0] IDX_ERROR_INFO  = 6'h03;
+    localparam logic [5:0] IDX_VSYNC_COUNT = 6'h04;
+    localparam logic [5:0] IDX_FRAME_COUNT = 6'h05;
+    localparam logic [5:0] IDX_RING_BASE   = 6'h0C;   // 0x30 / 4
+    localparam logic [5:0] IDX_RING_SIZE   = 6'h0D;   // 0x34 / 4
+    localparam logic [5:0] IDX_RING_HEAD   = 6'h0E;   // 0x38 / 4
+    localparam logic [5:0] IDX_RING_TAIL   = 6'h0F;   // 0x3C / 4
+    localparam logic [5:0] IDX_RING_KICK   = 6'h10;   // 0x40 / 4
+    localparam logic [5:0] IDX_FENCE_VALUE = 6'h12;   // 0x48 / 4
 
     // The LW_H2F window is 2 MiB (21-bit address). Our register block
     // sits at host physical 0xFF210000, which is offset 0x10000 within
     // the window.
     localparam logic [20:0] BLOCK_BASE = 21'h10000;
-    localparam logic [20:0] BLOCK_MASK = 21'hFFF00;     // top bits must match
+    localparam logic [20:0] BLOCK_MASK = 21'hFFF00;
 
     wire in_block = ((req_addr & BLOCK_MASK) == BLOCK_BASE);
-
-    // Lower 8 bits index into the 64-word register file.
     wire [5:0] reg_idx = req_addr[7:2];
 
-    // 64x32 scratch RAM holds R/W slots. Read-only or constant slots
-    // override readdata/writedata behaviour below.
+    // Backing scratch RAM for R/W-only slots. Read-only / sideband-fed
+    // slots override the read mux below.
     logic [31:0] scratch [0:63];
 
-    // ---- Decode read ---------------------------------------------------
-    // Combinational so `lwh2f_bridge` can latch readdata in the same
-    // cycle it asserts `req_read`.
+    // ---- Read mux ---------------------------------------------------
     always_comb begin
         if (!in_block) begin
             req_readdata = 32'h0000_0000;
         end else begin
             unique case (reg_idx)
-                6'h00:   req_readdata = 32'h1FFA_0001;          // ID
-                6'h01:   req_readdata = 32'h0000_0000;          // STATUS
-                6'h03:   req_readdata = 32'h0000_0000;          // ERROR_INFO
-                default: req_readdata = scratch[reg_idx];
+                IDX_ID:          req_readdata = 32'h1FFA_0001;
+                IDX_STATUS:      req_readdata = {28'd0, 2'b00, status_busy_i, status_error_i};
+                IDX_ERROR_INFO:  req_readdata = error_info_i;
+                IDX_VSYNC_COUNT: req_readdata = 32'h0000_0000;
+                IDX_FRAME_COUNT: req_readdata = frame_count_i;
+                IDX_RING_HEAD:   req_readdata = ring_head_i;
+                IDX_FENCE_VALUE: req_readdata = fence_value_i;
+                default:         req_readdata = scratch[reg_idx];
             endcase
         end
     end
 
-    // ---- Decode write --------------------------------------------------
-    // ID, STATUS, ERROR_INFO drop writes (read-only). All other slots
-    // honour byte-enables. CONTROL takes a side-exit to drive
-    // `enable_o`.
+    // ---- Write decode ----------------------------------------------
     integer i;
+    logic clear_error_q;
+    logic ring_kick_q;
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             for (i = 0; i < 64; i = i + 1) scratch[i] <= 32'b0;
-        end else if (req_write & in_block) begin
-            unique case (reg_idx)
-                6'h00, 6'h01, 6'h03: ;   // ID, STATUS, ERROR_INFO: read-only
-                default: begin
-                    if (req_byteenable[0]) scratch[reg_idx][7:0]   <= req_writedata[7:0];
-                    if (req_byteenable[1]) scratch[reg_idx][15:8]  <= req_writedata[15:8];
-                    if (req_byteenable[2]) scratch[reg_idx][23:16] <= req_writedata[23:16];
-                    if (req_byteenable[3]) scratch[reg_idx][31:24] <= req_writedata[31:24];
-                end
-            endcase
+            clear_error_q <= 1'b0;
+            ring_kick_q   <= 1'b0;
+        end else begin
+            // Pulses default to deasserted each cycle.
+            clear_error_q <= 1'b0;
+            ring_kick_q   <= 1'b0;
+
+            if (req_write & in_block) begin
+                unique case (reg_idx)
+                    // Read-only / sideband-fed slots: drop writes.
+                    IDX_ID, IDX_STATUS, IDX_ERROR_INFO,
+                    IDX_VSYNC_COUNT, IDX_FRAME_COUNT,
+                    IDX_RING_HEAD, IDX_FENCE_VALUE: ;
+
+                    IDX_CONTROL: begin
+                        if (req_byteenable[0]) begin
+                            // Bit 0 = EN: latched into scratch.
+                            scratch[IDX_CONTROL][0] <= req_writedata[0];
+                            // Bit 2 = CE: pulse, do not latch.
+                            if (req_writedata[2]) clear_error_q <= 1'b1;
+                            // Bit 1 = SE (soft reset) — M2c+; leave low.
+                        end
+                        if (req_byteenable[1]) scratch[IDX_CONTROL][15:8]  <= req_writedata[15:8];
+                        if (req_byteenable[2]) scratch[IDX_CONTROL][23:16] <= req_writedata[23:16];
+                        if (req_byteenable[3]) scratch[IDX_CONTROL][31:24] <= req_writedata[31:24];
+                    end
+
+                    IDX_RING_KICK: begin
+                        // Pulse only — value written is ignored per spec.
+                        ring_kick_q <= 1'b1;
+                    end
+
+                    default: begin
+                        if (req_byteenable[0]) scratch[reg_idx][7:0]   <= req_writedata[7:0];
+                        if (req_byteenable[1]) scratch[reg_idx][15:8]  <= req_writedata[15:8];
+                        if (req_byteenable[2]) scratch[reg_idx][23:16] <= req_writedata[23:16];
+                        if (req_byteenable[3]) scratch[reg_idx][31:24] <= req_writedata[31:24];
+                    end
+                endcase
+            end
         end
     end
 
-    // CONTROL register lives in scratch[6'h02]. Bit 0 is the enable.
-    assign enable_o = scratch[6'h02][0];
+    // ---- Sideband outs ---------------------------------------------
+    assign enable_o      = scratch[IDX_CONTROL][0];
+    assign clear_error_o = clear_error_q;
+    assign ring_base_o   = scratch[IDX_RING_BASE];
+    assign ring_size_o   = scratch[IDX_RING_SIZE];
+    assign ring_tail_o   = scratch[IDX_RING_TAIL];
+    assign ring_kick_o   = ring_kick_q;
 
-    // Suppress "unused" warnings on always-true / unused inputs.
+    // Suppress unused-input warnings.
     wire _unused = &{1'b0, req_read, 1'b0};
 
 endmodule

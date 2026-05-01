@@ -163,7 +163,8 @@ assign USER_OUT = '1;
 assign {UART_RTS, UART_TXD, UART_DTR} = 0;
 assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
 assign {SDRAM_DQ, SDRAM_A, SDRAM_BA, SDRAM_CLK, SDRAM_CKE, SDRAM_DQML, SDRAM_DQMH, SDRAM_nWE, SDRAM_nCAS, SDRAM_nRAS, SDRAM_nCS} = 'Z;
-assign {DDRAM_CLK, DDRAM_BURSTCNT, DDRAM_ADDR, DDRAM_DIN, DDRAM_BE, DDRAM_RD, DDRAM_WE} = '0;
+// DDRAM_* is driven by the M2b ring fetcher (see instantiation below).
+assign DDRAM_CLK = clk_sys;
 
 // Analog-side video: driven to zero because MISTER_FB supplies HDMI pixels.
 assign VGA_R        = '0;
@@ -254,19 +255,17 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 wire _unused_ok = &{1'b0, status, buttons_hps, forced_scandoubler,
                     HDMI_WIDTH, HDMI_HEIGHT, FB_VBL, FB_LL, OSD_STATUS,
                     UART_CTS, UART_RXD, UART_DSR, USER_IN, SD_MISO, SD_CD,
-                    DDRAM_BUSY, DDRAM_DOUT, DDRAM_DOUT_READY, RESET,
-                    pll_locked, 1'b0};
+                    RESET, pll_locked, 1'b0};
 
 ////////////////////////////////////////////////////////////////////////////
-// LW_H2F control register file (M2a).
+// LW_H2F control register file + ring fetcher (M2a + M2b).
 //
 // We instantiate the LW_H2F HPS hard-IP primitive ourselves — the MiSTer
 // `sys/` framework does not. The bridge module exposes a small single-
 // beat request interface to `menu_core_regs`, which decodes PROTOCOL.md
-// §3.1 register offsets in the 0xFF21_0000..0xFF21_00FF window. M2a
-// implements ID/STATUS as constants and CONTROL plus all other slots as
-// R/W scratch; later milestones replace the scratch slots with their
-// real semantics (ring head/tail, fence, etc.).
+// §3.1 register offsets. The fetcher reads the command ring via DDRAM_*
+// and updates RING_HEAD / FENCE_VALUE / FRAME_COUNT through the
+// register file's sideband ports.
 ////////////////////////////////////////////////////////////////////////////
 
 wire [20:0] reg_addr;
@@ -275,7 +274,23 @@ wire        reg_write;
 wire [31:0] reg_writedata;
 wire [3:0]  reg_byteenable;
 wire [31:0] reg_readdata;
+
 wire        reg_enable;
+wire        reg_clear_error;
+wire [31:0] reg_ring_base;
+wire [31:0] reg_ring_size;
+wire [31:0] reg_ring_tail;
+wire        reg_ring_kick;
+wire [31:0] fetcher_ring_head;
+wire [31:0] fetcher_fence_value;
+wire [31:0] fetcher_frame_count;
+wire [31:0] fetcher_error_info;
+wire        fetcher_status_busy;
+wire        fetcher_status_error;
+
+// CONTROL.CE (clear-error pulse) re-arms the fetcher: it leaves S_HALT
+// and clears the error bit. We OR this into the fetcher's reset.
+wire fetcher_rst_n = (~RESET) & ~reg_clear_error;
 
 lwh2f_bridge u_lwh2f_bridge (
     .clk            (clk_sys),
@@ -300,8 +315,51 @@ menu_core_regs u_menu_core_regs (
     .req_byteenable (reg_byteenable),
     .req_readdata   (reg_readdata),
 
-    .enable_o       (reg_enable)
+    .enable_o       (reg_enable),
+    .clear_error_o  (reg_clear_error),
+    .ring_base_o    (reg_ring_base),
+    .ring_size_o    (reg_ring_size),
+    .ring_tail_o    (reg_ring_tail),
+    .ring_kick_o    (reg_ring_kick),
+
+    .ring_head_i    (fetcher_ring_head),
+    .fence_value_i  (fetcher_fence_value),
+    .frame_count_i  (fetcher_frame_count),
+    .error_info_i   (fetcher_error_info),
+    .status_busy_i  (fetcher_status_busy),
+    .status_error_i (fetcher_status_error)
 );
+
+ring_fetcher u_ring_fetcher (
+    .clk             (clk_sys),
+    .rst_n           (fetcher_rst_n),
+
+    .enable_i        (reg_enable),
+    .ring_base_i     (reg_ring_base),
+    .ring_size_i     (reg_ring_size),
+    .ring_tail_i     (reg_ring_tail),
+    .ring_head_o     (fetcher_ring_head),
+    .fence_value_o   (fetcher_fence_value),
+    .frame_count_o   (fetcher_frame_count),
+    .error_info_o    (fetcher_error_info),
+    .status_busy_o   (fetcher_status_busy),
+    .status_error_o  (fetcher_status_error),
+
+    .ddram_addr_o       (DDRAM_ADDR),
+    .ddram_burstcnt_o   (DDRAM_BURSTCNT),
+    .ddram_be_o         (DDRAM_BE),
+    .ddram_rd_o         (DDRAM_RD),
+    .ddram_din_o        (DDRAM_DIN),
+    .ddram_we_o         (DDRAM_WE),
+    .ddram_busy_i       (DDRAM_BUSY),
+    .ddram_dout_i       (DDRAM_DOUT),
+    .ddram_dout_valid_i (DDRAM_DOUT_READY)
+);
+
+// reg_ring_kick is currently advisory — the fetcher polls RING_TAIL
+// every cycle anyway. Wire-suppress to avoid unused warnings until
+// M2c+ lets it gate a low-power idle.
+wire _unused_kick = reg_ring_kick;
 
 ////////////////////////////////////////////////////////////////////////////
 // MISTER_FB configuration — this is the whole of the menu core for M1.
