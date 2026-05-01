@@ -309,32 +309,35 @@ fn humanize(bytes: usize) -> String {
 }
 
 fn ring_test(base: u32) -> Result<(), Box<dyn std::error::Error>> {
+    eprintln!("[1] bridge::enable_lwh2f");
     bridge::enable_lwh2f()?;
 
-    // mmap the LW_H2F register window.
+    eprintln!("[2] mmap regs");
     let mut regs_mapper = DevMemMemoryMapper::create(REGS_PHYS_ADDR, 0x1000)
         .map_err(|d| format!("mmap regs at {REGS_PHYS_ADDR:#X}: {d}"))?;
     let regs = unsafe { registers::RegisterBlock::new(regs_mapper.as_mut_ptr::<u8>()) };
 
-    // Sanity-check the ID before going any further.
+    eprintln!("[3] read ID");
     let id = regs.read32(registers::ID);
     if id != protocol::ID_VALUE {
         return Err(format!("bad ID {id:#010X}, expected {:#010X}", protocol::ID_VALUE).into());
     }
 
-    // mmap the ring page within the DDR3 carve-out.
     let ring_phys = base + mem::RING_OFFSET as u32;
+    eprintln!("[4] mmap ring at {ring_phys:#X}, size {}", mem::RING_SIZE);
     let mut ring_mapper = DevMemMemoryMapper::create(ring_phys as usize, mem::RING_SIZE)
         .map_err(|d| format!("mmap ring at {ring_phys:#X}: {d}"))?;
+    eprintln!("[5] make slice");
     let ring_slice: &mut [u8] = unsafe {
         core::slice::from_raw_parts_mut(ring_mapper.as_mut_ptr::<u8>(), mem::RING_SIZE)
     };
 
-    // Zero the first cacheline of the ring so stale contents don't
-    // look like a valid command if we read before writing.
+    eprintln!("[6] zero first cacheline");
     for byte in ring_slice.iter_mut().take(64) {
         *byte = 0;
     }
+
+    eprintln!("[7] zeroing done");
 
     println!(
         "Ring init: RING_BASE={ring_phys:#010X} RING_SIZE={size}",
