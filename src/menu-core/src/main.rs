@@ -20,7 +20,8 @@ use tracing_subscriber::fmt::Subscriber;
 
 use menu_core::bridge;
 use menu_core::mem;
-use menu_core::protocol::{self, registers};
+use menu_core::protocol::{self, Command as ProtoCommand, registers};
+use menu_core::ring::RingWriter;
 
 /// Physical address of the menu-core control register block, per
 /// PROTOCOL.md §3.
@@ -69,6 +70,11 @@ pub enum Command {
     /// and pattern-test the entire register window. Requires root and
     /// a flashed menu-core RBF on the FPGA.
     Probe,
+
+    /// Push NOP/FENCE/PRESENT commands through the DDR3 ring and
+    /// verify FENCE_VALUE / FRAME_COUNT update as the FPGA retires them.
+    /// Requires the M2b ring fetcher to be live on the FPGA side.
+    RingTest,
 }
 
 fn parse_u32_hex_or_dec(s: &str) -> Result<u32, std::num::ParseIntError> {
@@ -135,8 +141,15 @@ fn main() {
                 std::process::exit(1);
             }
         },
+        Some(Command::RingTest) => match ring_test(base) {
+            Ok(()) => {}
+            Err(e) => {
+                tracing::error!("ring-test failed: {e}");
+                std::process::exit(1);
+            }
+        },
         None => {
-            info!("no subcommand given — re-run with `probe` or `--print-layout`");
+            info!("no subcommand given — re-run with `probe`, `ring-test`, or `--print-layout`");
         }
     }
 }
@@ -278,4 +291,135 @@ fn humanize(bytes: usize) -> String {
     } else {
         format!("{bytes} B")
     }
+}
+
+fn ring_test(base: u32) -> Result<(), Box<dyn std::error::Error>> {
+    bridge::enable_lwh2f()?;
+
+    // mmap the LW_H2F register window.
+    let mut regs_mapper = DevMemMemoryMapper::create(REGS_PHYS_ADDR, 0x1000)
+        .map_err(|d| format!("mmap regs at {REGS_PHYS_ADDR:#X}: {d}"))?;
+    let regs = unsafe { registers::RegisterBlock::new(regs_mapper.as_mut_ptr::<u8>()) };
+
+    // Sanity-check the ID before going any further.
+    let id = regs.read32(registers::ID);
+    if id != protocol::ID_VALUE {
+        return Err(format!("bad ID {id:#010X}, expected {:#010X}", protocol::ID_VALUE).into());
+    }
+
+    // mmap the ring page within the DDR3 carve-out.
+    let ring_phys = base + mem::RING_OFFSET as u32;
+    let mut ring_mapper = DevMemMemoryMapper::create(ring_phys as usize, mem::RING_SIZE)
+        .map_err(|d| format!("mmap ring at {ring_phys:#X}: {d}"))?;
+    let ring_slice: &mut [u8] = unsafe {
+        core::slice::from_raw_parts_mut(ring_mapper.as_mut_ptr::<u8>(), mem::RING_SIZE)
+    };
+
+    // Zero the first cacheline of the ring so stale contents don't
+    // look like a valid command if we read before writing.
+    for byte in ring_slice.iter_mut().take(64) {
+        *byte = 0;
+    }
+
+    println!(
+        "Ring init: RING_BASE={ring_phys:#010X} RING_SIZE={size}",
+        size = mem::RING_SIZE
+    );
+
+    // Reset the fetcher first via CONTROL.CE so any previous error
+    // state is cleared and HEAD is back at 0.
+    regs.write32(registers::CONTROL, registers::CONTROL_CLEAR_ERROR);
+    // Disable then re-enable to ensure a clean run.
+    regs.write32(registers::CONTROL, 0);
+
+    // Program the ring base + size and zero the tail.
+    regs.write32(registers::RING_BASE, ring_phys);
+    regs.write32(registers::RING_SIZE, mem::RING_SIZE as u32);
+    regs.write32(registers::RING_TAIL, 0);
+
+    // Confirm RING_HEAD started at 0.
+    let head_initial = regs.read32(registers::RING_HEAD);
+    if head_initial != 0 {
+        return Err(format!("RING_HEAD started at {head_initial:#010X}, expected 0").into());
+    }
+
+    // Build a writer over the mmap'd ring slice.
+    let mut writer = RingWriter::new(ring_slice)?;
+    writer.observe_head(0);
+
+    // Push NOP / FENCE / NOP-with-padding / PRESENT / FENCE.
+    let commands = [
+        ProtoCommand::Nop { padding_words: 0 },
+        ProtoCommand::Fence { value: 0xDEAD_BEEF },
+        ProtoCommand::Nop { padding_words: 7 },
+        ProtoCommand::Present,
+        ProtoCommand::Fence { value: 0xCAFE_BABE },
+    ];
+
+    for cmd in &commands {
+        writer.push(cmd)?;
+    }
+    let final_tail = writer.tail();
+    println!("Pushed {} commands; final RING_TAIL={final_tail:#X}", commands.len());
+
+    // Memory barrier: ensure all ring writes are visible to DDR3
+    // before we update RING_TAIL. On ARMv7-A `dsb st` flushes the
+    // write-combining buffers; the C atomic fence approximates it.
+    core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+
+    // Hand the work to the FPGA: enable the engine, write RING_TAIL,
+    // poke RING_KICK.
+    regs.write32(registers::CONTROL, registers::CONTROL_ENABLE);
+    regs.write32(registers::RING_TAIL, final_tail);
+    regs.write32(registers::RING_KICK, 1);
+
+    // Poll FENCE_VALUE for the second fence (last command).
+    let target_fence = 0xCAFE_BABE_u32;
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_millis(500);
+    loop {
+        let fence = regs.read32(registers::FENCE_VALUE);
+        if fence == target_fence {
+            let elapsed = start.elapsed();
+            println!("FENCE_VALUE reached {fence:#010X} in {} µs", elapsed.as_micros());
+            break;
+        }
+        let status = regs.read32(registers::STATUS);
+        if status & registers::STATUS_ERROR != 0 {
+            let err = regs.read32(registers::ERROR_INFO);
+            return Err(format!(
+                "fetcher reported error: STATUS={status:#010X} ERROR_INFO={err:#010X}"
+            )
+            .into());
+        }
+        if start.elapsed() > timeout {
+            let head = regs.read32(registers::RING_HEAD);
+            return Err(format!(
+                "timeout waiting for FENCE_VALUE={target_fence:#010X} \
+                 (got {fence:#010X}, RING_HEAD={head:#X}, RING_TAIL={final_tail:#X}, \
+                 STATUS={status:#010X})"
+            )
+            .into());
+        }
+    }
+
+    // Verify FRAME_COUNT bumped to 1 (the single PRESENT).
+    let frames = regs.read32(registers::FRAME_COUNT);
+    if frames != 1 {
+        return Err(format!("FRAME_COUNT expected 1, got {frames}").into());
+    }
+    println!("FRAME_COUNT: {frames} (expected 1)");
+
+    // Verify the consumer caught up.
+    let head_final = regs.read32(registers::RING_HEAD);
+    if head_final != final_tail {
+        return Err(format!(
+            "RING_HEAD ({head_final:#X}) did not catch up with RING_TAIL ({final_tail:#X})"
+        )
+        .into());
+    }
+    println!("RING_HEAD: {head_final:#X} (caught up)");
+
+    println!("M2b: OK");
+    Ok(())
 }

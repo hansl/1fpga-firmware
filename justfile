@@ -106,3 +106,7 @@ deploy-menu-core-host mode="release-dev": (build-menu-core-host mode)
 # Run the probe on the device (assumes the menu-core .rbf is loaded and the binary is deployed)
 probe-menu-core:
     ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core probe'
+
+# Run the M2b ring round-trip test on the device
+ring-test-menu-core:
+    ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core ring-test'
