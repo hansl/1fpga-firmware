@@ -3333,6 +3333,7 @@ dependencies = [
  "clap",
  "clap-verbosity-flag",
  "core_affinity",
+ "cyclone-v",
  "pretty_assertions",
  "thiserror 2.0.18",
  "tracing",

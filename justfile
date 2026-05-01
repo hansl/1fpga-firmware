@@ -1,3 +1,5 @@
+set dotenv-load := true
+
 mister_ip := env_var_or_default("MISTER_IP", "192.168.1.79")
 
 # List available recipes
@@ -79,3 +81,15 @@ quartus-shell:
 # Deploy the built menu-core .rbf to the device
 deploy-menu-core: build-menu-core
     scp cores/menu-core-fpga/output_files/menu_core.rbf root@{{mister_ip}}:/media/fat/menu_core.rbf
+
+# Cross-compile the menu-core host probe binary for armv7
+build-menu-core-host mode="release-dev":
+    docker run -it -e "TERM=xterm-256color" -v "{{justfile_directory()}}":/app 1fpga:armv7 --bin one_fpga_menu_core --profile {{mode}}
+
+# Deploy the host probe binary to the device
+deploy-menu-core-host mode="release-dev": (build-menu-core-host mode)
+    scp target/armv7-unknown-linux-gnueabihf/{{mode}}/one_fpga_menu_core root@{{mister_ip}}:/media/fat/one_fpga_menu_core
+
+# Run the probe on the device (assumes the menu-core .rbf is loaded and the binary is deployed)
+probe-menu-core:
+    ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core probe'

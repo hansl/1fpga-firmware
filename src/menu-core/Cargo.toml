@@ -18,9 +18,18 @@ workspace = true
 clap = { version = "4.3.5", features = ["derive"] }
 clap-verbosity-flag = "2.0.1"
 core_affinity = "0.8.1"
+cyclone-v = { path = "../cyclone-v" }
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
 pretty_assertions = "1.4"
+
+# These features are no-ops for the menu-core crate but accepted to
+# satisfy the workspace Docker entrypoint, which always passes
+# `--no-default-features --features=platform_de10`.
+[features]
+default = []
+platform_de10 = []
+platform_desktop = []

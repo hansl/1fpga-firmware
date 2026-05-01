@@ -16,6 +16,7 @@
 //! FPGA bitstream loading) lives in the binary entry point.
 
 pub mod allocator;
+pub mod bridge;
 pub mod mem;
 pub mod protocol;
 pub mod ring;
