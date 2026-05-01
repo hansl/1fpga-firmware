@@ -20,7 +20,7 @@ use tracing_subscriber::fmt::Subscriber;
 
 use menu_core::bridge;
 use menu_core::mem;
-use menu_core::protocol::{self, Command as ProtoCommand, registers};
+use menu_core::protocol::{self, BlendMode, Command as ProtoCommand, Rect, Rgba, registers};
 use menu_core::ring::RingWriter;
 
 /// Physical address of the menu-core control register block, per
@@ -75,6 +75,11 @@ pub enum Command {
     /// verify FENCE_VALUE / FRAME_COUNT update as the FPGA retires them.
     /// Requires the M2b ring fetcher to be live on the FPGA side.
     RingTest,
+
+    /// Push a FILL_RECT(red, 100,100, 200×200) plus PRESENT + FENCE.
+    /// Visual verification: a red rectangle should appear on HDMI.
+    /// Requires the M2c1 blit engine on the FPGA side.
+    DrawTest,
 }
 
 fn parse_u32_hex_or_dec(s: &str) -> Result<u32, std::num::ParseIntError> {
@@ -148,8 +153,17 @@ fn main() {
                 std::process::exit(1);
             }
         },
+        Some(Command::DrawTest) => match draw_test(base) {
+            Ok(()) => {}
+            Err(e) => {
+                tracing::error!("draw-test failed: {e}");
+                std::process::exit(1);
+            }
+        },
         None => {
-            info!("no subcommand given — re-run with `probe`, `ring-test`, or `--print-layout`");
+            info!(
+                "no subcommand given — re-run with `probe`, `ring-test`, `draw-test`, or `--print-layout`"
+            );
         }
     }
 }
@@ -440,5 +454,104 @@ fn ring_test(base: u32) -> Result<(), Box<dyn std::error::Error>> {
     println!("RING_HEAD: {head_final:#X} (caught up)");
 
     println!("M2b: OK");
+    Ok(())
+}
+
+fn draw_test(base: u32) -> Result<(), Box<dyn std::error::Error>> {
+    bridge::enable_lwh2f()?;
+
+    let mut regs_mapper = DevMemMemoryMapper::create(REGS_PHYS_ADDR, 0x1000)
+        .map_err(|d| format!("mmap regs at {REGS_PHYS_ADDR:#X}: {d}"))?;
+    let regs = unsafe { registers::RegisterBlock::new(regs_mapper.as_mut_ptr::<u8>()) };
+
+    let id = regs.read32(registers::ID);
+    if id != protocol::ID_VALUE {
+        return Err(format!("bad ID {id:#010X}, expected {:#010X}", protocol::ID_VALUE).into());
+    }
+
+    let ring_phys = base + mem::RING_OFFSET as u32;
+    let mut ring_mapper = DevMemMemoryMapper::create(ring_phys as usize, mem::RING_SIZE)
+        .map_err(|d| format!("mmap ring at {ring_phys:#X}: {d}"))?;
+    let ring_devmem_ptr = ring_mapper.as_mut_ptr::<u8>();
+
+    // Reset fetcher and program ring registers.
+    regs.write32(registers::CONTROL, registers::CONTROL_CLEAR_ERROR);
+    regs.write32(registers::CONTROL, 0);
+    regs.write32(registers::RING_BASE, ring_phys);
+    regs.write32(registers::RING_SIZE, mem::RING_SIZE as u32);
+    regs.write32(registers::RING_TAIL, 0);
+
+    // Stage commands. M2c1 doesn't yet do triple-buffer swap, so the
+    // PRESENT here is a no-op (just bumps FRAME_COUNT) — the FILL_RECT
+    // writes directly to the framebuffer that scanout is already
+    // reading at 0x3000_0000.
+    let mut staging = vec![0u8; mem::RING_SIZE];
+    let mut writer = menu_core::ring::RingWriter::new(&mut staging)?;
+    writer.observe_head(0);
+
+    let red = Rgba::new(0xFF, 0x00, 0x00, 0xFF);
+    let commands = [
+        ProtoCommand::FillRect {
+            dst: Rect::new(100, 100, 200, 200),
+            color: red,
+            blend: BlendMode::Opaque,
+            ignore_clip: true,
+        },
+        ProtoCommand::Present,
+        ProtoCommand::Fence { value: 0x00C0_FFEE },
+    ];
+
+    for cmd in &commands {
+        writer.push(cmd)?;
+    }
+    let final_tail = writer.tail();
+    volatile_copy_to_devmem(ring_devmem_ptr, &staging[..final_tail as usize]);
+
+    println!(
+        "Pushed FILL_RECT(red, 100, 100, 200×200) + PRESENT + FENCE; \
+         RING_TAIL={final_tail:#X}"
+    );
+
+    core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+
+    regs.write32(registers::CONTROL, registers::CONTROL_ENABLE);
+    regs.write32(registers::RING_TAIL, final_tail);
+    regs.write32(registers::RING_KICK, 1);
+
+    // Wait for the fence; the blit alone takes ~200×200 × few cycles
+    // at 50 MHz ≈ 1 ms but allow generously for slow DDR3 paths.
+    let target_fence = 0x00C0_FFEEu32;
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_millis(2000);
+    loop {
+        let fence = regs.read32(registers::FENCE_VALUE);
+        if fence == target_fence {
+            println!(
+                "FENCE_VALUE reached {fence:#010X} in {} ms",
+                start.elapsed().as_millis()
+            );
+            break;
+        }
+        let status = regs.read32(registers::STATUS);
+        if status & registers::STATUS_ERROR != 0 {
+            let err = regs.read32(registers::ERROR_INFO);
+            return Err(format!(
+                "fetcher error: STATUS={status:#010X} ERROR_INFO={err:#010X}"
+            )
+            .into());
+        }
+        if start.elapsed() > timeout {
+            let head = regs.read32(registers::RING_HEAD);
+            return Err(format!(
+                "timeout waiting for FENCE: got {fence:#010X}, RING_HEAD={head:#X}, \
+                 RING_TAIL={final_tail:#X}, STATUS={status:#010X}"
+            )
+            .into());
+        }
+    }
+
+    let frames = regs.read32(registers::FRAME_COUNT);
+    println!("FRAME_COUNT: {frames}");
+    println!("M2c1: check HDMI — should see a 200×200 red square at (100, 100)");
     Ok(())
 }

@@ -110,3 +110,7 @@ probe-menu-core:
 # Run the M2b ring round-trip test on the device
 ring-test-menu-core:
     ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core ring-test'
+
+# Run the M2c1 FILL_RECT visual test on the device (look at HDMI)
+draw-test-menu-core:
+    ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core draw-test'
