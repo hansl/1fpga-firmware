@@ -90,13 +90,18 @@ quartus-shell:
 deploy-menu-core: build-menu-core
     scp cores/menu-core-fpga/output_files/menu_core.rbf root@{{mister_ip}}:/media/fat/menu_core.rbf
 
-# Cross-compile the menu-core host probe binary for armv7
-build-menu-core-host mode="release-dev": _ensure-docker-image
-    docker run -it -e "TERM=xterm-256color" -v "{{justfile_directory()}}":/app 1fpga:armv7 --bin one_fpga_menu_core --profile {{mode}}
+# Cross-compile the menu-core host probe binary for armv7 (musl, static)
+# Uses a separate community image because the device's glibc is older
+# than what the main firmware's bookworm-based image links against.
+build-menu-core-host mode="release-dev":
+    docker run --rm -t \
+        -v "{{justfile_directory()}}":/home/rust/src \
+        messense/rust-musl-cross:armv7-musleabihf \
+        cargo build --target armv7-unknown-linux-musleabihf --bin one_fpga_menu_core --profile {{mode}} --no-default-features --features=platform_de10
 
 # Deploy the host probe binary to the device
 deploy-menu-core-host mode="release-dev": (build-menu-core-host mode)
-    scp target/armv7-unknown-linux-gnueabihf/{{mode}}/one_fpga_menu_core root@{{mister_ip}}:/media/fat/one_fpga_menu_core
+    scp target/armv7-unknown-linux-musleabihf/{{mode}}/one_fpga_menu_core root@{{mister_ip}}:/media/fat/one_fpga_menu_core
 
 # Run the probe on the device (assumes the menu-core .rbf is loaded and the binary is deployed)
 probe-menu-core:
