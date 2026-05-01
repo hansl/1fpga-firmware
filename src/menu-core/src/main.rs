@@ -489,8 +489,17 @@ fn draw_test(base: u32) -> Result<(), Box<dyn std::error::Error>> {
     let mut writer = menu_core::ring::RingWriter::new(&mut staging)?;
     writer.observe_head(0);
 
+    let black = Rgba::BLACK;
     let red = Rgba::new(0xFF, 0x00, 0x00, 0xFF);
     let commands = [
+        // Clear the full framebuffer first so uninitialised DDR3
+        // contents don't show as garbage outside the test rect.
+        ProtoCommand::FillRect {
+            dst: Rect::new(0, 0, 1920, 1080),
+            color: black,
+            blend: BlendMode::Opaque,
+            ignore_clip: true,
+        },
         ProtoCommand::FillRect {
             dst: Rect::new(100, 100, 200, 200),
             color: red,
@@ -518,11 +527,11 @@ fn draw_test(base: u32) -> Result<(), Box<dyn std::error::Error>> {
     regs.write32(registers::RING_TAIL, final_tail);
     regs.write32(registers::RING_KICK, 1);
 
-    // Wait for the fence; the blit alone takes ~200×200 × few cycles
-    // at 50 MHz ≈ 1 ms but allow generously for slow DDR3 paths.
+    // Wait for the fence. The 1920×1080 clear is ~2M pixels at one
+    // pixel per DDR3 round-trip (M2c1 doesn't burst), so allow ~10 s.
     let target_fence = 0x00C0_FFEEu32;
     let start = std::time::Instant::now();
-    let timeout = std::time::Duration::from_millis(2000);
+    let timeout = std::time::Duration::from_millis(10000);
     loop {
         let fence = regs.read32(registers::FENCE_VALUE);
         if fence == target_fence {
