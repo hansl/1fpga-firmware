@@ -180,11 +180,6 @@ assign VGA_DISABLE  = 1'b1;  // disable analog output entirely
 assign VIDEO_ARX    = 13'd0;
 assign VIDEO_ARY    = 13'd0;
 assign CE_PIXEL     = 1'b0;
-// HDMI_FREEZE pulsing at frame rate seems to alias against ASCAL's
-// scaler phase, producing a per-frame sub-pixel shift of the
-// just-blitted region. Leave it tied off while we investigate; M2c4
-// (triple-buffer swap) avoids the underlying issue by writing to a
-// non-displayed FB.
 assign HDMI_FREEZE    = 1'b0;
 assign HDMI_BLACKOUT  = 1'b0;
 assign HDMI_BOB_DEINT = 1'b0;
