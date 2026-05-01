@@ -2,3 +2,4 @@ set_global_assignment -name SYSTEMVERILOG_FILE menu_core.sv
 set_global_assignment -name SDC_FILE menu_core.sdc
 set_global_assignment -name QIP_FILE rtl/regs.qip
 set_global_assignment -name QIP_FILE rtl/ring/ring.qip
+set_global_assignment -name QIP_FILE rtl/blit/blit.qip
