@@ -258,6 +258,52 @@ wire _unused_ok = &{1'b0, status, buttons_hps, forced_scandoubler,
                     pll_locked, 1'b0};
 
 ////////////////////////////////////////////////////////////////////////////
+// LW_H2F control register file (M2a).
+//
+// We instantiate the LW_H2F HPS hard-IP primitive ourselves — the MiSTer
+// `sys/` framework does not. The bridge module exposes a small single-
+// beat request interface to `menu_core_regs`, which decodes PROTOCOL.md
+// §3.1 register offsets in the 0xFF21_0000..0xFF21_00FF window. M2a
+// implements ID/STATUS as constants and CONTROL plus all other slots as
+// R/W scratch; later milestones replace the scratch slots with their
+// real semantics (ring head/tail, fence, etc.).
+////////////////////////////////////////////////////////////////////////////
+
+wire [20:0] reg_addr;
+wire        reg_read;
+wire        reg_write;
+wire [31:0] reg_writedata;
+wire [3:0]  reg_byteenable;
+wire [31:0] reg_readdata;
+wire        reg_enable;
+
+lwh2f_bridge u_lwh2f_bridge (
+    .clk            (clk_sys),
+    .rst_n          (~RESET),
+
+    .req_addr       (reg_addr),
+    .req_read       (reg_read),
+    .req_write      (reg_write),
+    .req_writedata  (reg_writedata),
+    .req_byteenable (reg_byteenable),
+    .req_readdata   (reg_readdata)
+);
+
+menu_core_regs u_menu_core_regs (
+    .clk            (clk_sys),
+    .rst_n          (~RESET),
+
+    .req_addr       (reg_addr),
+    .req_read       (reg_read),
+    .req_write      (reg_write),
+    .req_writedata  (reg_writedata),
+    .req_byteenable (reg_byteenable),
+    .req_readdata   (reg_readdata),
+
+    .enable_o       (reg_enable)
+);
+
+////////////////////////////////////////////////////////////////////////////
 // MISTER_FB configuration — this is the whole of the menu core for M1.
 //
 // FB_FORMAT:
@@ -285,13 +331,18 @@ assign FB_FORCE_BLANK = 1'b0;
 `endif
 
 ////////////////////////////////////////////////////////////////////////////
-// Activity LED — a simple heartbeat so we can tell the core is alive on
-// the board without probing.
+// Activity LED — heartbeat that doubles as visual confirmation that the
+// host has written CONTROL[0]. When `reg_enable` is low we use the slow
+// breathing pattern; when high we switch to a faster fixed-rate blink.
 ////////////////////////////////////////////////////////////////////////////
 
 reg [26:0] act_cnt;
 always @(posedge clk_sys) act_cnt <= act_cnt + 27'd1;
-assign LED_USER = act_cnt[26] ? (act_cnt[25:18] > act_cnt[7:0])
-                              : (act_cnt[25:18] <= act_cnt[7:0]);
+
+wire breathe = act_cnt[26] ? (act_cnt[25:18] > act_cnt[7:0])
+                           : (act_cnt[25:18] <= act_cnt[7:0]);
+wire fast_blink = act_cnt[22];
+
+assign LED_USER = reg_enable ? fast_blink : breathe;
 
 endmodule
