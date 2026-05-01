@@ -489,13 +489,17 @@ fn draw_test(base: u32) -> Result<(), Box<dyn std::error::Error>> {
     let mut writer = menu_core::ring::RingWriter::new(&mut staging)?;
     writer.observe_head(0);
 
+    let black = Rgba::BLACK;
     let red = Rgba::new(0xFF, 0x00, 0x00, 0xFF);
     let commands = [
-        // No full-screen clear — that's ~2 M DDR3 writes which seems
-        // to saturate F2H_SDRAM and break the framework's scanout
-        // FIFO (visual flickering persists past test exit). Caller
-        // must clear the framebuffer some other way before running
-        // (e.g. one-off Python /dev/mem zero of the FB region).
+        // Full-screen clear so the test is self-contained — no need
+        // for the caller to pre-zero DDR3 with /dev/mem.
+        ProtoCommand::FillRect {
+            dst: Rect::new(0, 0, 1920, 1080),
+            color: black,
+            blend: BlendMode::Opaque,
+            ignore_clip: true,
+        },
         ProtoCommand::FillRect {
             dst: Rect::new(100, 100, 200, 200),
             color: red,
@@ -523,10 +527,11 @@ fn draw_test(base: u32) -> Result<(), Box<dyn std::error::Error>> {
     regs.write32(registers::RING_TAIL, final_tail);
     regs.write32(registers::RING_KICK, 1);
 
-    // 200×200 = 40 K DDR3 round-trips ≈ tens of ms; 1 s is plenty.
+    // 1920×1080 clear + 200×200 rect ≈ 2 M DDR3 round-trips at one
+    // pixel per beat (no bursting yet); allow up to 10 s.
     let target_fence = 0x00C0_FFEEu32;
     let start = std::time::Instant::now();
-    let timeout = std::time::Duration::from_millis(1000);
+    let timeout = std::time::Duration::from_millis(10000);
     loop {
         let fence = regs.read32(registers::FENCE_VALUE);
         if fence == target_fence {
