@@ -73,11 +73,24 @@ pub fn enable_lwh2f() -> Result<(), BridgeError> {
         }
 
         let enable_path = entry.path().join("enable");
-        fs::write(&enable_path, "1").map_err(|e| BridgeError::Io {
-            path: enable_path.display().to_string(),
-            source: e,
-        })?;
-        tracing::debug!(bridge = %bridge_name, "enabled via sysfs");
+        match fs::write(&enable_path, "1") {
+            Ok(()) => {
+                tracing::debug!(bridge = %bridge_name, "enabled via sysfs");
+            }
+            Err(e) => {
+                // The kernel may register the bridge as read-only when
+                // it's lifecycle-managed by an fpga-region driver or
+                // pre-enabled by U-Boot. We don't fail the probe over
+                // it — if the bridge isn't actually up, the subsequent
+                // mmap/read of 0xFF21_0000 will SIGBUS and surface a
+                // clearer error than this one.
+                tracing::debug!(
+                    bridge = %bridge_name,
+                    error = %e,
+                    "sysfs enable write failed (treating as already-enabled)"
+                );
+            }
+        }
         found_lwh2f = true;
     }
 
