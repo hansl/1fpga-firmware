@@ -27,6 +27,7 @@ pub mod ring;
 use clap as _;
 use clap_verbosity_flag as _;
 use core_affinity as _;
+use cyclone_v as _;
 #[cfg(test)]
 use pretty_assertions as _;
 use tracing as _;

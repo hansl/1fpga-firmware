@@ -1,114 +1,90 @@
 //! HPS-to-FPGA bridge enablement.
 //!
-//! The MiSTer framework does not initialise the LW_H2F bridge — none of
-//! its cores need it. To talk to the menu-core control register file at
-//! `0xFF21_0000` we therefore have to:
+//! On the DE10-Nano under MiSTer's kernel the LW_H2F bridge is brought
+//! up at boot — userland just mmaps `0xFF21_0000` and reads. This module
+//! is a best-effort safety net that touches the kernel's
+//! `/sys/class/fpga_bridge/<name>/enable` interface in case the bridge
+//! is in a freshly-loaded state where it hasn't been re-enabled.
 //!
-//! 1. Release the LW_H2F bridge from reset
-//!    (`RSTMGR.BRGMODRST[1] = 0`).
-//! 2. Make the LW_H2F slave visible on the L3 interconnect
-//!    (`L3REGS.REMAP[4] = 1`).
+//! We do NOT poke `RSTMGR.BRGMODRST` or `L3REGS.REMAP` directly: modern
+//! Linux kernels with `CONFIG_STRICT_DEVMEM` deny `/dev/mem` access to
+//! kernel-claimed regions like the Reset Manager, which causes a SIGBUS
+//! the moment we try. The sysfs interface is the kernel-blessed path
+//! and works under the same access controls as any other root-owned
+//! sysfs file.
 //!
-//! Both registers are mmap'd via `/dev/mem` rather than going through the
-//! kernel's `/sys/class/fpga_bridge` interface, which is sometimes
-//! disabled in MiSTer kernel builds.
-//!
-//! Reference: Cyclone V Hard Processor System Technical Reference Manual,
-//! §3 (HPS-FPGA bridges) and §6 (Reset Manager).
-//!
-//! These pokes are idempotent — calling them when the bridge is already
-//! enabled is a no-op.
-//!
-//! # Safety
-//!
-//! Direct manipulation of HPS configuration registers requires root.
-//! Mis-poking these registers cannot brick the device (a power cycle
-//! resets the HPS) but can wedge the running Linux kernel if you change
-//! bits unrelated to the bridges. We touch only the documented bridge
-//! bits and leave the rest untouched via read-modify-write.
+//! Reference: Linux kernel drivers/fpga/altera-hps2fpga.c.
 
-use cyclone_v::memory::{DevMemMemoryMapper, MemoryMapper};
+use std::fs;
+use std::io;
+use std::path::Path;
+
 use thiserror::Error;
 
-// --- Cyclone V Reset Manager --------------------------------------------
+const FPGA_BRIDGE_DIR: &str = "/sys/class/fpga_bridge";
 
-const RSTMGR_BASE: usize = 0xFFD0_5000;
-
-/// Offset of the `BRGMODRST` register within the Reset Manager.
-const BRGMODRST_OFFSET: usize = 0x28;
-
-/// Bit 1 of `BRGMODRST` controls the LW_H2F bridge reset
-/// (`1` = held in reset, `0` = released).
-const BRGMODRST_LWHPS2FPGA: u32 = 1 << 1;
-
-// --- Cyclone V L3 Master Remap ------------------------------------------
-
-const L3REGS_BASE: usize = 0xFF80_0000;
-
-/// Offset of the `REMAP` register at the start of the L3 master block.
-const L3REGS_REMAP_OFFSET: usize = 0x00;
-
-/// Bit 4 of `REMAP` exposes the LW_H2F slave on the L3 interconnect.
-const L3REGS_REMAP_LWHPS2FPGA: u32 = 1 << 4;
+/// Name fragments the kernel uses for the lightweight HPS-to-FPGA
+/// bridge across kernel versions.
+const LWH2F_NAME_FRAGMENTS: &[&str] = &["lwhps2fpga", "lw_hps2fpga", "h2f_lw", "lwh2f"];
 
 #[derive(Debug, Error)]
 pub enum BridgeError {
-    #[error("failed to mmap {what} at {addr:#X}: {detail}")]
-    Mmap {
-        what: &'static str,
-        addr: usize,
-        detail: &'static str,
+    #[error("io error on {path}: {source}")]
+    Io {
+        path: String,
+        #[source]
+        source: io::Error,
     },
 }
 
-/// Bring up the LW_H2F bridge. Idempotent. Safe to call multiple times.
+/// Best-effort: enable the LW_H2F bridge via the kernel's fpga_bridge
+/// sysfs interface. Idempotent. If the sysfs interface is not present
+/// (older kernel without the SoCFPGA bridge driver) we log a warning
+/// and return Ok(()), trusting that the bridge was either already up
+/// or will be configured another way (e.g. U-Boot).
 pub fn enable_lwh2f() -> Result<(), BridgeError> {
-    let mut rstmgr = DevMemMemoryMapper::create(RSTMGR_BASE, 0x1000).map_err(|d| {
-        BridgeError::Mmap {
-            what: "RSTMGR",
-            addr: RSTMGR_BASE,
-            detail: d,
-        }
-    })?;
-    let mut l3regs = DevMemMemoryMapper::create(L3REGS_BASE, 0x1000).map_err(|d| {
-        BridgeError::Mmap {
-            what: "L3REGS",
-            addr: L3REGS_BASE,
-            detail: d,
-        }
+    let dir = Path::new(FPGA_BRIDGE_DIR);
+    if !dir.exists() {
+        tracing::warn!(
+            "{FPGA_BRIDGE_DIR} not present; assuming LW_H2F bridge is enabled by boot"
+        );
+        return Ok(());
+    }
+
+    let entries = fs::read_dir(dir).map_err(|e| BridgeError::Io {
+        path: FPGA_BRIDGE_DIR.into(),
+        source: e,
     })?;
 
-    // Read-modify-write so we don't disturb other bridges that may
-    // already be configured.
-    let rstmgr_ptr = rstmgr.as_mut_ptr::<u8>();
-    let l3regs_ptr = l3regs.as_mut_ptr::<u8>();
+    let mut found_lwh2f = false;
+    for entry in entries.flatten() {
+        let name_path = entry.path().join("name");
+        let bridge_name = match fs::read_to_string(&name_path) {
+            Ok(s) => s.trim().to_owned(),
+            Err(_) => continue,
+        };
 
-    unsafe {
-        let brgmodrst = rstmgr_ptr.add(BRGMODRST_OFFSET) as *mut u32;
-        let cur = core::ptr::read_volatile(brgmodrst);
-        let new = cur & !BRGMODRST_LWHPS2FPGA;
-        if cur != new {
-            core::ptr::write_volatile(brgmodrst, new);
-            tracing::debug!(
-                "RSTMGR.BRGMODRST: {:#010X} -> {:#010X} (released LW_H2F)",
-                cur,
-                new
-            );
-        } else {
-            tracing::debug!("RSTMGR.BRGMODRST already releases LW_H2F");
+        if !LWH2F_NAME_FRAGMENTS
+            .iter()
+            .any(|frag| bridge_name.contains(frag))
+        {
+            tracing::debug!(bridge = %bridge_name, "skipping non-LW_H2F bridge");
+            continue;
         }
 
-        let remap = l3regs_ptr.add(L3REGS_REMAP_OFFSET) as *mut u32;
-        // L3 REMAP register is write-only for some bits; we cannot
-        // safely read-modify-write it. Per Cyclone V TRM the canonical
-        // value to expose both the H2F and LW_H2F bridges is 0x19.
-        // We only need the LW_H2F bit but include MPU remap (bit 0)
-        // and HPS2FPGA visibility (bit 3) for safety since the kernel
-        // typically sets them already.
-        let value = 0x0000_0019;
-        core::ptr::write_volatile(remap, value);
-        tracing::debug!("L3REGS.REMAP <- {:#010X}", value);
-        let _ = L3REGS_REMAP_LWHPS2FPGA; // documented constant, used in tests
+        let enable_path = entry.path().join("enable");
+        fs::write(&enable_path, "1").map_err(|e| BridgeError::Io {
+            path: enable_path.display().to_string(),
+            source: e,
+        })?;
+        tracing::debug!(bridge = %bridge_name, "enabled via sysfs");
+        found_lwh2f = true;
+    }
+
+    if !found_lwh2f {
+        tracing::warn!(
+            "no LW_H2F bridge found under {FPGA_BRIDGE_DIR}; assuming it's already enabled"
+        );
     }
 
     Ok(())
@@ -119,11 +95,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lwhps2fpga_remap_bit_matches_brgmodrst_position() {
-        // Both registers use bit `1` for LW_H2F at the same logical
-        // position relative to the H2F bridge — sanity check that the
-        // constants match the Cyclone V TRM.
-        assert_eq!(BRGMODRST_LWHPS2FPGA, 0x2);
-        assert_eq!(L3REGS_REMAP_LWHPS2FPGA, 0x10);
+    fn name_fragments_cover_known_kernel_variants() {
+        // Quick sanity that we'd recognise the canonical Linux kernel
+        // names for the lightweight bridge.
+        for name in &["lwhps2fpga", "ff20:lwhps2fpga", "fpga_lwh2f", "soc:bridge_lw_hps2fpga"] {
+            assert!(
+                LWH2F_NAME_FRAGMENTS.iter().any(|f| name.contains(f)),
+                "expected to recognise bridge name {name}"
+            );
+        }
     }
 }
