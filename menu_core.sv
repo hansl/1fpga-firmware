@@ -180,7 +180,13 @@ assign VGA_DISABLE  = 1'b1;  // disable analog output entirely
 assign VIDEO_ARX    = 13'd0;
 assign VIDEO_ARY    = 13'd0;
 assign CE_PIXEL     = 1'b0;
-assign HDMI_FREEZE    = 1'b0;
+// Freeze the framework's ASCAL on its last completed frame while we
+// have engine activity that competes with scanout for F2H_SDRAM
+// bandwidth. Deasserts as soon as the fetcher and blit both go idle,
+// which lets ASCAL resume reading the freshly-updated framebuffer.
+// Without this, our blit's writes starve ASCAL's reads enough that
+// its scanout pipeline goes out of sync and doesn't recover.
+assign HDMI_FREEZE    = fetcher_status_busy | blit_busy;
 assign HDMI_BLACKOUT  = 1'b0;
 assign HDMI_BOB_DEINT = 1'b0;
 
