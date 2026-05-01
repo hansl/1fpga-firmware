@@ -489,17 +489,13 @@ fn draw_test(base: u32) -> Result<(), Box<dyn std::error::Error>> {
     let mut writer = menu_core::ring::RingWriter::new(&mut staging)?;
     writer.observe_head(0);
 
-    let black = Rgba::BLACK;
     let red = Rgba::new(0xFF, 0x00, 0x00, 0xFF);
     let commands = [
-        // Clear the full framebuffer first so uninitialised DDR3
-        // contents don't show as garbage outside the test rect.
-        ProtoCommand::FillRect {
-            dst: Rect::new(0, 0, 1920, 1080),
-            color: black,
-            blend: BlendMode::Opaque,
-            ignore_clip: true,
-        },
+        // No full-screen clear — that's ~2 M DDR3 writes which seems
+        // to saturate F2H_SDRAM and break the framework's scanout
+        // FIFO (visual flickering persists past test exit). Caller
+        // must clear the framebuffer some other way before running
+        // (e.g. one-off Python /dev/mem zero of the FB region).
         ProtoCommand::FillRect {
             dst: Rect::new(100, 100, 200, 200),
             color: red,
@@ -527,11 +523,10 @@ fn draw_test(base: u32) -> Result<(), Box<dyn std::error::Error>> {
     regs.write32(registers::RING_TAIL, final_tail);
     regs.write32(registers::RING_KICK, 1);
 
-    // Wait for the fence. The 1920×1080 clear is ~2M pixels at one
-    // pixel per DDR3 round-trip (M2c1 doesn't burst), so allow ~10 s.
+    // 200×200 = 40 K DDR3 round-trips ≈ tens of ms; 1 s is plenty.
     let target_fence = 0x00C0_FFEEu32;
     let start = std::time::Instant::now();
-    let timeout = std::time::Duration::from_millis(10000);
+    let timeout = std::time::Duration::from_millis(1000);
     loop {
         let fence = regs.read32(registers::FENCE_VALUE);
         if fence == target_fence {
@@ -561,6 +556,12 @@ fn draw_test(base: u32) -> Result<(), Box<dyn std::error::Error>> {
 
     let frames = regs.read32(registers::FRAME_COUNT);
     println!("FRAME_COUNT: {frames}");
+
+    // Disable the engine cleanly so the fetcher / blit are fully idle
+    // after we exit. Rules out "engine still polling the ring" as a
+    // contributor to any post-exit visual artifacts.
+    regs.write32(registers::CONTROL, 0);
+
     println!("M2c1: check HDMI — should see a 200×200 red square at (100, 100)");
     Ok(())
 }
