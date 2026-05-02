@@ -253,7 +253,7 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 // `status` and `buttons_hps` are currently unused beyond the hps_io wiring.
 // Suppress "unused" warnings explicitly for clarity when Quartus lints.
 wire _unused_ok = &{1'b0, status, buttons_hps, forced_scandoubler,
-                    HDMI_WIDTH, HDMI_HEIGHT, FB_VBL, FB_LL, OSD_STATUS,
+                    FB_VBL, FB_LL, OSD_STATUS,
                     UART_CTS, UART_RXD, UART_DSR, USER_IN, SD_MISO, SD_CD,
                     RESET, pll_locked, 1'b0};
 
@@ -281,6 +281,10 @@ wire [31:0] reg_ring_base;
 wire [31:0] reg_ring_size;
 wire [31:0] reg_ring_tail;
 wire        reg_ring_kick;
+wire [31:0] reg_fb0_addr;
+wire [11:0] reg_fb_width;
+wire [11:0] reg_fb_height;
+wire [13:0] reg_fb_stride;
 wire [31:0] fetcher_ring_head;
 wire [31:0] fetcher_fence_value;
 wire [31:0] fetcher_frame_count;
@@ -322,12 +326,19 @@ menu_core_regs u_menu_core_regs (
     .ring_tail_o    (reg_ring_tail),
     .ring_kick_o    (reg_ring_kick),
 
+    .fb0_addr_o     (reg_fb0_addr),
+    .fb_width_o     (reg_fb_width),
+    .fb_height_o    (reg_fb_height),
+    .fb_stride_o    (reg_fb_stride),
+
     .ring_head_i    (fetcher_ring_head),
     .fence_value_i  (fetcher_fence_value),
     .frame_count_i  (fetcher_frame_count),
     .error_info_i   (fetcher_error_info),
     .status_busy_i  (fetcher_status_busy),
-    .status_error_i (fetcher_status_error)
+    .status_error_i (fetcher_status_error),
+    .hdmi_width_i   (HDMI_WIDTH),
+    .hdmi_height_i  (HDMI_HEIGHT)
 );
 
 // Fetcher's read-side DDRAM signals.
@@ -393,8 +404,8 @@ blit_engine u_blit_engine (
     .dst_h_i    (blit_dst_h),
     .color_i    (blit_color),
 
-    .fb_base_i  (32'h3000_0000),     // matches FB_BASE assignment below
-    .fb_stride_i(14'd7680),
+    .fb_base_i  (reg_fb0_addr),
+    .fb_stride_i(reg_fb_stride),
 
     .busy_o     (blit_busy),
     .done_o     (blit_done),
@@ -423,29 +434,20 @@ assign DDRAM_WE       = blit_busy ? blit_we       : 1'b0;
 wire _unused_kick = reg_ring_kick;
 
 ////////////////////////////////////////////////////////////////////////////
-// MISTER_FB configuration — this is the whole of the menu core for M1.
-//
-// FB_FORMAT:
-//   [2:0] = 3'b110 → 32 bpp
-//   [3]   = 1'b0   → irrelevant at 32bpp (selects 565 vs 1555 for 16bpp)
-//   [4]   = 1'b1   → BGR channel order (for 32bpp this matches Linux
-//                     BGRA8888 byte order B,G,R,A in ascending addresses,
-//                     which is PROTOCOL.md §7.1)
-//
-// FB_BASE points at framebuffer slot 0 (PROTOCOL.md §2.1). Future
-// revisions will toggle this between 0x30000000 / 0x30800000 / 0x31000000
-// at vsync under command-ring control.
-//
-// FB_STRIDE is 7680 = 1920 * 4 bytes.
+// MISTER_FB configuration. FB_FORMAT selects BGR 32bpp so the framework
+// reads our BGRA8888 framebuffer directly (PROTOCOL.md §2.1, §7.1).
+// All other geometry comes from the host via control registers
+// (FB0_ADDR / FB_WIDTH / FB_HEIGHT / FB_STRIDE) so the menu can render
+// pixel-perfect for the active HDMI mode (read from VIDEO_INFO).
 ////////////////////////////////////////////////////////////////////////////
 
 `ifdef MISTER_FB
 assign FB_EN          = 1'b1;
 assign FB_FORMAT      = 5'b10110;        // BGR, 32bpp
-assign FB_WIDTH       = 12'd1920;
-assign FB_HEIGHT      = 12'd1080;
-assign FB_BASE        = 32'h3000_0000;   // PROTOCOL.md §2 framebuffer 0
-assign FB_STRIDE      = 14'd7680;        // 1920 * 4
+assign FB_WIDTH       = reg_fb_width;
+assign FB_HEIGHT      = reg_fb_height;
+assign FB_BASE        = reg_fb0_addr;
+assign FB_STRIDE      = reg_fb_stride;
 assign FB_FORCE_BLANK = 1'b0;
 `endif
 

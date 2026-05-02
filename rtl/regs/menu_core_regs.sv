@@ -46,6 +46,10 @@ module menu_core_regs (
     output logic [31:0] ring_size_o,
     output logic [31:0] ring_tail_o,
     output logic        ring_kick_o,      // 1-cycle pulse on RING_KICK write
+    output logic [31:0] fb0_addr_o,
+    output logic [11:0] fb_width_o,
+    output logic [11:0] fb_height_o,
+    output logic [13:0] fb_stride_o,
 
     // Sideband in: FPGA-driven views.
     input  logic [31:0] ring_head_i,
@@ -53,7 +57,9 @@ module menu_core_regs (
     input  logic [31:0] frame_count_i,
     input  logic [31:0] error_info_i,
     input  logic        status_busy_i,
-    input  logic        status_error_i
+    input  logic        status_error_i,
+    input  logic [11:0] hdmi_width_i,     // active HDMI horizontal pixels
+    input  logic [11:0] hdmi_height_i     // active HDMI vertical pixels
 );
 
     // Register-file index constants matching PROTOCOL.md §3.1 offsets.
@@ -63,12 +69,18 @@ module menu_core_regs (
     localparam logic [5:0] IDX_ERROR_INFO  = 6'h03;
     localparam logic [5:0] IDX_VSYNC_COUNT = 6'h04;
     localparam logic [5:0] IDX_FRAME_COUNT = 6'h05;
+    localparam logic [5:0] IDX_VIDEO_INFO  = 6'h07;   // 0x1C / 4
+    localparam logic [5:0] IDX_FB_STATE    = 6'h08;   // 0x20 / 4
+    localparam logic [5:0] IDX_FB_WIDTH    = 6'h09;   // 0x24 / 4
+    localparam logic [5:0] IDX_FB_HEIGHT   = 6'h0A;   // 0x28 / 4
+    localparam logic [5:0] IDX_FB_STRIDE   = 6'h0B;   // 0x2C / 4
     localparam logic [5:0] IDX_RING_BASE   = 6'h0C;   // 0x30 / 4
     localparam logic [5:0] IDX_RING_SIZE   = 6'h0D;   // 0x34 / 4
     localparam logic [5:0] IDX_RING_HEAD   = 6'h0E;   // 0x38 / 4
     localparam logic [5:0] IDX_RING_TAIL   = 6'h0F;   // 0x3C / 4
     localparam logic [5:0] IDX_RING_KICK   = 6'h10;   // 0x40 / 4
     localparam logic [5:0] IDX_FENCE_VALUE = 6'h12;   // 0x48 / 4
+    localparam logic [5:0] IDX_FB0_ADDR    = 6'h14;   // 0x50 / 4
 
     // The LW_H2F window is 2 MiB (21-bit address). Our register block
     // sits at host physical 0xFF210000, which is offset 0x10000 within
@@ -94,6 +106,7 @@ module menu_core_regs (
                 IDX_ERROR_INFO:  req_readdata = error_info_i;
                 IDX_VSYNC_COUNT: req_readdata = 32'h0000_0000;
                 IDX_FRAME_COUNT: req_readdata = frame_count_i;
+                IDX_VIDEO_INFO:  req_readdata = {4'd0, hdmi_height_i, 4'd0, hdmi_width_i};
                 IDX_RING_HEAD:   req_readdata = ring_head_i;
                 IDX_FENCE_VALUE: req_readdata = fence_value_i;
                 default:         req_readdata = scratch[reg_idx];
@@ -120,6 +133,7 @@ module menu_core_regs (
                     // Read-only / sideband-fed slots: drop writes.
                     IDX_ID, IDX_STATUS, IDX_ERROR_INFO,
                     IDX_VSYNC_COUNT, IDX_FRAME_COUNT,
+                    IDX_VIDEO_INFO,
                     IDX_RING_HEAD, IDX_FENCE_VALUE: ;
 
                     IDX_CONTROL: begin
@@ -158,6 +172,10 @@ module menu_core_regs (
     assign ring_size_o   = scratch[IDX_RING_SIZE];
     assign ring_tail_o   = scratch[IDX_RING_TAIL];
     assign ring_kick_o   = ring_kick_q;
+    assign fb0_addr_o    = scratch[IDX_FB0_ADDR];
+    assign fb_width_o    = scratch[IDX_FB_WIDTH][11:0];
+    assign fb_height_o   = scratch[IDX_FB_HEIGHT][11:0];
+    assign fb_stride_o   = scratch[IDX_FB_STRIDE][13:0];
 
     // Suppress unused-input warnings.
     wire _unused = &{1'b0, req_read, 1'b0};
