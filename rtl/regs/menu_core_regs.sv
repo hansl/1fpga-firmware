@@ -47,6 +47,8 @@ module menu_core_regs (
     output logic [31:0] ring_tail_o,
     output logic        ring_kick_o,      // 1-cycle pulse on RING_KICK write
     output logic [31:0] fb0_addr_o,
+    output logic [31:0] fb1_addr_o,
+    output logic [31:0] fb2_addr_o,
     output logic [11:0] fb_width_o,
     output logic [11:0] fb_height_o,
     output logic [13:0] fb_stride_o,
@@ -55,11 +57,13 @@ module menu_core_regs (
     input  logic [31:0] ring_head_i,
     input  logic [31:0] fence_value_i,
     input  logic [31:0] frame_count_i,
+    input  logic [31:0] vsync_count_i,
+    input  logic [31:0] fb_state_i,
     input  logic [31:0] error_info_i,
     input  logic        status_busy_i,
     input  logic        status_error_i,
-    input  logic [11:0] hdmi_width_i,     // active HDMI horizontal pixels
-    input  logic [11:0] hdmi_height_i     // active HDMI vertical pixels
+    input  logic [11:0] hdmi_width_i,
+    input  logic [11:0] hdmi_height_i
 );
 
     // Register-file index constants matching PROTOCOL.md §3.1 offsets.
@@ -81,6 +85,8 @@ module menu_core_regs (
     localparam logic [5:0] IDX_RING_KICK   = 6'h10;   // 0x40 / 4
     localparam logic [5:0] IDX_FENCE_VALUE = 6'h12;   // 0x48 / 4
     localparam logic [5:0] IDX_FB0_ADDR    = 6'h14;   // 0x50 / 4
+    localparam logic [5:0] IDX_FB1_ADDR    = 6'h15;   // 0x54 / 4
+    localparam logic [5:0] IDX_FB2_ADDR    = 6'h16;   // 0x58 / 4
 
     // The LW_H2F window is 2 MiB (21-bit address). Our register block
     // sits at host physical 0xFF210000, which is offset 0x10000 within
@@ -104,9 +110,10 @@ module menu_core_regs (
                 IDX_ID:          req_readdata = 32'h1FFA_0001;
                 IDX_STATUS:      req_readdata = {28'd0, 2'b00, status_busy_i, status_error_i};
                 IDX_ERROR_INFO:  req_readdata = error_info_i;
-                IDX_VSYNC_COUNT: req_readdata = 32'h0000_0000;
+                IDX_VSYNC_COUNT: req_readdata = vsync_count_i;
                 IDX_FRAME_COUNT: req_readdata = frame_count_i;
                 IDX_VIDEO_INFO:  req_readdata = {4'd0, hdmi_height_i, 4'd0, hdmi_width_i};
+                IDX_FB_STATE:    req_readdata = fb_state_i;
                 IDX_RING_HEAD:   req_readdata = ring_head_i;
                 IDX_FENCE_VALUE: req_readdata = fence_value_i;
                 default:         req_readdata = scratch[reg_idx];
@@ -133,7 +140,7 @@ module menu_core_regs (
                     // Read-only / sideband-fed slots: drop writes.
                     IDX_ID, IDX_STATUS, IDX_ERROR_INFO,
                     IDX_VSYNC_COUNT, IDX_FRAME_COUNT,
-                    IDX_VIDEO_INFO,
+                    IDX_VIDEO_INFO, IDX_FB_STATE,
                     IDX_RING_HEAD, IDX_FENCE_VALUE: ;
 
                     IDX_CONTROL: begin
@@ -173,6 +180,8 @@ module menu_core_regs (
     assign ring_tail_o   = scratch[IDX_RING_TAIL];
     assign ring_kick_o   = ring_kick_q;
     assign fb0_addr_o    = scratch[IDX_FB0_ADDR];
+    assign fb1_addr_o    = scratch[IDX_FB1_ADDR];
+    assign fb2_addr_o    = scratch[IDX_FB2_ADDR];
     assign fb_width_o    = scratch[IDX_FB_WIDTH][11:0];
     assign fb_height_o   = scratch[IDX_FB_HEIGHT][11:0];
     assign fb_stride_o   = scratch[IDX_FB_STRIDE][13:0];

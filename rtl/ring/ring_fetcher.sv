@@ -40,10 +40,12 @@ module ring_fetcher (
     input  logic [31:0] ring_tail_i,      // RING_TAIL
     output logic [31:0] ring_head_o,      // RING_HEAD (visible to host)
     output logic [31:0] fence_value_o,    // FENCE_VALUE
-    output logic [31:0] frame_count_o,    // FRAME_COUNT
     output logic [31:0] error_info_o,     // ERROR_INFO
     output logic        status_busy_o,    // STATUS.BZ
     output logic        status_error_o,   // STATUS.ER
+
+    // Triple-buffer dispatch — pulses for one cycle when retiring PRESENT.
+    output logic        present_pulse_o,
 
     // Blit engine dispatch.
     output logic        blit_start_o,
@@ -97,7 +99,6 @@ module ring_fetcher (
     logic [31:0] fetch_addr;
     logic [31:0] retire_advance;
     logic [31:0] fence_value_q;
-    logic [31:0] frame_count_q;
     logic [31:0] error_info_q;
     logic [7:0]  pending_opcode;     // latched at S_DECODE for the dispatch decision
 
@@ -115,10 +116,10 @@ module ring_fetcher (
     // ---- Combinational outputs ---------------------------------------
     assign ring_head_o    = head_q;
     assign fence_value_o  = fence_value_q;
-    assign frame_count_o  = frame_count_q;
     assign error_info_o   = error_info_q;
     assign status_busy_o  = (state != S_IDLE) & (state != S_HALT);
     assign status_error_o = (state == S_HALT);
+    assign present_pulse_o = (state == S_RETIRE) & (pending_opcode == OP_PRESENT);
 
     // Blit engine dispatch outputs are valid only during S_BLIT_DISPATCH;
     // start_o is asserted for one cycle as we transition to S_BLIT_WAIT.
@@ -142,7 +143,6 @@ module ring_fetcher (
             fetch_addr     <= 32'd0;
             retire_advance <= 32'd0;
             fence_value_q  <= 32'd0;
-            frame_count_q  <= 32'd0;
             error_info_q   <= 32'd0;
             pending_opcode <= 8'd0;
             ddram_addr_o     <= 29'd0;
@@ -237,10 +237,14 @@ module ring_fetcher (
                 end
 
                 S_RETIRE: begin
+                    // PRESENT: present_pulse_o pulses combinationally based
+                    // on (state == S_RETIRE) & (pending_opcode == OP_PRESENT)
+                    // — fb_swapper consumes it. FRAME_COUNT now lives in the
+                    // swapper and increments on the vsync that actually does
+                    // the swap, not at PRESENT retire time.
                     unique case (pending_opcode)
-                        OP_PRESENT: frame_count_q <= frame_count_q + 32'd1;
-                        OP_FENCE:   fence_value_q <= arg_q[0];
-                        default:    ;        // NOP / FILL_RECT — no reg update here
+                        OP_FENCE: fence_value_q <= arg_q[0];
+                        default:  ;
                     endcase
 
                     head_q <= (head_q + retire_advance) & head_mask;

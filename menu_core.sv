@@ -253,7 +253,7 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 // `status` and `buttons_hps` are currently unused beyond the hps_io wiring.
 // Suppress "unused" warnings explicitly for clarity when Quartus lints.
 wire _unused_ok = &{1'b0, status, buttons_hps, forced_scandoubler,
-                    FB_VBL, FB_LL, OSD_STATUS,
+                    FB_LL, OSD_STATUS,
                     UART_CTS, UART_RXD, UART_DSR, USER_IN, SD_MISO, SD_CD,
                     RESET, pll_locked, 1'b0};
 
@@ -282,15 +282,23 @@ wire [31:0] reg_ring_size;
 wire [31:0] reg_ring_tail;
 wire        reg_ring_kick;
 wire [31:0] reg_fb0_addr;
+wire [31:0] reg_fb1_addr;
+wire [31:0] reg_fb2_addr;
 wire [11:0] reg_fb_width;
 wire [11:0] reg_fb_height;
 wire [13:0] reg_fb_stride;
 wire [31:0] fetcher_ring_head;
 wire [31:0] fetcher_fence_value;
-wire [31:0] fetcher_frame_count;
 wire [31:0] fetcher_error_info;
 wire        fetcher_status_busy;
 wire        fetcher_status_error;
+wire        fetcher_present_pulse;
+
+wire [1:0]  swap_display_idx;
+wire [1:0]  swap_render_idx;
+wire [31:0] swap_fb_state;
+wire [31:0] swap_frame_count;
+wire [31:0] swap_vsync_count;
 
 // CONTROL.CE (clear-error pulse) re-arms the fetcher: it leaves S_HALT
 // and clears the error bit. We OR this into the fetcher's reset.
@@ -327,13 +335,17 @@ menu_core_regs u_menu_core_regs (
     .ring_kick_o    (reg_ring_kick),
 
     .fb0_addr_o     (reg_fb0_addr),
+    .fb1_addr_o     (reg_fb1_addr),
+    .fb2_addr_o     (reg_fb2_addr),
     .fb_width_o     (reg_fb_width),
     .fb_height_o    (reg_fb_height),
     .fb_stride_o    (reg_fb_stride),
 
     .ring_head_i    (fetcher_ring_head),
     .fence_value_i  (fetcher_fence_value),
-    .frame_count_i  (fetcher_frame_count),
+    .frame_count_i  (swap_frame_count),
+    .vsync_count_i  (swap_vsync_count),
+    .fb_state_i     (swap_fb_state),
     .error_info_i   (fetcher_error_info),
     .status_busy_i  (fetcher_status_busy),
     .status_error_i (fetcher_status_error),
@@ -371,10 +383,11 @@ ring_fetcher u_ring_fetcher (
     .ring_tail_i     (reg_ring_tail),
     .ring_head_o     (fetcher_ring_head),
     .fence_value_o   (fetcher_fence_value),
-    .frame_count_o   (fetcher_frame_count),
     .error_info_o    (fetcher_error_info),
     .status_busy_o   (fetcher_status_busy),
     .status_error_o  (fetcher_status_error),
+
+    .present_pulse_o (fetcher_present_pulse),
 
     .blit_start_o    (blit_start),
     .blit_dst_x_o    (blit_dst_x),
@@ -393,6 +406,49 @@ ring_fetcher u_ring_fetcher (
     .ddram_dout_valid_i (DDRAM_DOUT_READY)
 );
 
+// Address selection: scanout reads from FB[display_idx], blit writes to
+// FB[render_idx]. Each takes one of three host-programmed addresses;
+// the indices come from fb_swapper.
+function automatic logic [31:0] fb_addr_select(
+    input logic [1:0] idx,
+    input logic [31:0] addr0,
+    input logic [31:0] addr1,
+    input logic [31:0] addr2
+);
+    unique case (idx)
+        2'd0:    fb_addr_select = addr0;
+        2'd1:    fb_addr_select = addr1;
+        2'd2:    fb_addr_select = addr2;
+        default: fb_addr_select = addr0;
+    endcase
+endfunction
+
+wire [31:0] scanout_fb_base = fb_addr_select(swap_display_idx, reg_fb0_addr, reg_fb1_addr, reg_fb2_addr);
+wire [31:0] blit_fb_base    = fb_addr_select(swap_render_idx,  reg_fb0_addr, reg_fb1_addr, reg_fb2_addr);
+
+// Vsync pulse: rising edge of FB_VBL, double-flop synchronised.
+logic fb_vbl_d0, fb_vbl_d1;
+always_ff @(posedge clk_sys) begin
+    fb_vbl_d0 <= FB_VBL;
+    fb_vbl_d1 <= fb_vbl_d0;
+end
+wire vsync_pulse = fb_vbl_d0 & ~fb_vbl_d1;
+
+fb_swapper u_fb_swapper (
+    .clk             (clk_sys),
+    .rst_n           (fetcher_rst_n),
+
+    .present_pulse_i (fetcher_present_pulse),
+    .vsync_pulse_i   (vsync_pulse),
+
+    .display_idx_o   (swap_display_idx),
+    .render_idx_o    (swap_render_idx),
+    .ready_idx_o     (),
+    .fb_state_o      (swap_fb_state),
+    .frame_count_o   (swap_frame_count),
+    .vsync_count_o   (swap_vsync_count)
+);
+
 blit_engine u_blit_engine (
     .clk        (clk_sys),
     .rst_n      (fetcher_rst_n),
@@ -404,7 +460,7 @@ blit_engine u_blit_engine (
     .dst_h_i    (blit_dst_h),
     .color_i    (blit_color),
 
-    .fb_base_i  (reg_fb0_addr),
+    .fb_base_i  (blit_fb_base),
     .fb_stride_i(reg_fb_stride),
 
     .busy_o     (blit_busy),
@@ -446,7 +502,7 @@ assign FB_EN          = 1'b1;
 assign FB_FORMAT      = 5'b10110;        // BGR, 32bpp
 assign FB_WIDTH       = reg_fb_width;
 assign FB_HEIGHT      = reg_fb_height;
-assign FB_BASE        = reg_fb0_addr;
+assign FB_BASE        = scanout_fb_base;
 assign FB_STRIDE      = reg_fb_stride;
 assign FB_FORCE_BLANK = 1'b0;
 `endif
