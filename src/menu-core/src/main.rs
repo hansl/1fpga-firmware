@@ -381,6 +381,8 @@ fn configure_framebuffer(
     }
 
     regs.write32(registers::FB0_ADDR, base + mem::FB0_OFFSET as u32);
+    regs.write32(registers::FB1_ADDR, base + mem::FB1_OFFSET as u32);
+    regs.write32(registers::FB2_ADDR, base + mem::FB2_OFFSET as u32);
     regs.write32(registers::FB_WIDTH, info.width as u32);
     regs.write32(registers::FB_HEIGHT, info.height as u32);
     regs.write32(registers::FB_STRIDE, (info.width as u32) * 4);
@@ -495,12 +497,26 @@ fn ring_test(base: u32) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Verify FRAME_COUNT bumped to 1 (the single PRESENT).
-    let frames = regs.read32(registers::FRAME_COUNT);
-    if frames != 1 {
-        return Err(format!("FRAME_COUNT expected 1, got {frames}").into());
-    }
-    println!("FRAME_COUNT: {frames} (expected 1)");
+    // FRAME_COUNT increments on the vsync that actually swaps the
+    // queued framebuffer in (M2c4), which can lag the FENCE by up to
+    // one frame interval (~16 ms at 60 Hz).
+    let frames_target = 1u32;
+    let frame_start = std::time::Instant::now();
+    let frame_timeout = std::time::Duration::from_millis(40);
+    let frames = loop {
+        let f = regs.read32(registers::FRAME_COUNT);
+        if f >= frames_target {
+            break f;
+        }
+        if frame_start.elapsed() > frame_timeout {
+            return Err(format!(
+                "FRAME_COUNT did not reach {frames_target} within {} ms (got {f})",
+                frame_timeout.as_millis()
+            )
+            .into());
+        }
+    };
+    println!("FRAME_COUNT: {frames} (expected ≥ 1)");
 
     // Verify the consumer caught up.
     let head_final = regs.read32(registers::RING_HEAD);
@@ -626,12 +642,32 @@ fn draw_test(base: u32) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let frames = regs.read32(registers::FRAME_COUNT);
-    println!("FRAME_COUNT: {frames}");
+    // Wait for the vsync that completes the swap (FRAME_COUNT bumps
+    // when the queued FB actually becomes DISPLAY, up to ~16 ms after
+    // PRESENT retires).
+    let frame_start = std::time::Instant::now();
+    let frame_timeout = std::time::Duration::from_millis(40);
+    let frames = loop {
+        let f = regs.read32(registers::FRAME_COUNT);
+        if f >= 1 {
+            break f;
+        }
+        if frame_start.elapsed() > frame_timeout {
+            return Err(format!(
+                "FRAME_COUNT did not reach 1 within {} ms (got {f})",
+                frame_timeout.as_millis()
+            )
+            .into());
+        }
+    };
+    let fb_state = regs.read32(registers::FB_STATE);
+    println!(
+        "FRAME_COUNT: {frames}  FB_STATE: {fb_state:#010X} (display={}, render={}, ready={})",
+        registers::fb_state_display(fb_state),
+        registers::fb_state_render(fb_state),
+        registers::fb_state_ready(fb_state)
+    );
 
-    // Disable the engine cleanly so the fetcher / blit are fully idle
-    // after we exit. Rules out "engine still polling the ring" as a
-    // contributor to any post-exit visual artifacts.
     regs.write32(registers::CONTROL, 0);
 
     println!(

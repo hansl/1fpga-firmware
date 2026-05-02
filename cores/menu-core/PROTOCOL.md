@@ -258,7 +258,9 @@ After RBF load, before host programs registers:
 - `CONTROL.EN = 0`
 - `STATUS = 0`
 - `RING_HEAD = RING_TAIL = 0`
-- `FB_STATE = 0x30` (FB_DISPLAY=0, FB_RENDER=0, FB_READY=3)
+- `FB_STATE = 0x34` (FB_DISPLAY=0, FB_RENDER=1, FB_READY=3) — RENDER
+  starts at index 1 so the host's first draws don't hit the
+  currently-displayed buffer.
 - `VSYNC_COUNT`, `FRAME_COUNT` = 0
 - HDMI is actively driven with valid 1080p60 timing but all pixels are black.
 - All `*_ADDR` registers are 0 (invalid — host MUST program before setting EN).
@@ -343,17 +345,22 @@ an arbitrary number of bytes to the ring end, use a NOP with the appropriate
 `PRESENT` (opcode `0x01`) tells the FPGA "the framebuffer currently being
 rendered into (`FB_RENDER`) is complete; swap it to display at next vsync".
 
-On PRESENT:
+On PRESENT (immediately, when the fetcher retires the command):
 
 1. Blit engine waits for all prior commands (including their DDR3 writes) to
    retire.
-2. `FB_READY` is set to the index of the completed framebuffer.
-3. On the next vsync, scanout atomically switches from the current
-   `FB_DISPLAY` to `FB_READY`. `FB_DISPLAY` takes the old value of `FB_READY`,
-   `FB_READY` becomes 3 (empty), and `FB_RENDER` takes the third (now-free)
-   index.
-4. `FRAME_COUNT` increments.
-5. Subsequent draw commands from the ring apply to the new `FB_RENDER`.
+2. `FB_READY` is set to the index of the completed framebuffer (the old
+   `FB_RENDER`).
+3. `FB_RENDER` is rotated to the third (currently free) buffer index so the
+   host can begin issuing draws into the next frame without stalling.
+   Subsequent draw commands from the ring apply to the new `FB_RENDER`.
+
+On the next vsync (asynchronously, up to one frame interval later):
+
+4. Scanout atomically switches: `FB_DISPLAY` takes the old value of
+   `FB_READY`, and `FB_READY` becomes 3 (empty).
+5. `FRAME_COUNT` increments — it counts frames that have *actually been
+   shown*, not frames queued by `PRESENT`.
 
 With triple-buffering, the host can issue `PRESENT` without stalling: there is
 always a free buffer to render into next. If the host issues two `PRESENT`s
