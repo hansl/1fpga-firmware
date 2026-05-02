@@ -205,6 +205,9 @@ fn probe() -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("STATUS expected 0, got {status:#010X}").into());
     }
 
+    let info = VideoMode::from_register(regs.read32(registers::VIDEO_INFO));
+    println!("VIDEO_INFO: {}×{}", info.width, info.height);
+
     // CONTROL -- R/W. Write 0x00000001 (enable), read back, then clear.
     regs.write32(registers::CONTROL, registers::CONTROL_ENABLE);
     let after_set = regs.read32(registers::CONTROL);
@@ -239,6 +242,7 @@ fn probe() -> Result<(), Box<dyn std::error::Error>> {
         registers::ERROR_INFO,
         registers::VSYNC_COUNT,
         registers::FRAME_COUNT,
+        registers::VIDEO_INFO,
         registers::RING_HEAD,
         registers::RING_KICK,
         registers::FENCE_VALUE,
@@ -330,6 +334,57 @@ fn volatile_copy_to_devmem(dst: *mut u8, src: &[u8]) {
     for (i, b) in src.iter().enumerate() {
         unsafe { core::ptr::write_volatile(dst.add(i), *b) };
     }
+}
+
+/// Active HDMI mode resolution as reported by the framework.
+#[derive(Copy, Clone, Debug)]
+struct VideoMode {
+    width: u16,
+    height: u16,
+}
+
+impl VideoMode {
+    fn from_register(value: u32) -> Self {
+        Self {
+            width: (value & 0xFFFF) as u16,
+            height: (value >> 16) as u16,
+        }
+    }
+}
+
+/// Program the framebuffer geometry to match the active HDMI mode.
+///
+/// Reads VIDEO_INFO, picks the same dimensions for FB0, and writes
+/// FB0_ADDR / FB_WIDTH / FB_HEIGHT / FB_STRIDE. The framework will pick
+/// these up on the next FB_EN sample.
+fn configure_framebuffer(
+    regs: &registers::RegisterBlock,
+    base: u32,
+) -> Result<VideoMode, Box<dyn std::error::Error>> {
+    let info = VideoMode::from_register(regs.read32(registers::VIDEO_INFO));
+    if info.width == 0 || info.height == 0 {
+        return Err(format!(
+            "VIDEO_INFO reports {}×{} — HDMI mode may not be set yet (boot MiSTer once \
+             with a valid video_mode in MiSTer.ini, then re-run)",
+            info.width, info.height
+        )
+        .into());
+    }
+
+    let used_bytes = (info.width as usize) * (info.height as usize) * 4;
+    if used_bytes > mem::FB_SLOT_SIZE {
+        return Err(format!(
+            "{}×{} ({} bytes) exceeds 8 MB FB slot — current cap is 1920×1080",
+            info.width, info.height, used_bytes
+        )
+        .into());
+    }
+
+    regs.write32(registers::FB0_ADDR, base + mem::FB0_OFFSET as u32);
+    regs.write32(registers::FB_WIDTH, info.width as u32);
+    regs.write32(registers::FB_HEIGHT, info.height as u32);
+    regs.write32(registers::FB_STRIDE, (info.width as u32) * 4);
+    Ok(info)
 }
 
 fn ring_test(base: u32) -> Result<(), Box<dyn std::error::Error>> {
@@ -481,10 +536,22 @@ fn draw_test(base: u32) -> Result<(), Box<dyn std::error::Error>> {
     regs.write32(registers::RING_SIZE, mem::RING_SIZE as u32);
     regs.write32(registers::RING_TAIL, 0);
 
-    // Stage commands. M2c1 doesn't yet do triple-buffer swap, so the
-    // PRESENT here is a no-op (just bumps FRAME_COUNT) — the FILL_RECT
-    // writes directly to the framebuffer that scanout is already
-    // reading at 0x3000_0000.
+    let mode = configure_framebuffer(&regs, base)?;
+    println!(
+        "Video: {}×{} (FB0={:#010X}, stride={})",
+        mode.width,
+        mode.height,
+        base + mem::FB0_OFFSET as u32,
+        mode.width as u32 * 4
+    );
+
+    // Test rect: centered, half-screen. Adapts to whatever the active
+    // mode is so the same test exercises any resolution.
+    let rect_w = mode.width / 2;
+    let rect_h = mode.height / 2;
+    let rect_x = mode.width / 4;
+    let rect_y = mode.height / 4;
+
     let mut staging = vec![0u8; mem::RING_SIZE];
     let mut writer = menu_core::ring::RingWriter::new(&mut staging)?;
     writer.observe_head(0);
@@ -493,13 +560,13 @@ fn draw_test(base: u32) -> Result<(), Box<dyn std::error::Error>> {
     let red = Rgba::new(0xFF, 0x00, 0x00, 0xFF);
     let commands = [
         ProtoCommand::FillRect {
-            dst: Rect::new(0, 0, 1920, 1080),
+            dst: Rect::new(0, 0, mode.width, mode.height),
             color: black,
             blend: BlendMode::Opaque,
             ignore_clip: true,
         },
         ProtoCommand::FillRect {
-            dst: Rect::new(100, 100, 200, 200),
+            dst: Rect::new(rect_x, rect_y, rect_w, rect_h),
             color: red,
             blend: BlendMode::Opaque,
             ignore_clip: true,
@@ -515,8 +582,8 @@ fn draw_test(base: u32) -> Result<(), Box<dyn std::error::Error>> {
     volatile_copy_to_devmem(ring_devmem_ptr, &staging[..final_tail as usize]);
 
     println!(
-        "Pushed FILL_RECT(red, 100, 100, 200×200) + PRESENT + FENCE; \
-         RING_TAIL={final_tail:#X}"
+        "Pushed clear + FILL_RECT(red, {rect_x}, {rect_y}, {rect_w}×{rect_h}) + \
+         PRESENT + FENCE; RING_TAIL={final_tail:#X}"
     );
 
     core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
@@ -563,6 +630,9 @@ fn draw_test(base: u32) -> Result<(), Box<dyn std::error::Error>> {
     // contributor to any post-exit visual artifacts.
     regs.write32(registers::CONTROL, 0);
 
-    println!("M2c1: check HDMI — should see a 200×200 red square at (100, 100)");
+    println!(
+        "M2c1: check HDMI — should see a {rect_w}×{rect_h} red square at \
+         ({rect_x}, {rect_y})"
+    );
     Ok(())
 }

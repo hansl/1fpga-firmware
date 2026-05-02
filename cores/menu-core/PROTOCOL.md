@@ -60,7 +60,7 @@ All offsets below are relative to the reserved base.
 
 | Offset (hex) | Size (hex)   | Region                   | Notes                         |
 |--------------|--------------|--------------------------|-------------------------------|
-| `0x00000000` | `0x00800000` | Framebuffer 0            | 8 MB, 1920×1080×4 bytes + pad |
+| `0x00000000` | `0x00800000` | Framebuffer 0            | 8 MB, holds up to 1920×1080×4 |
 | `0x00800000` | `0x00800000` | Framebuffer 1            | 8 MB                          |
 | `0x01000000` | `0x00800000` | Framebuffer 2            | 8 MB                          |
 | `0x01800000` | `0x00100000` | Command ring buffer      | 1 MB                          |
@@ -71,13 +71,21 @@ All offsets below are relative to the reserved base.
 
 ### 2.1 Framebuffer format
 
-Each framebuffer holds one 1920×1080 image in **BGRA8888 little-endian** byte
-order (standard Linux framebuffer layout). Pitch is exactly
-`1920 × 4 = 7680` bytes per row. Row 0 is the top of the display. Byte order
-per pixel in memory: `B, G, R, A`.
+Each framebuffer holds one image in **BGRA8888 little-endian** byte order
+(standard Linux framebuffer layout). Row 0 is the top of the display. Byte
+order per pixel in memory: `B, G, R, A`.
 
-Total used bytes per framebuffer: `1920 × 1080 × 4 = 8,294,400`. The 8 MB slot
-includes `94,208` bytes of unused tail padding.
+Image dimensions are **host-configurable** via the `FB_WIDTH` / `FB_HEIGHT` /
+`FB_STRIDE` control registers (§3.1). The host SHOULD read the active HDMI
+resolution from `VIDEO_INFO` (§3.1) and program the framebuffer to match,
+so the application can render pixel-perfect for the current display rather
+than relying on the framework's scaler. Pitch (`FB_STRIDE`) MUST be at
+least `width × 4` bytes per row; rounding up to a hardware-friendly stride
+is permitted.
+
+The 8 MB slot size caps the framebuffer at `1920 × 1080 × 4 = 8,294,400`
+bytes used (with `94,208` bytes of tail padding). Higher resolutions
+require a different memory layout and are out of scope for v0.
 
 ### 2.2 Command ring
 
@@ -137,12 +145,12 @@ be written as zero for forward compatibility.
 | `0x0C` | R   | `ERROR_INFO`         | Last error code + detail                       |
 | `0x10` | R   | `VSYNC_COUNT`        | Monotonic vsync counter                        |
 | `0x14` | R   | `FRAME_COUNT`        | Monotonic frames presented                     |
-| `0x18` | R/W | `VIDEO_MODE`         | Output mode (0 = 1080p60, reserved for future) |
-| `0x1C` | —   | reserved             |                                                |
+| `0x18` | R/W | `VIDEO_MODE`         | Output mode (0 = follow HDMI, reserved for future) |
+| `0x1C` | R   | `VIDEO_INFO`         | Active HDMI dims: `{height[15:0], width[15:0]}` |
 | `0x20` | R   | `FB_STATE`           | Packed framebuffer state (display/render/ready); see §3.2 |
-| `0x24` | —   | reserved             |                                                |
-| `0x28` | —   | reserved             |                                                |
-| `0x2C` | —   | reserved             |                                                |
+| `0x24` | R/W | `FB_WIDTH`           | Framebuffer width in pixels                    |
+| `0x28` | R/W | `FB_HEIGHT`          | Framebuffer height in pixels                   |
+| `0x2C` | R/W | `FB_STRIDE`          | Framebuffer pitch in bytes per row             |
 | `0x30` | R/W | `RING_BASE`          | Command ring base address (physical)           |
 | `0x34` | R/W | `RING_SIZE`          | Ring size in bytes (power of 2)                |
 | `0x38` | R   | `RING_HEAD`          | FPGA's read offset into ring                   |
