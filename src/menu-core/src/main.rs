@@ -419,6 +419,10 @@ fn ring_test(base: u32) -> Result<(), Box<dyn std::error::Error>> {
     regs.write32(registers::RING_SIZE, mem::RING_SIZE as u32);
     regs.write32(registers::RING_TAIL, 0);
 
+    // Configure the FB so PRESENT has a coherent target even though
+    // this test doesn't draw.
+    let _ = configure_framebuffer(&regs, base)?;
+
     let head_initial = regs.read32(registers::RING_HEAD);
     if head_initial != 0 {
         return Err(format!("RING_HEAD started at {head_initial:#010X}, expected 0").into());
