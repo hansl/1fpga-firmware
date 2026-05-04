@@ -34,6 +34,10 @@ const REGS_PHYS_ADDR: usize = 0xFF21_0000;
 // declare here to satisfy `unused_crate_dependencies` on the binary.
 use thiserror as _;
 
+// Used inside the library's `text` module — declared here to satisfy
+// `unused_crate_dependencies` on the binary target.
+use fontdue as _;
+
 // Only referenced from library test code; the binary target has no
 // tests of its own but shares this package's Cargo.toml.
 #[cfg(test)]
@@ -102,6 +106,12 @@ pub enum Command {
     /// (alpha=255). Requires the M2c3.3 blit engine support for
     /// SrcAlpha blending.
     BlendTest,
+
+    /// Rasterise an ASCII font atlas from the bundled Noto Sans TTF,
+    /// upload it as an A8 texture, then render a "Hello, 1FPGA!"
+    /// string in white over a dark blue background using one
+    /// COPY_RECT per glyph with SrcAlpha blend.
+    TextTest,
 }
 
 fn parse_u32_hex_or_dec(s: &str) -> Result<u32, std::num::ParseIntError> {
@@ -200,6 +210,13 @@ fn main() {
             Ok(()) => {}
             Err(e) => {
                 tracing::error!("blend-test failed: {e}");
+                std::process::exit(1);
+            }
+        },
+        Some(Command::TextTest) => match text_test(base) {
+            Ok(()) => {}
+            Err(e) => {
+                tracing::error!("text-test failed: {e}");
                 std::process::exit(1);
             }
         },
@@ -1172,6 +1189,177 @@ fn blend_test(base: u32) -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "M2c3.3: check HDMI — should see a {TEX_W}×{TEX_H} smooth fade \
          from blue (alpha=0) to red (alpha=255), blended over a blue background"
+    );
+    Ok(())
+}
+
+/// Bundled Latin Noto Sans, SIL OFL — ~27 KB.
+const NOTO_SANS: &[u8] = include_bytes!("../fonts/NotoSans-Regular.ttf");
+
+fn text_test(base: u32) -> Result<(), Box<dyn std::error::Error>> {
+    bridge::enable_lwh2f()?;
+
+    let mut regs_mapper = DevMemMemoryMapper::create(REGS_PHYS_ADDR, 0x1000)
+        .map_err(|d| format!("mmap regs at {REGS_PHYS_ADDR:#X}: {d}"))?;
+    let regs = unsafe { registers::RegisterBlock::new(regs_mapper.as_mut_ptr::<u8>()) };
+
+    let id = regs.read32(registers::ID);
+    if id != protocol::ID_VALUE {
+        return Err(format!("bad ID {id:#010X}, expected {:#010X}", protocol::ID_VALUE).into());
+    }
+
+    let ring_phys = base + mem::RING_OFFSET as u32;
+    let mut ring_mapper = DevMemMemoryMapper::create(ring_phys as usize, mem::RING_SIZE)
+        .map_err(|d| format!("mmap ring at {ring_phys:#X}: {d}"))?;
+    let ring_devmem_ptr = ring_mapper.as_mut_ptr::<u8>();
+
+    regs.write32(registers::CONTROL, registers::CONTROL_CLEAR_ERROR);
+    regs.write32(registers::CONTROL, 0);
+    regs.write32(registers::RING_BASE, ring_phys);
+    regs.write32(registers::RING_SIZE, mem::RING_SIZE as u32);
+    regs.write32(registers::RING_TAIL, 0);
+
+    let mode = configure_framebuffer(&regs, base)?;
+    println!("Video: {}×{}", mode.width, mode.height);
+
+    // ---- Build the font atlas ----
+    let charset: String = (b' '..=b'~').map(|b| b as char).collect();
+    let px_size = 48.0_f32;
+    let atlas = menu_core::text::build_atlas(NOTO_SANS, px_size, &charset, 512, 512)?;
+    println!(
+        "Atlas: {}×{}, {} glyphs, line_height={}, ascent={}",
+        atlas.width,
+        atlas.height,
+        charset.len(),
+        atlas.line_height,
+        atlas.ascent
+    );
+
+    // ---- Upload atlas to texture pool ----
+    let tex_phys = base + mem::TEX_POOL_OFFSET as u32;
+    let mut tex_mapper = DevMemMemoryMapper::create(tex_phys as usize, atlas.bytes.len())
+        .map_err(|d| format!("mmap texture pool at {tex_phys:#X}: {d}"))?;
+    volatile_copy_to_devmem(tex_mapper.as_mut_ptr::<u8>(), &atlas.bytes);
+
+    // ---- Write the descriptor (one entry covering the whole atlas) ----
+    let tex_table_phys = base + mem::TEX_TABLE_OFFSET as u32;
+    let descriptor = TextureDescriptor::new(
+        tex_phys,
+        atlas.width as u32,    // pitch = width for tightly packed A8
+        atlas.width,
+        atlas.height,
+        TextureFormat::A8,
+    );
+    let descriptor_bytes: [u8; DESCRIPTOR_SIZE] = unsafe { core::mem::transmute(descriptor) };
+    let mut desc_mapper = DevMemMemoryMapper::create(tex_table_phys as usize, DESCRIPTOR_SIZE)
+        .map_err(|d| format!("mmap descriptor table at {tex_table_phys:#X}: {d}"))?;
+    volatile_copy_to_devmem(desc_mapper.as_mut_ptr::<u8>(), &descriptor_bytes);
+
+    regs.write32(registers::TEX_TABLE_ADDR, tex_table_phys);
+    regs.write32(registers::TEX_TABLE_COUNT, 1);
+
+    // ---- Lay out the string ----
+    let text = "Hello, 1FPGA!";
+    let dark_blue = Rgba::new(0x10, 0x10, 0x40, 0xFF);
+    let white     = Rgba::new(0xFF, 0xFF, 0xFF, 0xFF);
+
+    // Pen position: horizontally centred, vertically a bit above middle.
+    let text_width = atlas.measure(text) as u16;
+    let pen_x_start = (mode.width.saturating_sub(text_width)) / 2;
+    // Top of the line box. The glyph for each char draws at
+    //   top_y = pen_y + (ascent - ymin - height)
+    // where pen_y is the line top.
+    let pen_y_top = (mode.height / 2).saturating_sub(atlas.line_height / 2);
+
+    let mut staging = vec![0u8; mem::RING_SIZE];
+    let mut writer = menu_core::ring::RingWriter::new(&mut staging)?;
+    writer.observe_head(0);
+
+    // Background.
+    writer.push(&ProtoCommand::FillRect {
+        dst: Rect::new(0, 0, mode.width, mode.height),
+        color: dark_blue,
+        blend: BlendMode::Opaque,
+        ignore_clip: true,
+    })?;
+
+    // One COPY_RECT per glyph.
+    let mut pen_x: i32 = pen_x_start as i32;
+    let mut glyph_count = 0_u32;
+    for ch in text.chars() {
+        let g = match atlas.glyph(ch) {
+            Some(g) => *g,
+            None => continue,
+        };
+        if g.width > 0 && g.height > 0 {
+            let dst_x = (pen_x + g.bearing_x as i32).max(0) as u16;
+            let dst_y_offset = (atlas.ascent as i32) - (g.ymin as i32) - (g.height as i32);
+            let dst_y = (pen_y_top as i32 + dst_y_offset).max(0) as u16;
+            writer.push(&ProtoCommand::CopyRect {
+                tex_id: 0,
+                src: Rect::new(g.atlas_x, g.atlas_y, g.width, g.height),
+                dst: Rect::new(dst_x, dst_y, g.width, g.height),
+                blend: BlendMode::SrcAlpha,
+                filter: Filter::Nearest,
+                tint: Some(white),
+            })?;
+            glyph_count += 1;
+        }
+        pen_x += g.advance as i32;
+    }
+
+    writer.push(&ProtoCommand::Present)?;
+    writer.push(&ProtoCommand::Fence { value: 0x00C0_FFEE })?;
+
+    let final_tail = writer.tail();
+    volatile_copy_to_devmem(ring_devmem_ptr, &staging[..final_tail as usize]);
+    println!(
+        "Pushed FILL(bg) + {glyph_count}× COPY_RECT(glyph, SrcAlpha) + PRESENT + FENCE; \
+         RING_TAIL={final_tail:#X}"
+    );
+
+    core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+
+    regs.write32(registers::CONTROL, registers::CONTROL_ENABLE);
+    regs.write32(registers::RING_TAIL, final_tail);
+    regs.write32(registers::RING_KICK, 1);
+
+    let target_fence = 0x00C0_FFEEu32;
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_millis(15000);
+    loop {
+        let fence = regs.read32(registers::FENCE_VALUE);
+        if fence == target_fence {
+            println!(
+                "FENCE_VALUE reached {fence:#010X} in {} ms",
+                start.elapsed().as_millis()
+            );
+            break;
+        }
+        let status = regs.read32(registers::STATUS);
+        if status & registers::STATUS_ERROR != 0 {
+            let err = regs.read32(registers::ERROR_INFO);
+            return Err(format!(
+                "fetcher error: STATUS={status:#010X} ERROR_INFO={err:#010X}"
+            )
+            .into());
+        }
+        if start.elapsed() > timeout {
+            return Err("timeout waiting for FENCE".into());
+        }
+    }
+
+    let frame_start = std::time::Instant::now();
+    while regs.read32(registers::FRAME_COUNT) < 1 {
+        if frame_start.elapsed() > std::time::Duration::from_millis(40) {
+            return Err("FRAME_COUNT did not reach 1 within 40 ms".into());
+        }
+    }
+
+    regs.write32(registers::CONTROL, 0);
+    println!(
+        "M2c3.4: check HDMI — should see \"{text}\" in white, centred on a \
+         dark blue background"
     );
     Ok(())
 }

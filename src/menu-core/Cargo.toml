@@ -19,6 +19,7 @@ clap = { version = "4.3.5", features = ["derive"] }
 clap-verbosity-flag = "2.0.1"
 core_affinity = "0.8.1"
 cyclone-v = { path = "../cyclone-v" }
+fontdue = "0.9"
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

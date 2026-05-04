@@ -126,3 +126,7 @@ a8-test-menu-core:
 # Run the M2c3.3 SrcAlpha blend visual test on the device (look at HDMI)
 blend-test-menu-core:
     ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core blend-test'
+
+# Run the TTF text-rendering visual test on the device (look at HDMI)
+text-test-menu-core:
+    ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core text-test'

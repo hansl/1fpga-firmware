@@ -20,6 +20,7 @@ pub mod bridge;
 pub mod mem;
 pub mod protocol;
 pub mod ring;
+pub mod text;
 
 // The binary target shares this package's Cargo.toml, so deps only used
 // by the binary (and by tests) still need to be referenced from the
