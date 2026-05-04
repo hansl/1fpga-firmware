@@ -128,6 +128,16 @@ module menu_core_regs (
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             for (i = 0; i < 64; i = i + 1) scratch[i] <= 32'b0;
+            // Default framebuffer params so the framework's scanout has
+            // valid timing immediately at reset (otherwise FB_WIDTH=0
+            // produces no HDMI signal). The host overrides these via
+            // configure_framebuffer() once it's read VIDEO_INFO.
+            scratch[IDX_FB_WIDTH]  <= 32'd1920;
+            scratch[IDX_FB_HEIGHT] <= 32'd1080;
+            scratch[IDX_FB_STRIDE] <= 32'd7680;     // 1920 × 4
+            scratch[IDX_FB0_ADDR]  <= 32'h3000_0000;
+            scratch[IDX_FB1_ADDR]  <= 32'h3080_0000;
+            scratch[IDX_FB2_ADDR]  <= 32'h3100_0000;
             clear_error_q <= 1'b0;
             ring_kick_q   <= 1'b0;
         end else begin
