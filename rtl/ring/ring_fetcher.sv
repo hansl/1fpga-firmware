@@ -57,6 +57,9 @@ module ring_fetcher (
     output logic [15:0] blit_src_y_o,
     output logic [31:0] blit_src_addr_o,
     output logic [31:0] blit_src_pitch_o,
+    output logic        blit_format_o,      // 0 = RGBA8888, 1 = A8
+    output logic        blit_tint_en_o,
+    output logic [31:0] blit_tint_color_o,
     input  logic        blit_done_i,
 
     // DDRAM_* read-master interface.
@@ -101,7 +104,7 @@ module ring_fetcher (
     state_e      state;
     logic [31:0] head_q;
     logic [31:0] header_q;
-    logic [31:0] arg_q  [0:4];       // up to 5 arg words (COPY_RECT no tint)
+    logic [31:0] arg_q  [0:5];       // up to 6 arg words (COPY_RECT + tint)
     logic [31:0] desc_q [0:3];       // 4 descriptor words for COPY_RECT
     logic [2:0]  arg_idx;
     logic [2:0]  arg_total;
@@ -139,17 +142,21 @@ module ring_fetcher (
     wire [31:0] dst_xy_word = is_copy ? arg_q[3] : arg_q[0];
     wire [31:0] dst_wh_word = is_copy ? arg_q[4] : arg_q[1];
 
-    assign blit_start_o     = (state == S_BLIT_DISPATCH);
-    assign blit_mode_o      = is_copy ? MODE_COPY : MODE_FILL;
-    assign blit_dst_x_o     = dst_xy_word[31:16];
-    assign blit_dst_y_o     = dst_xy_word[15:0];
-    assign blit_dst_w_o     = dst_wh_word[31:16];
-    assign blit_dst_h_o     = dst_wh_word[15:0];
-    assign blit_color_o     = arg_q[2];      // only meaningful for FILL
-    assign blit_src_x_o     = arg_q[1][31:16];
-    assign blit_src_y_o     = arg_q[1][15:0];
-    assign blit_src_addr_o  = desc_q[0];     // descriptor §6.1: data_addr
-    assign blit_src_pitch_o = desc_q[1];     // descriptor §6.1: pitch_bytes
+    assign blit_start_o      = (state == S_BLIT_DISPATCH);
+    assign blit_mode_o       = is_copy ? MODE_COPY : MODE_FILL;
+    assign blit_dst_x_o      = dst_xy_word[31:16];
+    assign blit_dst_y_o      = dst_xy_word[15:0];
+    assign blit_dst_w_o      = dst_wh_word[31:16];
+    assign blit_dst_h_o      = dst_wh_word[15:0];
+    assign blit_color_o      = arg_q[2];      // only meaningful for FILL
+    assign blit_src_x_o      = arg_q[1][31:16];
+    assign blit_src_y_o      = arg_q[1][15:0];
+    assign blit_src_addr_o   = desc_q[0];     // descriptor §6.1: data_addr
+    assign blit_src_pitch_o  = desc_q[1];     // descriptor §6.1: pitch_bytes
+    assign blit_format_o     = desc_q[3][0];  // descriptor §6.1 format byte: 0=RGBA, 1=A8
+    // header.flags bit 4 = tint_en for COPY_RECT (PROTOCOL.md §5.3 #COPY_RECT).
+    assign blit_tint_en_o    = is_copy & header_q[4];
+    assign blit_tint_color_o = arg_q[5];      // optional 6th arg, valid only when tint_en
 
     // Texture descriptor base = tex_table_addr + tex_id * 32.
     wire [31:0] desc_base = tex_table_addr_i + (arg_q[0] <<< 5);
@@ -161,7 +168,7 @@ module ring_fetcher (
             state          <= S_IDLE;
             head_q         <= 32'd0;
             header_q       <= 32'd0;
-            for (i = 0; i < 5; i = i + 1) arg_q[i]  <= 32'd0;
+            for (i = 0; i < 6; i = i + 1) arg_q[i]  <= 32'd0;
             for (i = 0; i < 4; i = i + 1) desc_q[i] <= 32'd0;
             arg_idx        <= 3'd0;
             arg_total      <= 3'd0;
@@ -224,7 +231,9 @@ module ring_fetcher (
                             state      <= S_FETCH_ARG;
                         end
                         OP_COPY_RECT: begin
-                            arg_total  <= 3'd5;
+                            // length_w distinguishes 5 (no tint) vs 6
+                            // (tint_en) per PROTOCOL.md §5.3.
+                            arg_total  <= (header_q[23:16] == 8'd6) ? 3'd6 : 3'd5;
                             fetch_addr <= fetch_addr + 32'd4;
                             state      <= S_FETCH_ARG;
                         end

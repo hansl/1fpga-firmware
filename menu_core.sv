@@ -378,6 +378,9 @@ wire [15:0] blit_dst_x, blit_dst_y, blit_dst_w, blit_dst_h;
 wire [15:0] blit_src_x, blit_src_y;
 wire [31:0] blit_src_addr, blit_src_pitch;
 wire [31:0] blit_color;
+wire        blit_format;
+wire        blit_tint_en;
+wire [31:0] blit_tint_color;
 wire        blit_done;
 
 ring_fetcher u_ring_fetcher (
@@ -409,6 +412,9 @@ ring_fetcher u_ring_fetcher (
     .blit_src_y_o    (blit_src_y),
     .blit_src_addr_o (blit_src_addr),
     .blit_src_pitch_o(blit_src_pitch),
+    .blit_format_o     (blit_format),
+    .blit_tint_en_o    (blit_tint_en),
+    .blit_tint_color_o (blit_tint_color),
     .blit_done_i     (blit_done),
 
     .ddram_addr_o       (fetch_addr),
@@ -478,6 +484,9 @@ blit_engine u_blit_engine (
     .src_y_i    (blit_src_y),
     .src_addr_i (blit_src_addr),
     .src_pitch_i(blit_src_pitch),
+    .format_i      (blit_format),
+    .tint_en_i     (blit_tint_en),
+    .tint_color_i  (blit_tint_color),
 
     .fb_base_i  (blit_fb_base),
     .fb_stride_i(reg_fb_stride),
