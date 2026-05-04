@@ -86,6 +86,7 @@ module blit_engine (
         S_WAIT_SRC,
         S_FETCH_DST,
         S_WAIT_DST,
+        S_BLEND,           // pipeline stage so blend math meets timing
         S_WRITE,
         S_WRITE_WAIT,
         S_DONE
@@ -108,6 +109,7 @@ module blit_engine (
     logic [31:0] src_row_byte_addr;
     logic [31:0] pixel_data;
     logic [31:0] src_pixel_q;        // computed source pixel held while we fetch dst
+    logic [31:0] dst_pixel_q;        // captured dst pixel held while blend computes
 
     assign busy_o = (state != S_IDLE) & (state != S_DONE);
 
@@ -263,6 +265,7 @@ module blit_engine (
             src_row_byte_addr <= '0;
             pixel_data        <= '0;
             src_pixel_q       <= '0;
+            dst_pixel_q       <= '0;
             done_o            <= 1'b0;
         end else begin
             done_o <= 1'b0;
@@ -369,9 +372,15 @@ module blit_engine (
                 end
 
                 S_WAIT_DST: if (ddram_dout_valid_i) begin
-                    automatic logic [31:0] dst_word;
-                    dst_word = pick_word(ddram_dout_i, dst_pixel_byte_addr[2]);
-                    pixel_data <= blend_pixel(src_pixel_q, dst_word, blend_q);
+                    // Capture only — let the blend math run in the
+                    // next cycle so the combinational path doesn't
+                    // exceed the clock period.
+                    dst_pixel_q <= pick_word(ddram_dout_i, dst_pixel_byte_addr[2]);
+                    state       <= S_BLEND;
+                end
+
+                S_BLEND: begin
+                    pixel_data <= blend_pixel(src_pixel_q, dst_pixel_q, blend_q);
                     state      <= S_WRITE;
                 end
 
