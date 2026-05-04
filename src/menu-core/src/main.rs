@@ -243,6 +243,7 @@ fn probe() -> Result<(), Box<dyn std::error::Error>> {
         registers::VSYNC_COUNT,
         registers::FRAME_COUNT,
         registers::VIDEO_INFO,
+        registers::FB_STATE,
         registers::RING_HEAD,
         registers::RING_KICK,
         registers::FENCE_VALUE,
