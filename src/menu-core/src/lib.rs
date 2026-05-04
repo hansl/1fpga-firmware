@@ -28,6 +28,7 @@ use clap as _;
 use clap_verbosity_flag as _;
 use core_affinity as _;
 use cyclone_v as _;
+use mister_fpga as _;
 #[cfg(test)]
 use pretty_assertions as _;
 use tracing as _;

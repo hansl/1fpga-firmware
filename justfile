@@ -103,26 +103,30 @@ build-menu-core-host mode="release-dev":
 deploy-menu-core-host mode="release-dev": (build-menu-core-host mode)
     scp target/armv7-unknown-linux-musleabihf/{{mode}}/one_fpga_menu_core root@{{mister_ip}}:/media/fat/one_fpga_menu_core
 
-# Run the probe on the device (assumes the menu-core .rbf is loaded and the binary is deployed)
+# Path each test passes via --rbf to load the freshly-deployed bitstream
+# directly into the FPGA, skipping the rename-to-menu.rbf-and-reboot dance.
+rbf_path := "/media/fat/menu_core.rbf"
+
+# Run the probe on the device (loads RBF first via --rbf)
 probe-menu-core:
-    ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core probe'
+    ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core --rbf {{rbf_path}} probe'
 
 # Run the M2b ring round-trip test on the device
 ring-test-menu-core:
-    ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core ring-test'
+    ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core --rbf {{rbf_path}} ring-test'
 
 # Run the M2c1 FILL_RECT visual test on the device (look at HDMI)
 draw-test-menu-core:
-    ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core draw-test'
+    ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core --rbf {{rbf_path}} draw-test'
 
 # Run the M2c3.1 COPY_RECT visual test on the device (look at HDMI)
 texture-test-menu-core:
-    ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core texture-test'
+    ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core --rbf {{rbf_path}} texture-test'
 
 # Run the M2c3.2 A8 + tint visual test on the device (look at HDMI)
 a8-test-menu-core:
-    ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core a8-test'
+    ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core --rbf {{rbf_path}} a8-test'
 
 # Run the M2c3.3 SrcAlpha blend visual test on the device (look at HDMI)
 blend-test-menu-core:
-    ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core blend-test'
+    ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core --rbf {{rbf_path}} blend-test'

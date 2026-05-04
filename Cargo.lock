@@ -3334,6 +3334,7 @@ dependencies = [
  "clap-verbosity-flag",
  "core_affinity",
  "cyclone-v",
+ "mister-fpga",
  "pretty_assertions",
  "thiserror 2.0.18",
  "tracing",
