@@ -118,3 +118,7 @@ draw-test-menu-core:
 # Run the M2c3.1 COPY_RECT visual test on the device (look at HDMI)
 texture-test-menu-core:
     ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core texture-test'
+
+# Run the M2c3.2 A8 + tint visual test on the device (look at HDMI)
+a8-test-menu-core:
+    ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core a8-test'
