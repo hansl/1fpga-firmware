@@ -20,7 +20,10 @@ use tracing_subscriber::fmt::Subscriber;
 
 use menu_core::bridge;
 use menu_core::mem;
-use menu_core::protocol::{self, BlendMode, Command as ProtoCommand, Rect, Rgba, registers};
+use menu_core::protocol::{
+    self, BlendMode, Command as ProtoCommand, Filter, Rect, Rgba, TextureDescriptor,
+    TextureFormat, descriptors::DESCRIPTOR_SIZE, registers,
+};
 use menu_core::ring::RingWriter;
 
 /// Physical address of the menu-core control register block, per
@@ -80,6 +83,12 @@ pub enum Command {
     /// Visual verification: a red rectangle should appear on HDMI.
     /// Requires the M2c1 blit engine on the FPGA side.
     DrawTest,
+
+    /// Upload a 64×64 RGBA8888 checkerboard texture, COPY_RECT it
+    /// onto the framebuffer, PRESENT + FENCE. Visual verification:
+    /// a checkerboard appears on HDMI. Requires the M2c3.1 blit
+    /// engine support for COPY_RECT.
+    TextureTest,
 }
 
 fn parse_u32_hex_or_dec(s: &str) -> Result<u32, std::num::ParseIntError> {
@@ -157,6 +166,13 @@ fn main() {
             Ok(()) => {}
             Err(e) => {
                 tracing::error!("draw-test failed: {e}");
+                std::process::exit(1);
+            }
+        },
+        Some(Command::TextureTest) => match texture_test(base) {
+            Ok(()) => {}
+            Err(e) => {
+                tracing::error!("texture-test failed: {e}");
                 std::process::exit(1);
             }
         },
@@ -674,6 +690,178 @@ fn draw_test(base: u32) -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "M2c1: check HDMI — should see a {rect_w}×{rect_h} red square at \
          ({rect_x}, {rect_y})"
+    );
+    Ok(())
+}
+
+fn texture_test(base: u32) -> Result<(), Box<dyn std::error::Error>> {
+    bridge::enable_lwh2f()?;
+
+    let mut regs_mapper = DevMemMemoryMapper::create(REGS_PHYS_ADDR, 0x1000)
+        .map_err(|d| format!("mmap regs at {REGS_PHYS_ADDR:#X}: {d}"))?;
+    let regs = unsafe { registers::RegisterBlock::new(regs_mapper.as_mut_ptr::<u8>()) };
+
+    let id = regs.read32(registers::ID);
+    if id != protocol::ID_VALUE {
+        return Err(format!("bad ID {id:#010X}, expected {:#010X}", protocol::ID_VALUE).into());
+    }
+
+    let ring_phys = base + mem::RING_OFFSET as u32;
+    let mut ring_mapper = DevMemMemoryMapper::create(ring_phys as usize, mem::RING_SIZE)
+        .map_err(|d| format!("mmap ring at {ring_phys:#X}: {d}"))?;
+    let ring_devmem_ptr = ring_mapper.as_mut_ptr::<u8>();
+
+    // Reset fetcher and program ring registers.
+    regs.write32(registers::CONTROL, registers::CONTROL_CLEAR_ERROR);
+    regs.write32(registers::CONTROL, 0);
+    regs.write32(registers::RING_BASE, ring_phys);
+    regs.write32(registers::RING_SIZE, mem::RING_SIZE as u32);
+    regs.write32(registers::RING_TAIL, 0);
+
+    let mode = configure_framebuffer(&regs, base)?;
+    println!("Video: {}×{}", mode.width, mode.height);
+
+    // ---- Build a 64×64 RGBA8888 checkerboard in a regular Vec ----
+    // 8×8 cells of alternating colours so the result is visually
+    // unambiguous even at small sizes.
+    const TEX_W: usize = 64;
+    const TEX_H: usize = 64;
+    const CELL: usize = 8;
+    let red = Rgba::new(0xFF, 0x00, 0x00, 0xFF);
+    let yellow = Rgba::new(0xFF, 0xFF, 0x00, 0xFF);
+    let mut tex_bytes = vec![0u8; TEX_W * TEX_H * 4];
+    for y in 0..TEX_H {
+        for x in 0..TEX_W {
+            let cell_x = x / CELL;
+            let cell_y = y / CELL;
+            let color = if (cell_x + cell_y) % 2 == 0 { red } else { yellow };
+            let off = (y * TEX_W + x) * 4;
+            let word = color.to_u32().to_le_bytes();
+            tex_bytes[off..off + 4].copy_from_slice(&word);
+        }
+    }
+
+    // ---- Upload texture to the texture pool in DDR3 ----
+    let tex_phys = base + mem::TEX_POOL_OFFSET as u32;
+    let mut tex_mapper = DevMemMemoryMapper::create(tex_phys as usize, tex_bytes.len())
+        .map_err(|d| format!("mmap texture pool at {tex_phys:#X}: {d}"))?;
+    volatile_copy_to_devmem(tex_mapper.as_mut_ptr::<u8>(), &tex_bytes);
+
+    // ---- Build and upload the descriptor table (one entry: tex_id 0) ----
+    let tex_table_phys = base + mem::TEX_TABLE_OFFSET as u32;
+    let descriptor = TextureDescriptor::new(
+        tex_phys,
+        (TEX_W * 4) as u32,
+        TEX_W as u16,
+        TEX_H as u16,
+        TextureFormat::Rgba8888,
+    );
+    let descriptor_bytes: [u8; DESCRIPTOR_SIZE] = unsafe {
+        // SAFETY: TextureDescriptor is `#[repr(C)]` and exactly 32 bytes.
+        core::mem::transmute(descriptor)
+    };
+    let mut desc_mapper =
+        DevMemMemoryMapper::create(tex_table_phys as usize, DESCRIPTOR_SIZE)
+            .map_err(|d| format!("mmap descriptor table at {tex_table_phys:#X}: {d}"))?;
+    volatile_copy_to_devmem(desc_mapper.as_mut_ptr::<u8>(), &descriptor_bytes);
+
+    regs.write32(registers::TEX_TABLE_ADDR, tex_table_phys);
+    regs.write32(registers::TEX_TABLE_COUNT, 1);
+    println!(
+        "Uploaded {TEX_W}×{TEX_H} RGBA8888 texture at {tex_phys:#010X}; \
+         descriptor at {tex_table_phys:#010X}"
+    );
+
+    // ---- Build the command stream ----
+    // Centre the checkerboard on screen at native pixel size.
+    let dst_x = (mode.width / 2).saturating_sub(TEX_W as u16 / 2);
+    let dst_y = (mode.height / 2).saturating_sub(TEX_H as u16 / 2);
+
+    let mut staging = vec![0u8; mem::RING_SIZE];
+    let mut writer = menu_core::ring::RingWriter::new(&mut staging)?;
+    writer.observe_head(0);
+
+    let commands = [
+        ProtoCommand::FillRect {
+            dst: Rect::new(0, 0, mode.width, mode.height),
+            color: Rgba::BLACK,
+            blend: BlendMode::Opaque,
+            ignore_clip: true,
+        },
+        ProtoCommand::CopyRect {
+            tex_id: 0,
+            src: Rect::new(0, 0, TEX_W as u16, TEX_H as u16),
+            dst: Rect::new(dst_x, dst_y, TEX_W as u16, TEX_H as u16),
+            blend: BlendMode::Opaque,
+            filter: Filter::Nearest,
+            tint: None,
+        },
+        ProtoCommand::Present,
+        ProtoCommand::Fence { value: 0x00C0_FFEE },
+    ];
+
+    for cmd in &commands {
+        writer.push(cmd)?;
+    }
+    let final_tail = writer.tail();
+    volatile_copy_to_devmem(ring_devmem_ptr, &staging[..final_tail as usize]);
+    println!(
+        "Pushed clear + COPY_RECT(tex 0, {TEX_W}×{TEX_H} -> ({dst_x}, {dst_y})) + \
+         PRESENT + FENCE; RING_TAIL={final_tail:#X}"
+    );
+
+    core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+
+    regs.write32(registers::CONTROL, registers::CONTROL_ENABLE);
+    regs.write32(registers::RING_TAIL, final_tail);
+    regs.write32(registers::RING_KICK, 1);
+
+    let target_fence = 0x00C0_FFEEu32;
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_millis(10000);
+    loop {
+        let fence = regs.read32(registers::FENCE_VALUE);
+        if fence == target_fence {
+            println!(
+                "FENCE_VALUE reached {fence:#010X} in {} ms",
+                start.elapsed().as_millis()
+            );
+            break;
+        }
+        let status = regs.read32(registers::STATUS);
+        if status & registers::STATUS_ERROR != 0 {
+            let err = regs.read32(registers::ERROR_INFO);
+            return Err(format!(
+                "fetcher error: STATUS={status:#010X} ERROR_INFO={err:#010X}"
+            )
+            .into());
+        }
+        if start.elapsed() > timeout {
+            let head = regs.read32(registers::RING_HEAD);
+            return Err(format!(
+                "timeout waiting for FENCE: got {fence:#010X}, RING_HEAD={head:#X}, \
+                 RING_TAIL={final_tail:#X}, STATUS={status:#010X}"
+            )
+            .into());
+        }
+    }
+
+    let frame_start = std::time::Instant::now();
+    let frame_timeout = std::time::Duration::from_millis(40);
+    loop {
+        if regs.read32(registers::FRAME_COUNT) >= 1 {
+            break;
+        }
+        if frame_start.elapsed() > frame_timeout {
+            return Err("FRAME_COUNT did not reach 1 within 40 ms".into());
+        }
+    }
+
+    regs.write32(registers::CONTROL, 0);
+
+    println!(
+        "M2c3.1: check HDMI — should see a {TEX_W}×{TEX_H} red/yellow \
+         checkerboard centred on a black background"
     );
     Ok(())
 }

@@ -114,3 +114,7 @@ ring-test-menu-core:
 # Run the M2c1 FILL_RECT visual test on the device (look at HDMI)
 draw-test-menu-core:
     ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core draw-test'
+
+# Run the M2c3.1 COPY_RECT visual test on the device (look at HDMI)
+texture-test-menu-core:
+    ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core texture-test'
