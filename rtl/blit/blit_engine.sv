@@ -34,6 +34,7 @@ module blit_engine (
     // Command interface from ring_fetcher.
     input  logic        start_i,
     input  logic        mode_i,           // 0 = FILL, 1 = COPY
+    input  logic [1:0]  blend_i,          // 0 = Opaque, 1 = SrcAlpha, 2 = Additive
     input  logic [15:0] dst_x_i,
     input  logic [15:0] dst_y_i,
     input  logic [15:0] dst_w_i,
@@ -73,12 +74,18 @@ module blit_engine (
     localparam logic FMT_RGBA  = 1'b0;
     localparam logic FMT_A8    = 1'b1;
 
+    localparam logic [1:0] BLEND_OPAQUE   = 2'd0;
+    localparam logic [1:0] BLEND_SRCALPHA = 2'd1;
+    localparam logic [1:0] BLEND_ADDITIVE = 2'd2;
+
     typedef enum logic [3:0] {
         S_IDLE,
         S_ROW_INIT,
         S_NEXT_PIXEL,
         S_FETCH_SRC,
         S_WAIT_SRC,
+        S_FETCH_DST,
+        S_WAIT_DST,
         S_WRITE,
         S_WRITE_WAIT,
         S_DONE
@@ -86,6 +93,7 @@ module blit_engine (
 
     state_e      state;
     logic        mode_q;
+    logic [1:0]  blend_q;
     logic        format_q;
     logic        tint_en_q;
     logic [31:0] tint_color_q;
@@ -99,6 +107,7 @@ module blit_engine (
     logic [31:0] dst_row_byte_addr;
     logic [31:0] src_row_byte_addr;
     logic [31:0] pixel_data;
+    logic [31:0] src_pixel_q;        // computed source pixel held while we fetch dst
 
     assign busy_o = (state != S_IDLE) & (state != S_DONE);
 
@@ -139,6 +148,13 @@ module blit_engine (
         return product[15:8];
     endfunction
 
+    // Saturating 8-bit add (used by Additive blend).
+    function automatic logic [7:0] sat_add8(input logic [7:0] a, input logic [7:0] b);
+        logic [8:0] sum;
+        sum = {1'b0, a} + {1'b0, b};
+        return sum[8] ? 8'hFF : sum[7:0];
+    endfunction
+
     // Compose a 32-bit BGRA-in-memory word from per-channel components.
     // Memory order is B, G, R, A (low to high byte).
     function automatic logic [31:0] pack_pixel(
@@ -169,11 +185,15 @@ module blit_engine (
             S_FETCH_SRC: begin
                 ddram_addr_o     = src_pixel_byte_addr[31:3];
                 ddram_burstcnt_o = 8'd1;
-                // Reads return the full 64-bit beat regardless of BE,
-                // but the slave still wants something sensible asserted.
                 ddram_be_o       = (format_q == FMT_A8)
                                        ? be_for_byte(src_pixel_byte_addr[2:0])
                                        : be_for_word(src_pixel_byte_addr[2]);
+                ddram_rd_o       = 1'b1;
+            end
+            S_FETCH_DST: begin
+                ddram_addr_o     = dst_pixel_byte_addr[31:3];
+                ddram_burstcnt_o = 8'd1;
+                ddram_be_o       = be_for_word(dst_pixel_byte_addr[2]);
                 ddram_rd_o       = 1'b1;
             end
             S_WRITE: begin
@@ -189,11 +209,42 @@ module blit_engine (
         endcase
     end
 
+    // Combinational blend: produces the final pixel given the captured
+    // src pixel (in src_pixel_q) and the just-fetched dst pixel.
+    function automatic logic [31:0] blend_pixel(
+        input logic [31:0] src,
+        input logic [31:0] dst,
+        input logic [1:0]  blend
+    );
+        logic [7:0] inv_a;
+        logic [7:0] r, g, b, a;
+        unique case (blend)
+            BLEND_SRCALPHA: begin
+                inv_a = 8'hFF - ch_a(src);
+                r = ch_r(src) + mul8(ch_r(dst), inv_a);
+                g = ch_g(src) + mul8(ch_g(dst), inv_a);
+                b = ch_b(src) + mul8(ch_b(dst), inv_a);
+                a = ch_a(src) + mul8(ch_a(dst), inv_a);
+                blend_pixel = pack_pixel(r, g, b, a);
+            end
+            BLEND_ADDITIVE: begin
+                blend_pixel = pack_pixel(
+                    sat_add8(ch_r(src), ch_r(dst)),
+                    sat_add8(ch_g(src), ch_g(dst)),
+                    sat_add8(ch_b(src), ch_b(dst)),
+                    sat_add8(ch_a(src), ch_a(dst))
+                );
+            end
+            default: blend_pixel = src;       // Opaque (shouldn't reach here)
+        endcase
+    endfunction
+
     // ---- FSM transitions -------------------------------------------
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state             <= S_IDLE;
             mode_q            <= MODE_FILL;
+            blend_q           <= BLEND_OPAQUE;
             format_q          <= FMT_RGBA;
             tint_en_q         <= 1'b0;
             tint_color_q      <= '0;
@@ -211,6 +262,7 @@ module blit_engine (
             dst_row_byte_addr <= '0;
             src_row_byte_addr <= '0;
             pixel_data        <= '0;
+            src_pixel_q       <= '0;
             done_o            <= 1'b0;
         end else begin
             done_o <= 1'b0;
@@ -218,6 +270,7 @@ module blit_engine (
             unique case (state)
                 S_IDLE: if (start_i) begin
                     mode_q       <= mode_i;
+                    blend_q      <= blend_i;
                     format_q     <= format_i;
                     tint_en_q    <= tint_en_i;
                     tint_color_q <= tint_color_i;
@@ -259,8 +312,16 @@ module blit_engine (
                     end else if (mode_q == MODE_COPY) begin
                         state <= S_FETCH_SRC;
                     end else begin
-                        pixel_data <= color_q;
-                        state      <= S_WRITE;
+                        // FILL mode. For non-Opaque blend, route via
+                        // S_FETCH_DST so the constant src colour mixes
+                        // with the existing destination.
+                        if (blend_q == BLEND_OPAQUE) begin
+                            pixel_data <= color_q;
+                            state      <= S_WRITE;
+                        end else begin
+                            src_pixel_q <= color_q;
+                            state       <= S_FETCH_DST;
+                        end
                     end
                 end
 
@@ -271,10 +332,10 @@ module blit_engine (
                 S_WAIT_SRC: if (ddram_dout_valid_i) begin
                     automatic logic [31:0] src_word;
                     automatic logic [7:0]  sampled_alpha;
+                    automatic logic [31:0] computed_src;
                     if (format_q == FMT_A8) begin
                         sampled_alpha = pick_byte(ddram_dout_i, src_pixel_byte_addr[2:0]);
-                        // Tint always applies for A8 (texture is alpha-only).
-                        pixel_data <= pack_pixel(
+                        computed_src = pack_pixel(
                             mul8(ch_r(tint_color_q), sampled_alpha),
                             mul8(ch_g(tint_color_q), sampled_alpha),
                             mul8(ch_b(tint_color_q), sampled_alpha),
@@ -283,17 +344,35 @@ module blit_engine (
                     end else begin
                         src_word = pick_word(ddram_dout_i, src_pixel_byte_addr[2]);
                         if (tint_en_q) begin
-                            pixel_data <= pack_pixel(
+                            computed_src = pack_pixel(
                                 mul8(ch_r(src_word), ch_r(tint_color_q)),
                                 mul8(ch_g(src_word), ch_g(tint_color_q)),
                                 mul8(ch_b(src_word), ch_b(tint_color_q)),
                                 mul8(ch_a(src_word), ch_a(tint_color_q))
                             );
                         end else begin
-                            pixel_data <= src_word;
+                            computed_src = src_word;
                         end
                     end
-                    state <= S_WRITE;
+
+                    if (blend_q == BLEND_OPAQUE) begin
+                        pixel_data <= computed_src;
+                        state      <= S_WRITE;
+                    end else begin
+                        src_pixel_q <= computed_src;
+                        state       <= S_FETCH_DST;
+                    end
+                end
+
+                S_FETCH_DST: if (~ddram_busy_i) begin
+                    state <= S_WAIT_DST;
+                end
+
+                S_WAIT_DST: if (ddram_dout_valid_i) begin
+                    automatic logic [31:0] dst_word;
+                    dst_word = pick_word(ddram_dout_i, dst_pixel_byte_addr[2]);
+                    pixel_data <= blend_pixel(src_pixel_q, dst_word, blend_q);
+                    state      <= S_WRITE;
                 end
 
                 S_WRITE: if (~ddram_busy_i) begin

@@ -48,6 +48,7 @@ module ring_fetcher (
     // Blit engine dispatch.
     output logic        blit_start_o,
     output logic        blit_mode_o,        // 0 = FILL, 1 = COPY
+    output logic [1:0]  blit_blend_o,       // header.flags[1:0]
     output logic [15:0] blit_dst_x_o,
     output logic [15:0] blit_dst_y_o,
     output logic [15:0] blit_dst_w_o,
@@ -144,6 +145,9 @@ module ring_fetcher (
 
     assign blit_start_o      = (state == S_BLIT_DISPATCH);
     assign blit_mode_o       = is_copy ? MODE_COPY : MODE_FILL;
+    // Blend mode lives in header.flags[1:0] for both FILL_RECT (§5.3
+    // #FILL_RECT) and COPY_RECT (§5.3 #COPY_RECT).
+    assign blit_blend_o      = header_q[1:0];
     assign blit_dst_x_o      = dst_xy_word[31:16];
     assign blit_dst_y_o      = dst_xy_word[15:0];
     assign blit_dst_w_o      = dst_wh_word[31:16];

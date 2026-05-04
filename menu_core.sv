@@ -374,6 +374,7 @@ wire        blit_busy;
 // Blit dispatch from fetcher.
 wire        blit_start;
 wire        blit_mode;
+wire [1:0]  blit_blend;
 wire [15:0] blit_dst_x, blit_dst_y, blit_dst_w, blit_dst_h;
 wire [15:0] blit_src_x, blit_src_y;
 wire [31:0] blit_src_addr, blit_src_pitch;
@@ -403,6 +404,7 @@ ring_fetcher u_ring_fetcher (
 
     .blit_start_o    (blit_start),
     .blit_mode_o     (blit_mode),
+    .blit_blend_o    (blit_blend),
     .blit_dst_x_o    (blit_dst_x),
     .blit_dst_y_o    (blit_dst_y),
     .blit_dst_w_o    (blit_dst_w),
@@ -475,6 +477,7 @@ blit_engine u_blit_engine (
 
     .start_i    (blit_start),
     .mode_i     (blit_mode),
+    .blend_i    (blit_blend),
     .dst_x_i    (blit_dst_x),
     .dst_y_i    (blit_dst_y),
     .dst_w_i    (blit_dst_w),
