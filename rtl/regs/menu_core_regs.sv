@@ -52,6 +52,7 @@ module menu_core_regs (
     output logic [11:0] fb_width_o,
     output logic [11:0] fb_height_o,
     output logic [13:0] fb_stride_o,
+    output logic [31:0] tex_table_addr_o,
 
     // Sideband in: FPGA-driven views.
     input  logic [31:0] ring_head_i,
@@ -84,9 +85,10 @@ module menu_core_regs (
     localparam logic [5:0] IDX_RING_TAIL   = 6'h0F;   // 0x3C / 4
     localparam logic [5:0] IDX_RING_KICK   = 6'h10;   // 0x40 / 4
     localparam logic [5:0] IDX_FENCE_VALUE = 6'h12;   // 0x48 / 4
-    localparam logic [5:0] IDX_FB0_ADDR    = 6'h14;   // 0x50 / 4
-    localparam logic [5:0] IDX_FB1_ADDR    = 6'h15;   // 0x54 / 4
-    localparam logic [5:0] IDX_FB2_ADDR    = 6'h16;   // 0x58 / 4
+    localparam logic [5:0] IDX_FB0_ADDR       = 6'h14;   // 0x50 / 4
+    localparam logic [5:0] IDX_FB1_ADDR       = 6'h15;   // 0x54 / 4
+    localparam logic [5:0] IDX_FB2_ADDR       = 6'h16;   // 0x58 / 4
+    localparam logic [5:0] IDX_TEX_TABLE_ADDR = 6'h18;   // 0x60 / 4
 
     // The LW_H2F window is 2 MiB (21-bit address). Our register block
     // sits at host physical 0xFF210000, which is offset 0x10000 within
@@ -192,9 +194,10 @@ module menu_core_regs (
     assign fb0_addr_o    = scratch[IDX_FB0_ADDR];
     assign fb1_addr_o    = scratch[IDX_FB1_ADDR];
     assign fb2_addr_o    = scratch[IDX_FB2_ADDR];
-    assign fb_width_o    = scratch[IDX_FB_WIDTH][11:0];
-    assign fb_height_o   = scratch[IDX_FB_HEIGHT][11:0];
-    assign fb_stride_o   = scratch[IDX_FB_STRIDE][13:0];
+    assign fb_width_o      = scratch[IDX_FB_WIDTH][11:0];
+    assign fb_height_o     = scratch[IDX_FB_HEIGHT][11:0];
+    assign fb_stride_o     = scratch[IDX_FB_STRIDE][13:0];
+    assign tex_table_addr_o = scratch[IDX_TEX_TABLE_ADDR];
 
     // Suppress unused-input warnings.
     wire _unused = &{1'b0, req_read, 1'b0};

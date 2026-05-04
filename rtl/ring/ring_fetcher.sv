@@ -1,31 +1,28 @@
 //============================================================================
 //
-//  Command ring fetcher (M2b + M2c1).
+//  Command ring fetcher (M2b + M2c1 + M2c3.1).
 //
-//  Single-producer/single-consumer ring per PROTOCOL.md §4. The host
-//  writes commands at byte offset RING_TAIL within a ring of RING_SIZE
-//  bytes anchored at RING_BASE (HPS-physical, must lie inside the
-//  reserved DDR3 carve-out at 0x3000_0000). We retire commands in
-//  order, advancing RING_HEAD as we go.
+//  SPSC ring per PROTOCOL.md §4. We retire commands in order, advancing
+//  RING_HEAD as we go.
 //
 //  Supported opcodes:
 //    NOP       (0x00) — advance HEAD by 4 + length_w*4
-//    PRESENT   (0x01) — bump FRAME_COUNT, advance HEAD
+//    PRESENT   (0x01) — pulse fb_swapper, advance HEAD
 //    FENCE     (0x02) — fetch 1 arg word, write to FENCE_VALUE
-//    FILL_RECT (0x10) — fetch 3 arg words, dispatch to blit engine
+//    FILL_RECT (0x10) — fetch 3 arg words, dispatch blit (FILL mode)
+//    COPY_RECT (0x11) — fetch 5 arg words + 4 descriptor words at
+//                       TEX_TABLE_ADDR + tex_id * 32, dispatch blit
+//                       (COPY mode). M2c3.1 supports the simplest
+//                       sub-form only: 1:1 scale, RGBA8888, opaque
+//                       blend, no tint. Tint flag is ignored if set.
 //
-//  Drawing opcodes other than FILL_RECT (COPY_RECT, SET_CLIP,
-//  CLEAR_CLIP) trip ERR_UNKNOWN_OPCODE and halt; M2c2+ adds them.
+//  SET_CLIP / CLEAR_CLIP and unrecognised opcodes trip
+//  ERR_UNKNOWN_OPCODE and halt; M2c2+ adds them.
 //
 //  Address mapping for DDRAM_*:
 //    DDRAM_ADDR = byte_addr >> 3  (29-bit word-address, 8-byte beats)
-//    DDRAM_BE   = 8'b1111_0000  if byte_addr[2] = 1  (upper word)
-//                 8'b0000_1111  if byte_addr[2] = 0  (lower word)
-//    DDRAM_DOUT[31:0]  is the lower-half word
-//    DDRAM_DOUT[63:32] is the upper-half word
-//
-//  One 4-byte command word per DDR3 transaction: simple, slow but
-//  unambiguously correct. Bursting is M2c5+ work.
+//    DDRAM_BE   selects upper or lower 4 bytes of the 64-bit beat
+//    one 4-byte command word per DDR3 transaction (no bursting yet)
 //
 //============================================================================
 
@@ -34,30 +31,35 @@ module ring_fetcher (
     input  logic        rst_n,
 
     // Sideband to the register file.
-    input  logic        enable_i,         // CONTROL.EN
-    input  logic [31:0] ring_base_i,      // RING_BASE
-    input  logic [31:0] ring_size_i,      // RING_SIZE (power of 2)
-    input  logic [31:0] ring_tail_i,      // RING_TAIL
-    output logic [31:0] ring_head_o,      // RING_HEAD (visible to host)
-    output logic [31:0] fence_value_o,    // FENCE_VALUE
-    output logic [31:0] error_info_o,     // ERROR_INFO
-    output logic        status_busy_o,    // STATUS.BZ
-    output logic        status_error_o,   // STATUS.ER
+    input  logic        enable_i,
+    input  logic [31:0] ring_base_i,
+    input  logic [31:0] ring_size_i,
+    input  logic [31:0] ring_tail_i,
+    input  logic [31:0] tex_table_addr_i,
+    output logic [31:0] ring_head_o,
+    output logic [31:0] fence_value_o,
+    output logic [31:0] error_info_o,
+    output logic        status_busy_o,
+    output logic        status_error_o,
 
-    // Triple-buffer dispatch — pulses for one cycle when retiring PRESENT.
+    // Triple-buffer dispatch.
     output logic        present_pulse_o,
 
     // Blit engine dispatch.
     output logic        blit_start_o,
+    output logic        blit_mode_o,        // 0 = FILL, 1 = COPY
     output logic [15:0] blit_dst_x_o,
     output logic [15:0] blit_dst_y_o,
     output logic [15:0] blit_dst_w_o,
     output logic [15:0] blit_dst_h_o,
     output logic [31:0] blit_color_o,
+    output logic [15:0] blit_src_x_o,
+    output logic [15:0] blit_src_y_o,
+    output logic [31:0] blit_src_addr_o,
+    output logic [31:0] blit_src_pitch_o,
     input  logic        blit_done_i,
 
-    // DDRAM_* read-master interface (the top-level mux owns the actual
-    // DDRAM_* pins; the blit engine drives them while busy).
+    // DDRAM_* read-master interface.
     output logic [28:0] ddram_addr_o,
     output logic [7:0]  ddram_burstcnt_o,
     output logic [7:0]  ddram_be_o,
@@ -72,11 +74,15 @@ module ring_fetcher (
     localparam logic [7:0] OP_PRESENT   = 8'h01;
     localparam logic [7:0] OP_FENCE     = 8'h02;
     localparam logic [7:0] OP_FILL_RECT = 8'h10;
+    localparam logic [7:0] OP_COPY_RECT = 8'h11;
 
     // ---- Error codes (PROTOCOL.md §8.1) ------------------------------
-    localparam logic [7:0] ERR_UNKNOWN_OPCODE  = 8'h01;
+    localparam logic [7:0] ERR_UNKNOWN_OPCODE = 8'h01;
 
-    // ---- FSM ---------------------------------------------------------
+    // ---- Blit modes (matches blit_engine.sv) -------------------------
+    localparam logic MODE_FILL = 1'b0;
+    localparam logic MODE_COPY = 1'b1;
+
     typedef enum logic [3:0] {
         S_IDLE,
         S_FETCH_HEADER,
@@ -84,6 +90,8 @@ module ring_fetcher (
         S_DECODE,
         S_FETCH_ARG,
         S_WAIT_ARG,
+        S_FETCH_DESC,
+        S_WAIT_DESC,
         S_BLIT_DISPATCH,
         S_BLIT_WAIT,
         S_RETIRE,
@@ -93,14 +101,16 @@ module ring_fetcher (
     state_e      state;
     logic [31:0] head_q;
     logic [31:0] header_q;
-    logic [31:0] arg_q [0:2];        // up to 3 arg words (FILL_RECT)
-    logic [1:0]  arg_idx;            // current arg being fetched (0..2)
-    logic [1:0]  arg_total;          // number of args needed (1 for FENCE, 3 for FILL_RECT)
+    logic [31:0] arg_q  [0:4];       // up to 5 arg words (COPY_RECT no tint)
+    logic [31:0] desc_q [0:3];       // 4 descriptor words for COPY_RECT
+    logic [2:0]  arg_idx;
+    logic [2:0]  arg_total;
+    logic [1:0]  desc_idx;
     logic [31:0] fetch_addr;
     logic [31:0] retire_advance;
     logic [31:0] fence_value_q;
     logic [31:0] error_info_q;
-    logic [7:0]  pending_opcode;     // latched at S_DECODE for the dispatch decision
+    logic [7:0]  pending_opcode;
 
     wire [31:0] head_mask = ring_size_i - 32'd1;
 
@@ -114,21 +124,35 @@ module ring_fetcher (
     endfunction
 
     // ---- Combinational outputs ---------------------------------------
-    assign ring_head_o    = head_q;
-    assign fence_value_o  = fence_value_q;
-    assign error_info_o   = error_info_q;
-    assign status_busy_o  = (state != S_IDLE) & (state != S_HALT);
-    assign status_error_o = (state == S_HALT);
+    assign ring_head_o     = head_q;
+    assign fence_value_o   = fence_value_q;
+    assign error_info_o    = error_info_q;
+    assign status_busy_o   = (state != S_IDLE) & (state != S_HALT);
+    assign status_error_o  = (state == S_HALT);
     assign present_pulse_o = (state == S_RETIRE) & (pending_opcode == OP_PRESENT);
 
-    // Blit engine dispatch outputs are valid only during S_BLIT_DISPATCH;
-    // start_o is asserted for one cycle as we transition to S_BLIT_WAIT.
-    assign blit_start_o = (state == S_BLIT_DISPATCH);
-    assign blit_dst_x_o = arg_q[0][31:16];
-    assign blit_dst_y_o = arg_q[0][15:0];
-    assign blit_dst_w_o = arg_q[1][31:16];
-    assign blit_dst_h_o = arg_q[1][15:0];
-    assign blit_color_o = arg_q[2];
+    // Argument layouts diverge between FILL_RECT and COPY_RECT:
+    //   FILL: arg[0]=dst.xy, arg[1]=dst.wh, arg[2]=color
+    //   COPY: arg[0]=tex_id, arg[1]=src.xy, arg[2]=src.wh,
+    //         arg[3]=dst.xy, arg[4]=dst.wh
+    wire is_copy = (pending_opcode == OP_COPY_RECT);
+    wire [31:0] dst_xy_word = is_copy ? arg_q[3] : arg_q[0];
+    wire [31:0] dst_wh_word = is_copy ? arg_q[4] : arg_q[1];
+
+    assign blit_start_o     = (state == S_BLIT_DISPATCH);
+    assign blit_mode_o      = is_copy ? MODE_COPY : MODE_FILL;
+    assign blit_dst_x_o     = dst_xy_word[31:16];
+    assign blit_dst_y_o     = dst_xy_word[15:0];
+    assign blit_dst_w_o     = dst_wh_word[31:16];
+    assign blit_dst_h_o     = dst_wh_word[15:0];
+    assign blit_color_o     = arg_q[2];      // only meaningful for FILL
+    assign blit_src_x_o     = arg_q[1][31:16];
+    assign blit_src_y_o     = arg_q[1][15:0];
+    assign blit_src_addr_o  = desc_q[0];     // descriptor §6.1: data_addr
+    assign blit_src_pitch_o = desc_q[1];     // descriptor §6.1: pitch_bytes
+
+    // Texture descriptor base = tex_table_addr + tex_id * 32.
+    wire [31:0] desc_base = tex_table_addr_i + (arg_q[0] <<< 5);
 
     // ---- FSM transitions ---------------------------------------------
     integer i;
@@ -137,9 +161,11 @@ module ring_fetcher (
             state          <= S_IDLE;
             head_q         <= 32'd0;
             header_q       <= 32'd0;
-            for (i = 0; i < 3; i = i + 1) arg_q[i] <= 32'd0;
-            arg_idx        <= 2'd0;
-            arg_total      <= 2'd0;
+            for (i = 0; i < 5; i = i + 1) arg_q[i]  <= 32'd0;
+            for (i = 0; i < 4; i = i + 1) desc_q[i] <= 32'd0;
+            arg_idx        <= 3'd0;
+            arg_total      <= 3'd0;
+            desc_idx       <= 2'd0;
             fetch_addr     <= 32'd0;
             retire_advance <= 32'd0;
             fence_value_q  <= 32'd0;
@@ -179,20 +205,26 @@ module ring_fetcher (
                     automatic logic [7:0] len_w  = header_q[23:16];
                     retire_advance <= 32'd4 + (32'(len_w) <<< 2);
                     pending_opcode <= opcode;
-                    arg_idx        <= 2'd0;
+                    arg_idx        <= 3'd0;
+                    desc_idx       <= 2'd0;
 
                     unique case (opcode)
                         OP_NOP, OP_PRESENT: begin
-                            arg_total <= 2'd0;
+                            arg_total <= 3'd0;
                             state     <= S_RETIRE;
                         end
                         OP_FENCE: begin
-                            arg_total  <= 2'd1;
+                            arg_total  <= 3'd1;
                             fetch_addr <= fetch_addr + 32'd4;
                             state      <= S_FETCH_ARG;
                         end
                         OP_FILL_RECT: begin
-                            arg_total  <= 2'd3;
+                            arg_total  <= 3'd3;
+                            fetch_addr <= fetch_addr + 32'd4;
+                            state      <= S_FETCH_ARG;
+                        end
+                        OP_COPY_RECT: begin
+                            arg_total  <= 3'd5;
                             fetch_addr <= fetch_addr + 32'd4;
                             state      <= S_FETCH_ARG;
                         end
@@ -213,35 +245,56 @@ module ring_fetcher (
 
                 S_WAIT_ARG: if (ddram_dout_valid_i) begin
                     arg_q[arg_idx] <= pick_word(ddram_dout_i, fetch_addr[2]);
-                    if (arg_idx + 2'd1 == arg_total) begin
-                        // All args fetched — dispatch.
-                        if (pending_opcode == OP_FILL_RECT) begin
-                            state <= S_BLIT_DISPATCH;
-                        end else begin
-                            state <= S_RETIRE;
-                        end
+                    if (arg_idx + 3'd1 == arg_total) begin
+                        // All args fetched. COPY_RECT also needs the
+                        // texture descriptor; everything else dispatches
+                        // straight to retire / blit.
+                        unique case (pending_opcode)
+                            OP_FILL_RECT: state <= S_BLIT_DISPATCH;
+                            OP_COPY_RECT: begin
+                                // desc_base uses arg_q[0] = tex_id.
+                                // arg_q[0] was just written this cycle
+                                // (non-blocking) so its new value isn't
+                                // visible until next cycle; transition
+                                // to S_FETCH_DESC and let it pick up
+                                // the address combinationally.
+                                state <= S_FETCH_DESC;
+                            end
+                            default: state <= S_RETIRE;
+                        endcase
                     end else begin
-                        arg_idx    <= arg_idx + 2'd1;
+                        arg_idx    <= arg_idx + 3'd1;
                         fetch_addr <= fetch_addr + 32'd4;
                         state      <= S_FETCH_ARG;
                     end
                 end
 
-                S_BLIT_DISPATCH: begin
-                    // Pulse blit_start_o (combinational) and move on.
-                    state <= S_BLIT_WAIT;
+                S_FETCH_DESC: begin
+                    automatic logic [31:0] desc_word_addr =
+                        desc_base + ({30'd0, desc_idx} <<< 2);
+                    fetch_addr       <= desc_word_addr;
+                    ddram_addr_o     <= desc_word_addr[31:3];
+                    ddram_burstcnt_o <= 8'd1;
+                    ddram_be_o       <= be_for(desc_word_addr[2]);
+                    ddram_rd_o       <= 1'b1;
+                    if (~ddram_busy_i) state <= S_WAIT_DESC;
                 end
 
-                S_BLIT_WAIT: if (blit_done_i) begin
-                    state <= S_RETIRE;
+                S_WAIT_DESC: if (ddram_dout_valid_i) begin
+                    desc_q[desc_idx] <= pick_word(ddram_dout_i, fetch_addr[2]);
+                    if (desc_idx == 2'd3) begin
+                        state <= S_BLIT_DISPATCH;
+                    end else begin
+                        desc_idx <= desc_idx + 2'd1;
+                        state    <= S_FETCH_DESC;
+                    end
                 end
+
+                S_BLIT_DISPATCH: state <= S_BLIT_WAIT;
+
+                S_BLIT_WAIT: if (blit_done_i) state <= S_RETIRE;
 
                 S_RETIRE: begin
-                    // PRESENT: present_pulse_o pulses combinationally based
-                    // on (state == S_RETIRE) & (pending_opcode == OP_PRESENT)
-                    // — fb_swapper consumes it. FRAME_COUNT now lives in the
-                    // swapper and increments on the vsync that actually does
-                    // the swap, not at PRESENT retire time.
                     unique case (pending_opcode)
                         OP_FENCE: fence_value_q <= arg_q[0];
                         default:  ;
@@ -251,9 +304,7 @@ module ring_fetcher (
                     state  <= S_IDLE;
                 end
 
-                S_HALT: begin
-                    // Stay halted until host clears the error via CONTROL.CE.
-                end
+                S_HALT: ;
 
             endcase
         end

@@ -287,6 +287,7 @@ wire [31:0] reg_fb2_addr;
 wire [11:0] reg_fb_width;
 wire [11:0] reg_fb_height;
 wire [13:0] reg_fb_stride;
+wire [31:0] reg_tex_table_addr;
 wire [31:0] fetcher_ring_head;
 wire [31:0] fetcher_fence_value;
 wire [31:0] fetcher_error_info;
@@ -340,6 +341,7 @@ menu_core_regs u_menu_core_regs (
     .fb_width_o     (reg_fb_width),
     .fb_height_o    (reg_fb_height),
     .fb_stride_o    (reg_fb_stride),
+    .tex_table_addr_o (reg_tex_table_addr),
 
     .ring_head_i    (fetcher_ring_head),
     .fence_value_i  (fetcher_fence_value),
@@ -359,17 +361,22 @@ wire [7:0]  fetch_burstcnt;
 wire [7:0]  fetch_be;
 wire        fetch_rd;
 
-// Blit engine's write-side DDRAM signals.
+// Blit engine's DDRAM signals (now both read + write since COPY_RECT
+// reads source pixels through this same port).
 wire [28:0] blit_addr;
 wire [7:0]  blit_burstcnt;
 wire [7:0]  blit_be;
 wire [63:0] blit_din;
 wire        blit_we;
+wire        blit_rd;
 wire        blit_busy;
 
 // Blit dispatch from fetcher.
 wire        blit_start;
+wire        blit_mode;
 wire [15:0] blit_dst_x, blit_dst_y, blit_dst_w, blit_dst_h;
+wire [15:0] blit_src_x, blit_src_y;
+wire [31:0] blit_src_addr, blit_src_pitch;
 wire [31:0] blit_color;
 wire        blit_done;
 
@@ -389,12 +396,19 @@ ring_fetcher u_ring_fetcher (
 
     .present_pulse_o (fetcher_present_pulse),
 
+    .tex_table_addr_i (reg_tex_table_addr),
+
     .blit_start_o    (blit_start),
+    .blit_mode_o     (blit_mode),
     .blit_dst_x_o    (blit_dst_x),
     .blit_dst_y_o    (blit_dst_y),
     .blit_dst_w_o    (blit_dst_w),
     .blit_dst_h_o    (blit_dst_h),
     .blit_color_o    (blit_color),
+    .blit_src_x_o    (blit_src_x),
+    .blit_src_y_o    (blit_src_y),
+    .blit_src_addr_o (blit_src_addr),
+    .blit_src_pitch_o(blit_src_pitch),
     .blit_done_i     (blit_done),
 
     .ddram_addr_o       (fetch_addr),
@@ -454,11 +468,16 @@ blit_engine u_blit_engine (
     .rst_n      (fetcher_rst_n),
 
     .start_i    (blit_start),
+    .mode_i     (blit_mode),
     .dst_x_i    (blit_dst_x),
     .dst_y_i    (blit_dst_y),
     .dst_w_i    (blit_dst_w),
     .dst_h_i    (blit_dst_h),
     .color_i    (blit_color),
+    .src_x_i    (blit_src_x),
+    .src_y_i    (blit_src_y),
+    .src_addr_i (blit_src_addr),
+    .src_pitch_i(blit_src_pitch),
 
     .fb_base_i  (blit_fb_base),
     .fb_stride_i(reg_fb_stride),
@@ -466,12 +485,15 @@ blit_engine u_blit_engine (
     .busy_o     (blit_busy),
     .done_o     (blit_done),
 
-    .ddram_addr_o     (blit_addr),
-    .ddram_burstcnt_o (blit_burstcnt),
-    .ddram_be_o       (blit_be),
-    .ddram_din_o      (blit_din),
-    .ddram_we_o       (blit_we),
-    .ddram_busy_i     (DDRAM_BUSY)
+    .ddram_addr_o       (blit_addr),
+    .ddram_burstcnt_o   (blit_burstcnt),
+    .ddram_be_o         (blit_be),
+    .ddram_din_o        (blit_din),
+    .ddram_we_o         (blit_we),
+    .ddram_rd_o         (blit_rd),
+    .ddram_busy_i       (DDRAM_BUSY),
+    .ddram_dout_i       (DDRAM_DOUT),
+    .ddram_dout_valid_i (DDRAM_DOUT_READY)
 );
 
 // DDRAM_* mux: blit engine owns the bus while it's busy (writes only),
@@ -481,8 +503,13 @@ assign DDRAM_ADDR     = blit_busy ? blit_addr     : fetch_addr;
 assign DDRAM_BURSTCNT = blit_busy ? blit_burstcnt : fetch_burstcnt;
 assign DDRAM_BE       = blit_busy ? blit_be       : fetch_be;
 assign DDRAM_DIN      = blit_busy ? blit_din      : 64'd0;
-assign DDRAM_RD       = blit_busy ? 1'b0          : fetch_rd;
+assign DDRAM_RD       = blit_busy ? blit_rd       : fetch_rd;
 assign DDRAM_WE       = blit_busy ? blit_we       : 1'b0;
+// DDRAM_DOUT / DDRAM_DOUT_READY are routed in parallel to both the
+// fetcher and the blit_engine read paths. Only one is actively waiting
+// for a response at any time (fetcher when blit_busy=0, blit when
+// blit_busy=1), so the unintended consumer just doesn't sample the
+// signal.
 
 // reg_ring_kick is currently advisory — the fetcher polls RING_TAIL
 // every cycle anyway. Wire-suppress to avoid unused warnings until
