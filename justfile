@@ -122,3 +122,7 @@ texture-test-menu-core:
 # Run the M2c3.2 A8 + tint visual test on the device (look at HDMI)
 a8-test-menu-core:
     ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core a8-test'
+
+# Run the M2c3.3 SrcAlpha blend visual test on the device (look at HDMI)
+blend-test-menu-core:
+    ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core blend-test'
