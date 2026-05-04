@@ -63,12 +63,6 @@ pub struct Flags {
     #[clap(long, value_parser = parse_u32_hex_or_dec)]
     pub base_addr: Option<u32>,
 
-    /// Optional path to an .rbf bitstream to program into the FPGA
-    /// before running the test. Equivalent to MiSTer userspace's core
-    /// load step — saves the manual rename + reboot when iterating.
-    #[clap(long)]
-    pub rbf: Option<std::path::PathBuf>,
-
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -164,16 +158,6 @@ fn main() {
     if opts.print_layout {
         print_layout(base);
         return;
-    }
-
-    // Optional FPGA programming step before the test runs. Mirrors
-    // what MiSTer's userspace does at boot when loading a core; lets
-    // us iterate without rebooting between bitstream changes.
-    if let Some(rbf_path) = &opts.rbf {
-        if let Err(e) = load_rbf(rbf_path) {
-            tracing::error!("failed to load RBF {}: {e}", rbf_path.display());
-            std::process::exit(1);
-        }
     }
 
     match opts.command {
@@ -372,21 +356,6 @@ fn print_layout(base: u32) {
         protocol::FB_WIDTH,
         protocol::FB_HEIGHT
     );
-}
-
-fn load_rbf(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| format!("read {}: {e}", path.display()))?;
-    info!("Loading RBF: {} ({} bytes)", path.display(), bytes.len());
-    let mut fpga = mister_fpga::fpga::MisterFpga::init()
-        .map_err(|e| format!("FPGA init: {e}"))?;
-    fpga.load(bytes.as_slice())
-        .map_err(|e| format!("FPGA load: {e:?}"))?;
-    // Brief settle after programming so the bridge / framework state
-    // stabilises before we start banging on registers.
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    info!("RBF loaded");
-    Ok(())
 }
 
 fn humanize(bytes: usize) -> String {
