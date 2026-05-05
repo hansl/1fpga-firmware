@@ -24,15 +24,13 @@ use menu_core_host::protocol::{self, BlendMode, Rect, Rgba, TextureFormat, regis
 use menu_core_host::texture::TextureSpec;
 use menu_core_host::{device, mem};
 
-// `cyclone_v` is not directly used by this binary anymore (the runtime
-// owns mmap), but `unused_crate_dependencies` is workspace-wide and the
-// crate stays in `Cargo.toml` for the package's library to re-export.
+// Crates the binary itself doesn't reference, but the package depends
+// on for the lib (`text`) or for the sibling `menu_demo` binary. The
+// workspace lint is enabled per-target, so we declare them here.
+use ctrlc as _;
 use cyclone_v as _;
-// Same for `thiserror`.
-use thiserror as _;
-// `fontdue` is used by `menu_core::text`; the binary reaches it through
-// that path, so the crate dep is alive transitively.
 use fontdue as _;
+use thiserror as _;
 #[cfg(test)]
 use pretty_assertions as _;
 

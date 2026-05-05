@@ -103,6 +103,21 @@ build-menu-core-host mode="release-dev":
 deploy-menu-core-host mode="release-dev": (build-menu-core-host mode)
     scp target/armv7-unknown-linux-musleabihf/{{mode}}/one_fpga_menu_core root@{{mister_ip}}:/media/fat/one_fpga_menu_core
 
+# Cross-compile the menu-core demo binary (bouncing-rect animation)
+build-menu-demo mode="release-dev":
+    docker run --rm -t \
+        -v "{{justfile_directory()}}":/home/rust/src \
+        messense/rust-musl-cross:armv7-musleabihf \
+        cargo build --target armv7-unknown-linux-musleabihf --bin menu_demo --profile {{mode}} --no-default-features --features=platform_de10
+
+# Deploy the menu-core demo binary to the device
+deploy-menu-demo mode="release-dev": (build-menu-demo mode)
+    scp target/armv7-unknown-linux-musleabihf/{{mode}}/menu_demo root@{{mister_ip}}:/media/fat/menu_demo
+
+# Run the menu-core demo on the device (animation loop; Ctrl+C to stop)
+demo-menu-core:
+    ssh -t root@{{mister_ip}} '/media/fat/menu_demo'
+
 # Run the probe on the device (assumes the menu-core .rbf is loaded and the binary is deployed)
 probe-menu-core:
     ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core probe'
