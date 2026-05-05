@@ -67,6 +67,18 @@ pub fn register(loader: &MapModuleLoader, context: &mut Context) -> JsResult<()>
             NativeFunction::from_fn_ptr(append_child),
         ),
         (
+            js_string!("insertBefore"),
+            NativeFunction::from_fn_ptr(insert_before),
+        ),
+        (
+            js_string!("removeChild"),
+            NativeFunction::from_fn_ptr(remove_child),
+        ),
+        (
+            js_string!("commitUpdate"),
+            NativeFunction::from_fn_ptr(commit_update),
+        ),
+        (
             js_string!("setStyle"),
             NativeFunction::from_fn_ptr(set_style),
         ),
@@ -113,6 +125,41 @@ fn append_child(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
     let child = NodeId(args.get_or_undefined(1).to_u32(context)?);
     let state = ui_state(context)?;
     state.with_tree_mut(|t| t.append_child(parent, child));
+    Ok(JsValue::undefined())
+}
+
+fn insert_before(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let parent = NodeId(args.get_or_undefined(0).to_u32(context)?);
+    let child = NodeId(args.get_or_undefined(1).to_u32(context)?);
+    let before = NodeId(args.get_or_undefined(2).to_u32(context)?);
+    let state = ui_state(context)?;
+    state.with_tree_mut(|t| t.insert_before(parent, child, before));
+    Ok(JsValue::undefined())
+}
+
+fn remove_child(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let parent = NodeId(args.get_or_undefined(0).to_u32(context)?);
+    let child = NodeId(args.get_or_undefined(1).to_u32(context)?);
+    let state = ui_state(context)?;
+    // react-reconciler expects the subtree to be detached and its
+    // resources released. We fully drop the node + descendants to
+    // free vdom slots; if React later remounts via a fresh
+    // createInstance, that's a new id.
+    state.with_tree_mut(|t| {
+        t.detach_child(parent, child);
+        t.remove(child);
+    });
+    Ok(JsValue::undefined())
+}
+
+/// Replace the entire props of a node. Currently equivalent to
+/// `setStyle` for the supported property surface; will diverge once
+/// non-style props (event handlers, refs) land.
+fn commit_update(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let id = NodeId(args.get_or_undefined(0).to_u32(context)?);
+    let style = parse_style_arg(args.get_or_undefined(1), context)?;
+    let state = ui_state(context)?;
+    state.with_tree_mut(|t| t.set_style(id, style));
     Ok(JsValue::undefined())
 }
 

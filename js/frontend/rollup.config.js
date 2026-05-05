@@ -23,20 +23,8 @@ const gitRev = child_process
   .trim()
   .replace(/^.*\//, '');
 
-export default {
-  input: {
-    main: 'src/main.ts',
-    menu_ui: 'src/menu-ui/index.ts',
-  },
-  output: {
-    dir: 'dist/',
-    format: 'es',
-    sourcemap: !production,
-    hoistTransitiveImports: false,
-    entryFileNames: '[name].js',
-  },
-  plugins: [
-    del({ targets: 'dist/*' }),
+function commonPlugins() {
+  return [
     codegen(),
     dbMigrations(),
     nodeResolve({
@@ -59,7 +47,6 @@ export default {
       extensions: ['.js', '.ts', '.cjs'],
       transformMixedEsModules: true,
     }),
-    // Remove tagged template in production only.
     ...(production
       ? [
           transformTaggedTemplate({
@@ -74,38 +61,66 @@ export default {
           transformCommonTags('stripIndents'),
         ]
       : []),
-    [
-      ...(production
-        ? [
-            terser({
-              compress: {
-                arguments: true,
-                ecma: 2020,
-                module: true,
-                passes: 2,
-                pure_new: true,
-                unsafe: true,
-                unsafe_arrows: true,
-                unsafe_comps: true,
-                unsafe_math: true,
-              },
+    ...(production
+      ? [
+          terser({
+            compress: {
+              arguments: true,
               ecma: 2020,
-              mangle: true,
-            }),
-          ]
-        : []),
-    ],
-  ],
-  external: [/^1fpga:/],
-  onLog(level, log, handler) {
-    if (log.code === 'CIRCULAR_DEPENDENCY') {
-      // Show as warning.
-      handler('warn', log);
-    } else if (level === 'warn') {
-      // Warnings are errors.
-      handler('error', log);
-    } else {
-      handler(level, log);
-    }
-  },
+              module: true,
+              passes: 2,
+              pure_new: true,
+              unsafe: true,
+              unsafe_arrows: true,
+              unsafe_comps: true,
+              unsafe_math: true,
+            },
+            ecma: 2020,
+            mangle: true,
+          }),
+        ]
+      : []),
+  ];
+}
+
+const onLog = (level, log, handler) => {
+  if (log.code === 'CIRCULAR_DEPENDENCY') {
+    handler('warn', log);
+  } else if (level === 'warn') {
+    handler('error', log);
+  } else {
+    handler(level, log);
+  }
 };
+
+// Two independent Rollup configs so each entry produces a fully
+// self-contained ESM bundle (no shared chunks). The menu-ui runtime
+// loads its bundle as a single file via `--bundle <path>`, so any
+// chunked output would break at load time.
+export default [
+  {
+    input: { main: 'src/main.ts' },
+    output: {
+      dir: 'dist/',
+      format: 'es',
+      sourcemap: !production,
+      hoistTransitiveImports: false,
+      entryFileNames: '[name].js',
+    },
+    plugins: [del({ targets: 'dist/*' }), ...commonPlugins()],
+    external: [/^1fpga:/],
+    onLog,
+  },
+  {
+    input: 'src/menu-ui/index.tsx',
+    output: {
+      file: 'dist/menu_ui.js',
+      format: 'es',
+      sourcemap: !production,
+      inlineDynamicImports: true,
+    },
+    plugins: commonPlugins(),
+    external: [/^1fpga:/],
+    onLog,
+  },
+];

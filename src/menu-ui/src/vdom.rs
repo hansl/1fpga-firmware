@@ -110,15 +110,7 @@ impl Tree {
         if parent == NodeId::NONE || child == NodeId::NONE {
             return;
         }
-        // Detach from previous parent.
-        let prev_parent = self.nodes[child.0 as usize]
-            .as_ref()
-            .map(|n| n.parent)
-            .unwrap_or(NodeId::NONE);
-        if prev_parent != NodeId::NONE
-            && let Some(p) = self.nodes[prev_parent.0 as usize].as_mut() {
-            p.children.retain(|&c| c != child);
-        }
+        self.detach_from_parent(child);
         if let Some(c) = self.nodes[child.0 as usize].as_mut() {
             c.parent = parent;
         }
@@ -126,6 +118,57 @@ impl Tree {
             p.children.push(child);
         }
         self.dirty = true;
+    }
+
+    /// Insert `child` into `parent`'s children list immediately before
+    /// `before`. If `before` is not a child of `parent`, the call is a
+    /// no-op (matches the `insertBefore` semantics react-reconciler
+    /// expects when a sibling has already been removed).
+    pub fn insert_before(&mut self, parent: NodeId, child: NodeId, before: NodeId) {
+        if parent == NodeId::NONE || child == NodeId::NONE {
+            return;
+        }
+        self.detach_from_parent(child);
+        if let Some(c) = self.nodes[child.0 as usize].as_mut() {
+            c.parent = parent;
+        }
+        if let Some(p) = self.nodes[parent.0 as usize].as_mut() {
+            match p.children.iter().position(|&c| c == before) {
+                Some(idx) => p.children.insert(idx, child),
+                None => p.children.push(child),
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Detach `child` from `parent`'s children list without recursively
+    /// removing the subtree. The child becomes orphaned (parent =
+    /// NONE) but its descendants remain. Used by react-reconciler's
+    /// `removeChild` which expects the node and its subtree to be
+    /// re-mountable later.
+    pub fn detach_child(&mut self, parent: NodeId, child: NodeId) {
+        if parent == NodeId::NONE || child == NodeId::NONE {
+            return;
+        }
+        if let Some(p) = self.nodes[parent.0 as usize].as_mut() {
+            p.children.retain(|&c| c != child);
+        }
+        if let Some(c) = self.nodes[child.0 as usize].as_mut() {
+            c.parent = NodeId::NONE;
+        }
+        self.dirty = true;
+    }
+
+    fn detach_from_parent(&mut self, child: NodeId) {
+        let prev_parent = self.nodes[child.0 as usize]
+            .as_ref()
+            .map(|n| n.parent)
+            .unwrap_or(NodeId::NONE);
+        if prev_parent != NodeId::NONE
+            && let Some(p) = self.nodes[prev_parent.0 as usize].as_mut()
+        {
+            p.children.retain(|&c| c != child);
+        }
     }
 
     pub fn set_style(&mut self, id: NodeId, style: Style) {

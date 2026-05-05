@@ -9,6 +9,8 @@
       "codegen"
     ],
     "lib": [],
+    "jsx": "react-jsx",
+    "jsxImportSource": "react",
     "strict": true,
     "resolveJsonModule": true,
     "esModuleInterop": true,

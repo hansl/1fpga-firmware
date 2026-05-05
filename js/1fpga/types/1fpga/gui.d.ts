@@ -37,10 +37,29 @@ declare module '1fpga:gui' {
    */
   export function createInstance(type: 'div', props?: Props): NodeId;
 
-  /** Append `child` to `parent`'s children list. */
+  /** Append `child` to the end of `parent`'s children list. */
   export function appendChild(parent: NodeId, child: NodeId): void;
 
-  /** Replace `node`'s style with `style`. */
+  /**
+   * Insert `child` into `parent`'s children list immediately before
+   * `before`. If `before` is no longer a child of `parent`, falls
+   * back to appending.
+   */
+  export function insertBefore(parent: NodeId, child: NodeId, before: NodeId): void;
+
+  /**
+   * Detach `child` from `parent` and recursively free the subtree.
+   * Existing NodeIds for the removed subtree become invalid.
+   */
+  export function removeChild(parent: NodeId, child: NodeId): void;
+
+  /**
+   * Replace the props (currently style only) on an existing node.
+   * Used by react-reconciler on every commit.
+   */
+  export function commitUpdate(node: NodeId, props: Props): void;
+
+  /** Replace `node`'s style. Equivalent to `commitUpdate(node, { style })`. */
   export function setStyle(node: NodeId, style: Style): void;
 
   /**
