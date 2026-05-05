@@ -318,14 +318,21 @@ module blit_engine (
 
             unique case (state)
                 S_IDLE: if (start_i) begin
-                    // Compute effective clip: when ignore_clip is set
-                    // OR no user clip is active, fall back to FB bounds.
-                    automatic logic [15:0] fbw = {4'd0, fb_width_i};
-                    automatic logic [15:0] fbh = {4'd0, fb_height_i};
-                    automatic logic [15:0] cx0;
-                    automatic logic [15:0] cy0;
-                    automatic logic [15:0] cx1;
-                    automatic logic [15:0] cy1;
+                    // All automatic declarations must precede any
+                    // procedural statement in this block (Quartus 17
+                    // strictly enforces SystemVerilog ordering rules).
+                    automatic logic [15:0] fbw;
+                    automatic logic [15:0] fbh;
+                    automatic logic [15:0] cx0, cy0, cx1, cy1;
+                    automatic logic [15:0] ex0, ey0, ex1, ey1;
+                    automatic logic [15:0] eff_w, eff_h;
+                    automatic logic [15:0] sox, soy;
+
+                    fbw = {4'd0, fb_width_i};
+                    fbh = {4'd0, fb_height_i};
+
+                    // Effective clip = (ignore_clip ? FB-only :
+                    //                   user_clip ∩ FB).
                     if (clip_en_i & ~ignore_clip_i) begin
                         cx0 = u16_max(clip_x_i, 16'd0);
                         cy0 = u16_max(clip_y_i, 16'd0);
@@ -338,21 +345,17 @@ module blit_engine (
                         cy1 = fbh;
                     end
 
-                    // Intersect dst with effective clip.
-                    automatic logic [15:0] ex0 = u16_max(dst_x_i, cx0);
-                    automatic logic [15:0] ey0 = u16_max(dst_y_i, cy0);
-                    automatic logic [15:0] ex1 =
-                        u16_min(dst_x_i + dst_w_i, cx1);
-                    automatic logic [15:0] ey1 =
-                        u16_min(dst_y_i + dst_h_i, cy1);
-                    automatic logic [15:0] eff_w =
-                        (ex1 > ex0) ? (ex1 - ex0) : 16'd0;
-                    automatic logic [15:0] eff_h =
-                        (ey1 > ey0) ? (ey1 - ey0) : 16'd0;
-                    // Source offsets (1:1 scale): how far the dst was
-                    // shifted on the top/left, advance src equally.
-                    automatic logic [15:0] sox = ex0 - dst_x_i;
-                    automatic logic [15:0] soy = ey0 - dst_y_i;
+                    // dst ∩ effective_clip.
+                    ex0 = u16_max(dst_x_i, cx0);
+                    ey0 = u16_max(dst_y_i, cy0);
+                    ex1 = u16_min(dst_x_i + dst_w_i, cx1);
+                    ey1 = u16_min(dst_y_i + dst_h_i, cy1);
+                    eff_w = (ex1 > ex0) ? (ex1 - ex0) : 16'd0;
+                    eff_h = (ey1 > ey0) ? (ey1 - ey0) : 16'd0;
+                    // Source offsets (1:1 scale): advance src equally
+                    // to however far dst was shifted on left/top.
+                    sox = ex0 - dst_x_i;
+                    soy = ey0 - dst_y_i;
 
                     mode_q       <= mode_i;
                     blend_q      <= blend_i;
@@ -404,14 +407,18 @@ module blit_engine (
                         // when start + length are 2-pixel-aligned. For
                         // odd start or odd remaining length, fall back
                         // to per-pixel writes.
-                        automatic logic [15:0] remaining = dst_w_q - cur_x;
+                        automatic logic [15:0] remaining;
+                        automatic logic        aligned_start;
+                        automatic logic        aligned_len;
+                        automatic logic [15:0] beats;
+
+                        remaining     = dst_w_q - cur_x;
                         // Beat-aligned start iff (dst_x + cur_x) is
-                        // even. Both bits xor together gives parity.
-                        automatic logic aligned_start =
-                            ~(dst_x_q[0] ^ cur_x[0]);
-                        automatic logic aligned_len = (remaining[0] == 1'b0);
+                        // even. XOR of low bits gives parity.
+                        aligned_start = ~(dst_x_q[0] ^ cur_x[0]);
+                        aligned_len   = (remaining[0] == 1'b0);
+                        beats         = remaining >> 1;
                         if (aligned_start && aligned_len && remaining > 16'd1) begin
-                            automatic logic [15:0] beats = remaining >> 1;
                             burst_len_q  <= (beats > 16'd255)
                                                 ? 8'd255
                                                 : beats[7:0];
