@@ -16,7 +16,25 @@ use menu_core_host::error::DeviceError;
 use menu_core_host::mem;
 
 use crate::host::UiState;
-use crate::vdom::NodeId;
+use crate::vdom::{NodeId, Tree};
+
+fn dump_tree(tree: &Tree, id: NodeId, depth: usize) {
+    let Some(node) = tree.get(id) else {
+        info!("{:indent$}[{}] <missing>", "", id.0, indent = depth * 2);
+        return;
+    };
+    info!(
+        "{:indent$}[{}] {:?} style={:?}",
+        "",
+        id.0,
+        node.kind,
+        node.style,
+        indent = depth * 2,
+    );
+    for &child in &node.children {
+        dump_tree(tree, child, depth + 1);
+    }
+}
 
 mod boa;
 
@@ -131,6 +149,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         }
     }
     info!("main() resolved; tree root = {}", ui_state.root().0);
+    ui_state.with_tree(|t| dump_tree(t, ui_state.root(), 0));
 
     // 4. Frame loop.
     let root = ui_state.root();
@@ -146,11 +165,16 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     }
 
     let timeout = Duration::from_millis(500);
+    let mut frame_idx: u32 = 0;
     while running.load(Ordering::SeqCst) {
         let frame = device.begin_frame();
         let frame = ui_state.with_tree(|tree| crate::paint::paint(tree, root, &fb, frame))?;
         frame.present()?.submit()?.wait_presented(timeout)?;
         ui_state.with_tree_mut(|t| t.clear_dirty());
+        if frame_idx == 0 {
+            info!("first frame presented");
+        }
+        frame_idx = frame_idx.wrapping_add(1);
     }
 
     info!("menu-ui: stopping engine");
