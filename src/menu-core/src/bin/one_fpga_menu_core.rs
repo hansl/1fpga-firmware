@@ -1224,7 +1224,7 @@ fn blend_test(base: u32) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Bundled Latin Noto Sans, SIL OFL — ~27 KB.
-const NOTO_SANS: &[u8] = include_bytes!("../fonts/NotoSans-Regular.ttf");
+const NOTO_SANS: &[u8] = include_bytes!("../../fonts/NotoSans-Regular.ttf");
 
 fn text_test(base: u32) -> Result<(), Box<dyn std::error::Error>> {
     bridge::enable_lwh2f()?;

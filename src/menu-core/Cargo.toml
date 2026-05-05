@@ -7,10 +7,6 @@ description = "Host-side driver for the 1FPGA menu-core FPGA bitstream (2D GPU f
 license = "Apache-2.0"
 repository = "https://github.com/1fpga/firmware.git"
 
-[[bin]]
-name = "one_fpga_menu_core"
-path = "src/main.rs"
-
 [lints]
 workspace = true
 
