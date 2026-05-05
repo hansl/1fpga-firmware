@@ -24,12 +24,16 @@ const gitRev = child_process
   .replace(/^.*\//, '');
 
 export default {
-  input: 'src/main.ts',
+  input: {
+    main: 'src/main.ts',
+    menu_ui: 'src/menu-ui/index.ts',
+  },
   output: {
     dir: 'dist/',
     format: 'es',
     sourcemap: !production,
     hoistTransitiveImports: false,
+    entryFileNames: '[name].js',
   },
   plugins: [
     del({ targets: 'dist/*' }),

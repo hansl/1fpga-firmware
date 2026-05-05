@@ -118,6 +118,29 @@ deploy-menu-demo mode="release-dev": (build-menu-demo mode)
 demo-menu-core:
     ssh -t root@{{mister_ip}} '/media/fat/menu_demo'
 
+# Cross-compile the menu-ui launcher (React-on-Boa UI framework)
+build-menu-ui mode="release-dev":
+    docker run --rm -t \
+        -v "{{justfile_directory()}}":/home/rust/src \
+        messense/rust-musl-cross:armv7-musleabihf \
+        cargo build --target armv7-unknown-linux-musleabihf --bin menu_ui --profile {{mode}} --no-default-features --features=platform_de10
+
+# Deploy the menu-ui binary to the device
+deploy-menu-ui mode="release-dev": (build-menu-ui mode)
+    scp target/armv7-unknown-linux-musleabihf/{{mode}}/menu_ui root@{{mister_ip}}:/media/fat/menu_ui
+
+# Deploy the menu-ui JS bundle to the device (used with --bundle for dev iteration)
+deploy-menu-ui-bundle:
+    npm run -w @1fpga/frontend build
+    scp js/frontend/dist/menu_ui.js root@{{mister_ip}}:/media/fat/menu_ui_app.js
+
+# Run the menu-ui launcher on the device, loading the deployed JS bundle
+run-menu-ui:
+    ssh -t root@{{mister_ip}} '/media/fat/menu_ui --bundle /media/fat/menu_ui_app.js'
+
+# Build everything menu-ui needs and deploy + run in one shot
+demo-menu-ui: deploy-menu-ui deploy-menu-ui-bundle run-menu-ui
+
 # Run the probe on the device (assumes the menu-core .rbf is loaded and the binary is deployed)
 probe-menu-core:
     ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core probe'
