@@ -12,6 +12,7 @@ members = [
     "src/one-fpga",
     "src/menu-core",
     "src/menu-core-host",
+    "src/menu-ui",
     "src/mister-fpga",
     "src/mister-fpga-ini",
     "src/taser",
@@ -79,6 +80,7 @@ url = { version = "2.5" }
 # Repo crates
 cyclone-v = { path = "src/cyclone-v" }
 menu-core-host = { path = "src/menu-core-host" }
+menu-ui = { path = "src/menu-ui" }
 de10-nano = { path = "src/de10-nano" }
 fce-movie-format = { path = "src/fce-movie-format" }
 firmware = { path = "src/firmware" }
