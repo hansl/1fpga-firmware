@@ -50,6 +50,20 @@ module blit_engine (
     input  logic        tint_en_i,
     input  logic [31:0] tint_color_i,
 
+    // Clipping (PROTOCOL.md §5.5). The blit engine intersects the
+    // requested dst rect with `effective_clip`:
+    //   effective_clip = ignore_clip_i ? fb_bounds
+    //                                  : user_clip ∩ fb_bounds
+    // and adjusts src coordinates by the same offset (for COPY 1:1).
+    input  logic [11:0] fb_width_i,
+    input  logic [11:0] fb_height_i,
+    input  logic        clip_en_i,
+    input  logic [15:0] clip_x_i,
+    input  logic [15:0] clip_y_i,
+    input  logic [15:0] clip_w_i,
+    input  logic [15:0] clip_h_i,
+    input  logic        ignore_clip_i,
+
     // Framebuffer geometry.
     input  logic [31:0] fb_base_i,
     input  logic [13:0] fb_stride_i,
@@ -128,6 +142,20 @@ module blit_engine (
     // ---- Helpers ----------------------------------------------------
     function automatic logic [7:0] be_for_word(input logic upper);
         return upper ? 8'b1111_0000 : 8'b0000_1111;
+    endfunction
+
+    function automatic logic [15:0] u16_max(
+        input logic [15:0] a,
+        input logic [15:0] b
+    );
+        return (a > b) ? a : b;
+    endfunction
+
+    function automatic logic [15:0] u16_min(
+        input logic [15:0] a,
+        input logic [15:0] b
+    );
+        return (a < b) ? a : b;
     endfunction
 
     function automatic logic [7:0] be_for_byte(input logic [2:0] off);
@@ -290,21 +318,60 @@ module blit_engine (
 
             unique case (state)
                 S_IDLE: if (start_i) begin
+                    // Compute effective clip: when ignore_clip is set
+                    // OR no user clip is active, fall back to FB bounds.
+                    automatic logic [15:0] fbw = {4'd0, fb_width_i};
+                    automatic logic [15:0] fbh = {4'd0, fb_height_i};
+                    automatic logic [15:0] cx0;
+                    automatic logic [15:0] cy0;
+                    automatic logic [15:0] cx1;
+                    automatic logic [15:0] cy1;
+                    if (clip_en_i & ~ignore_clip_i) begin
+                        cx0 = u16_max(clip_x_i, 16'd0);
+                        cy0 = u16_max(clip_y_i, 16'd0);
+                        cx1 = u16_min(clip_x_i + clip_w_i, fbw);
+                        cy1 = u16_min(clip_y_i + clip_h_i, fbh);
+                    end else begin
+                        cx0 = 16'd0;
+                        cy0 = 16'd0;
+                        cx1 = fbw;
+                        cy1 = fbh;
+                    end
+
+                    // Intersect dst with effective clip.
+                    automatic logic [15:0] ex0 = u16_max(dst_x_i, cx0);
+                    automatic logic [15:0] ey0 = u16_max(dst_y_i, cy0);
+                    automatic logic [15:0] ex1 =
+                        u16_min(dst_x_i + dst_w_i, cx1);
+                    automatic logic [15:0] ey1 =
+                        u16_min(dst_y_i + dst_h_i, cy1);
+                    automatic logic [15:0] eff_w =
+                        (ex1 > ex0) ? (ex1 - ex0) : 16'd0;
+                    automatic logic [15:0] eff_h =
+                        (ey1 > ey0) ? (ey1 - ey0) : 16'd0;
+                    // Source offsets (1:1 scale): how far the dst was
+                    // shifted on the top/left, advance src equally.
+                    automatic logic [15:0] sox = ex0 - dst_x_i;
+                    automatic logic [15:0] soy = ey0 - dst_y_i;
+
                     mode_q       <= mode_i;
                     blend_q      <= blend_i;
                     format_q     <= format_i;
                     tint_en_q    <= tint_en_i;
                     tint_color_q <= tint_color_i;
-                    dst_x_q      <= dst_x_i;
-                    dst_y_q      <= dst_y_i;
-                    dst_w_q      <= dst_w_i;
-                    dst_h_q      <= dst_h_i;
+                    dst_x_q      <= ex0;
+                    dst_y_q      <= ey0;
+                    dst_w_q      <= eff_w;
+                    dst_h_q      <= eff_h;
                     color_q      <= color_i;
-                    src_x_q      <= src_x_i;
-                    src_y_q      <= src_y_i;
+                    src_x_q      <= src_x_i + sox;
+                    src_y_q      <= src_y_i + soy;
                     src_addr_q   <= src_addr_i;
                     src_pitch_q  <= src_pitch_i;
                     cur_y_off    <= '0;
+                    // If the rect is fully clipped (eff_w == 0 or
+                    // eff_h == 0), S_ROW_INIT immediately finds
+                    // cur_y_off == dst_h_q == 0 and falls to S_DONE.
                     state        <= S_ROW_INIT;
                 end
 

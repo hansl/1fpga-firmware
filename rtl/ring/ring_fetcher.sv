@@ -61,6 +61,12 @@ module ring_fetcher (
     output logic        blit_format_o,      // 0 = RGBA8888, 1 = A8
     output logic        blit_tint_en_o,
     output logic [31:0] blit_tint_color_o,
+    output logic        blit_clip_en_o,
+    output logic [15:0] blit_clip_x_o,
+    output logic [15:0] blit_clip_y_o,
+    output logic [15:0] blit_clip_w_o,
+    output logic [15:0] blit_clip_h_o,
+    output logic        blit_ignore_clip_o,
     input  logic        blit_done_i,
 
     // DDRAM_* read-master interface.
@@ -74,11 +80,13 @@ module ring_fetcher (
 );
 
     // ---- Opcode table (PROTOCOL.md §5.2) -----------------------------
-    localparam logic [7:0] OP_NOP       = 8'h00;
-    localparam logic [7:0] OP_PRESENT   = 8'h01;
-    localparam logic [7:0] OP_FENCE     = 8'h02;
-    localparam logic [7:0] OP_FILL_RECT = 8'h10;
-    localparam logic [7:0] OP_COPY_RECT = 8'h11;
+    localparam logic [7:0] OP_NOP        = 8'h00;
+    localparam logic [7:0] OP_PRESENT    = 8'h01;
+    localparam logic [7:0] OP_FENCE      = 8'h02;
+    localparam logic [7:0] OP_SET_CLIP   = 8'h03;
+    localparam logic [7:0] OP_CLEAR_CLIP = 8'h04;
+    localparam logic [7:0] OP_FILL_RECT  = 8'h10;
+    localparam logic [7:0] OP_COPY_RECT  = 8'h11;
 
     // ---- Error codes (PROTOCOL.md §8.1) ------------------------------
     localparam logic [7:0] ERR_UNKNOWN_OPCODE = 8'h01;
@@ -115,6 +123,9 @@ module ring_fetcher (
     logic [31:0] fence_value_q;
     logic [31:0] error_info_q;
     logic [7:0]  pending_opcode;
+    // Persistent user clip state, updated on SET_CLIP / CLEAR_CLIP.
+    logic        clip_en_q;
+    logic [15:0] clip_x_q, clip_y_q, clip_w_q, clip_h_q;
 
     wire [31:0] head_mask = ring_size_i - 32'd1;
 
@@ -161,6 +172,15 @@ module ring_fetcher (
     // header.flags bit 4 = tint_en for COPY_RECT (PROTOCOL.md §5.3 #COPY_RECT).
     assign blit_tint_en_o    = is_copy & header_q[4];
     assign blit_tint_color_o = arg_q[5];      // optional 6th arg, valid only when tint_en
+    // Clip state forwarded to the blit engine. ignore_clip is a
+    // per-FILL_RECT flag (header bit 2); COPY_RECT always honours
+    // the user clip rect.
+    assign blit_clip_en_o    = clip_en_q;
+    assign blit_clip_x_o     = clip_x_q;
+    assign blit_clip_y_o     = clip_y_q;
+    assign blit_clip_w_o     = clip_w_q;
+    assign blit_clip_h_o     = clip_h_q;
+    assign blit_ignore_clip_o = (pending_opcode == OP_FILL_RECT) & header_q[2];
 
     // Texture descriptor base = tex_table_addr + tex_id * 32.
     wire [31:0] desc_base = tex_table_addr_i + (arg_q[0] <<< 5);
@@ -182,6 +202,11 @@ module ring_fetcher (
             fence_value_q  <= 32'd0;
             error_info_q   <= 32'd0;
             pending_opcode <= 8'd0;
+            clip_en_q      <= 1'b0;
+            clip_x_q       <= 16'd0;
+            clip_y_q       <= 16'd0;
+            clip_w_q       <= 16'd0;
+            clip_h_q       <= 16'd0;
             ddram_addr_o     <= 29'd0;
             ddram_burstcnt_o <= 8'd0;
             ddram_be_o       <= 8'd0;
@@ -220,12 +245,17 @@ module ring_fetcher (
                     desc_idx       <= 2'd0;
 
                     unique case (opcode)
-                        OP_NOP, OP_PRESENT: begin
+                        OP_NOP, OP_PRESENT, OP_CLEAR_CLIP: begin
                             arg_total <= 3'd0;
                             state     <= S_RETIRE;
                         end
                         OP_FENCE: begin
                             arg_total  <= 3'd1;
+                            fetch_addr <= fetch_addr + 32'd4;
+                            state      <= S_FETCH_ARG;
+                        end
+                        OP_SET_CLIP: begin
+                            arg_total  <= 3'd2;
                             fetch_addr <= fetch_addr + 32'd4;
                             state      <= S_FETCH_ARG;
                         end
@@ -310,6 +340,15 @@ module ring_fetcher (
                 S_RETIRE: begin
                     unique case (pending_opcode)
                         OP_FENCE: fence_value_q <= arg_q[0];
+                        OP_SET_CLIP: begin
+                            // Word 0: x|y, Word 1: w|h (PROTOCOL.md §5.3).
+                            clip_x_q  <= arg_q[0][31:16];
+                            clip_y_q  <= arg_q[0][15:0];
+                            clip_w_q  <= arg_q[1][31:16];
+                            clip_h_q  <= arg_q[1][15:0];
+                            clip_en_q <= 1'b1;
+                        end
+                        OP_CLEAR_CLIP: clip_en_q <= 1'b0;
                         default:  ;
                     endcase
 

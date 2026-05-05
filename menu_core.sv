@@ -382,6 +382,9 @@ wire [31:0] blit_color;
 wire        blit_format;
 wire        blit_tint_en;
 wire [31:0] blit_tint_color;
+wire        blit_clip_en;
+wire [15:0] blit_clip_x, blit_clip_y, blit_clip_w, blit_clip_h;
+wire        blit_ignore_clip;
 wire        blit_done;
 
 ring_fetcher u_ring_fetcher (
@@ -417,6 +420,12 @@ ring_fetcher u_ring_fetcher (
     .blit_format_o     (blit_format),
     .blit_tint_en_o    (blit_tint_en),
     .blit_tint_color_o (blit_tint_color),
+    .blit_clip_en_o    (blit_clip_en),
+    .blit_clip_x_o     (blit_clip_x),
+    .blit_clip_y_o     (blit_clip_y),
+    .blit_clip_w_o     (blit_clip_w),
+    .blit_clip_h_o     (blit_clip_h),
+    .blit_ignore_clip_o(blit_ignore_clip),
     .blit_done_i     (blit_done),
 
     .ddram_addr_o       (fetch_addr),
@@ -490,6 +499,15 @@ blit_engine u_blit_engine (
     .format_i      (blit_format),
     .tint_en_i     (blit_tint_en),
     .tint_color_i  (blit_tint_color),
+
+    .fb_width_i    (reg_fb_width),
+    .fb_height_i   (reg_fb_height),
+    .clip_en_i     (blit_clip_en),
+    .clip_x_i      (blit_clip_x),
+    .clip_y_i      (blit_clip_y),
+    .clip_w_i      (blit_clip_w),
+    .clip_h_i      (blit_clip_h),
+    .ignore_clip_i (blit_ignore_clip),
 
     .fb_base_i  (blit_fb_base),
     .fb_stride_i(reg_fb_stride),
