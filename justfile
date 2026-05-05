@@ -134,3 +134,7 @@ text-test-menu-core:
 # Run the TTF text animation perf test on the device (look at HDMI; reports FPS)
 text-anim-menu-core:
     ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core text-anim'
+
+# Run the M2c2 SET_CLIP / CLEAR_CLIP visual test on the device (look at HDMI)
+clip-test-menu-core:
+    ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core clip-test'

@@ -117,6 +117,12 @@ pub enum Command {
     /// cubic timing for ~5 seconds, reporting FPS at the end. Stresses
     /// the blit engine + ring throughput.
     TextAnim,
+
+    /// Visual test for SET_CLIP / CLEAR_CLIP. Paints a green
+    /// background, then sets a clip rect in the centre and tries to
+    /// fill the whole screen with red — only the clipped centre
+    /// region should change colour.
+    ClipTest,
 }
 
 fn parse_u32_hex_or_dec(s: &str) -> Result<u32, std::num::ParseIntError> {
@@ -229,6 +235,13 @@ fn main() {
             Ok(()) => {}
             Err(e) => {
                 tracing::error!("text-anim failed: {e}");
+                std::process::exit(1);
+            }
+        },
+        Some(Command::ClipTest) => match clip_test(base) {
+            Ok(()) => {}
+            Err(e) => {
+                tracing::error!("clip-test failed: {e}");
                 std::process::exit(1);
             }
         },
@@ -1605,5 +1618,127 @@ fn text_anim(base: u32) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     regs.write32(registers::CONTROL, 0);
+    Ok(())
+}
+
+fn clip_test(base: u32) -> Result<(), Box<dyn std::error::Error>> {
+    bridge::enable_lwh2f()?;
+
+    let mut regs_mapper = DevMemMemoryMapper::create(REGS_PHYS_ADDR, 0x1000)
+        .map_err(|d| format!("mmap regs at {REGS_PHYS_ADDR:#X}: {d}"))?;
+    let regs = unsafe { registers::RegisterBlock::new(regs_mapper.as_mut_ptr::<u8>()) };
+
+    if regs.read32(registers::ID) != protocol::ID_VALUE {
+        return Err("bad ID".into());
+    }
+
+    let ring_phys = base + mem::RING_OFFSET as u32;
+    let mut ring_mapper = DevMemMemoryMapper::create(ring_phys as usize, mem::RING_SIZE)
+        .map_err(|d| format!("mmap ring at {ring_phys:#X}: {d}"))?;
+    let ring_devmem_ptr = ring_mapper.as_mut_ptr::<u8>();
+
+    regs.write32(registers::CONTROL, registers::CONTROL_CLEAR_ERROR);
+    regs.write32(registers::CONTROL, 0);
+    regs.write32(registers::RING_BASE, ring_phys);
+    regs.write32(registers::RING_SIZE, mem::RING_SIZE as u32);
+    regs.write32(registers::RING_TAIL, 0);
+
+    let mode = configure_framebuffer(&regs, base)?;
+    println!("Video: {}×{}", mode.width, mode.height);
+
+    let green = Rgba::new(0x00, 0xC0, 0x00, 0xFF);
+    let red   = Rgba::new(0xFF, 0x00, 0x00, 0xFF);
+    let blue  = Rgba::new(0x20, 0x40, 0xFF, 0xFF);
+
+    // Centre clip rect: 1/3 of the screen, centred.
+    let clip_w = mode.width / 3;
+    let clip_h = mode.height / 3;
+    let clip_x = (mode.width  - clip_w) / 2;
+    let clip_y = (mode.height - clip_h) / 2;
+
+    let mut staging = vec![0u8; mem::RING_SIZE];
+    let mut writer = menu_core::ring::RingWriter::new(&mut staging)?;
+    writer.observe_head(0);
+
+    // 1. Paint green over the whole screen with ignore_clip so the
+    //    background is established regardless of any leftover clip.
+    writer.push(&ProtoCommand::FillRect {
+        dst: Rect::new(0, 0, mode.width, mode.height),
+        color: green,
+        blend: BlendMode::Opaque,
+        ignore_clip: true,
+    })?;
+
+    // 2. Set the user clip rect in the centre.
+    writer.push(&ProtoCommand::SetClip(Rect::new(clip_x, clip_y, clip_w, clip_h)))?;
+
+    // 3. Try to paint red over the whole screen (NOT ignoring clip).
+    //    Only the centre rect should turn red.
+    writer.push(&ProtoCommand::FillRect {
+        dst: Rect::new(0, 0, mode.width, mode.height),
+        color: red,
+        blend: BlendMode::Opaque,
+        ignore_clip: false,
+    })?;
+
+    // 4. Paint a smaller blue rect with ignore_clip set — should
+    //    bypass the user clip and show up even if it's outside the
+    //    centre red region.
+    writer.push(&ProtoCommand::FillRect {
+        dst: Rect::new(20, 20, 80, 80),
+        color: blue,
+        blend: BlendMode::Opaque,
+        ignore_clip: true,
+    })?;
+
+    // 5. CLEAR_CLIP and a final small marker to confirm clip is off.
+    writer.push(&ProtoCommand::ClearClip)?;
+    writer.push(&ProtoCommand::FillRect {
+        dst: Rect::new(mode.width.saturating_sub(100), 20, 80, 80),
+        color: blue,
+        blend: BlendMode::Opaque,
+        ignore_clip: false,
+    })?;
+
+    writer.push(&ProtoCommand::Present)?;
+    writer.push(&ProtoCommand::Fence { value: 0x00C0_FFEE })?;
+
+    let final_tail = writer.tail();
+    volatile_copy_to_devmem(ring_devmem_ptr, &staging[..final_tail as usize]);
+
+    core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+    regs.write32(registers::CONTROL, registers::CONTROL_ENABLE);
+    regs.write32(registers::RING_TAIL, final_tail);
+    regs.write32(registers::RING_KICK, 1);
+
+    let target_fence = 0x00C0_FFEEu32;
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_millis(5000);
+    loop {
+        let fence = regs.read32(registers::FENCE_VALUE);
+        if fence == target_fence {
+            println!("FENCE reached in {} ms", start.elapsed().as_millis());
+            break;
+        }
+        let status = regs.read32(registers::STATUS);
+        if status & registers::STATUS_ERROR != 0 {
+            let err = regs.read32(registers::ERROR_INFO);
+            return Err(format!(
+                "fetcher error: STATUS={status:#010X} ERROR_INFO={err:#010X}"
+            )
+            .into());
+        }
+        if start.elapsed() > timeout {
+            return Err("FENCE timeout".into());
+        }
+    }
+
+    while regs.read32(registers::FRAME_COUNT) < 1 {}
+    regs.write32(registers::CONTROL, 0);
+    println!(
+        "M2c2: check HDMI — green background; red rect ({clip_w}×{clip_h}) \
+         centred; one blue square top-left (drawn with ignore_clip while clip \
+         was active); one blue square top-right (drawn after CLEAR_CLIP)"
+    );
     Ok(())
 }
