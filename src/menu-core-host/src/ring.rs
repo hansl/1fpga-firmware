@@ -53,6 +53,13 @@ impl<'a> RingWriter<'a> {
     /// Construct a ring writer over the given byte slice. The length
     /// must be a power of two (see `RING_SIZE` in `crate::mem`).
     pub fn new(buffer: &'a mut [u8]) -> Result<Self, RingError> {
+        Self::with_state(buffer, 0, 0)
+    }
+
+    /// Like [`new`](Self::new), but seed the host-tracked tail and the
+    /// cached head — useful when re-attaching the writer to a buffer
+    /// between command batches without losing the rolling tail position.
+    pub fn with_state(buffer: &'a mut [u8], tail: u32, head: u32) -> Result<Self, RingError> {
         let size = buffer.len();
         if !size.is_power_of_two() {
             return Err(RingError::InvalidSize(size));
@@ -61,8 +68,8 @@ impl<'a> RingWriter<'a> {
             buffer,
             size,
             mask: size - 1,
-            tail: 0,
-            head: 0,
+            tail: (tail as usize) & (size - 1),
+            head: (head as usize) & (size - 1),
         })
     }
 

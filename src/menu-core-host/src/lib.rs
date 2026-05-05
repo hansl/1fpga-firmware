@@ -33,8 +33,5 @@ pub mod texture;
 
 pub use protocol::{BlendMode, Filter, Rect, Rgba, TextureFormat};
 
-// `cyclone_v` is only used by the (placeholder) `devmem` module; once
-// that module ships its real implementation this `_`-import goes away.
 #[cfg(test)]
 use pretty_assertions as _;
-use cyclone_v as _;
