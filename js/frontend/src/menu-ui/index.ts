@@ -8,6 +8,8 @@
 import { appendChild, createInstance, run } from '1fpga:gui';
 
 export async function main(): Promise<void> {
+  console.log('menu-ui: main() entered');
+
   const root = createInstance('div', {
     style: {
       width: 1920,
@@ -17,9 +19,8 @@ export async function main(): Promise<void> {
       backgroundColor: '#202040',
     },
   });
+  console.log('menu-ui: root created', root);
 
-  // Inner box: 400x400 red, centred-ish, to confirm append + child
-  // positioning paint.
   const box = createInstance('div', {
     style: {
       width: 400,
@@ -29,7 +30,11 @@ export async function main(): Promise<void> {
       backgroundColor: '#ff4040',
     },
   });
+  console.log('menu-ui: box created', box);
+
   appendChild(root, box);
+  console.log('menu-ui: appendChild done; calling run');
 
   run(root);
+  console.log('menu-ui: run() returned');
 }

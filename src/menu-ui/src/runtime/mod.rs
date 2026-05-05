@@ -110,22 +110,27 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         return Err(e.into());
     }
 
-    let main_fn = module
-        .namespace(&mut context)
-        .get(js_string!("main"), &mut context)?;
+    let namespace = module.namespace(&mut context);
+    let main_fn = namespace.get(js_string!("main"), &mut context)?;
+    info!(
+        "main export resolved: callable={}, type={}",
+        main_fn.as_callable().is_some(),
+        main_fn.type_of()
+    );
     let main_fn = main_fn.as_callable().ok_or(RuntimeError::NoMainExport)?;
     let mut result = main_fn.call(
         &boa_engine::JsValue::undefined(),
         &[],
         &mut context,
     )?;
+    info!("main() initial call returned, awaiting promise chain");
     while let Some(p) = result.as_promise() {
         match p.await_blocking(&mut context) {
             Ok(v) => result = v,
             Err(e) => return Err(e.into()),
         }
     }
-    debug!("main() returned, entering frame loop");
+    info!("main() resolved; tree root = {}", ui_state.root().0);
 
     // 4. Frame loop.
     let root = ui_state.root();

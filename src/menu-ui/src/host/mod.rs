@@ -104,6 +104,7 @@ fn create_instance(_this: &JsValue, args: &[JsValue], context: &mut Context) -> 
     let style = parse_style_arg(args.get_or_undefined(1), context)?;
     let state = ui_state(context)?;
     let id = state.with_tree_mut(|t| t.create(kind, style));
+    tracing::debug!("createInstance({kind_str}) -> {}", id.0);
     Ok(JsValue::from(id.0))
 }
 
@@ -128,6 +129,7 @@ fn set_style(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResu
 
 fn run_app(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let id = NodeId(args.get_or_undefined(0).to_u32(context)?);
+    tracing::info!("1fpga:gui.run(id={})", id.0);
     let state = ui_state(context)?;
     state.set_root(id);
     Ok(JsValue::undefined())
