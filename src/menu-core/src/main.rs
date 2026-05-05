@@ -1457,29 +1457,41 @@ fn text_anim(base: u32) -> Result<(), Box<dyn std::error::Error>> {
     let anim_duration = std::time::Duration::from_secs(5);
     let half_period = std::time::Duration::from_millis(1500); // each direction
 
-    // ---- Each-frame ring usage: fully drain before pushing the next. ----
-    // Less efficient than continuous ring filling but trivially correct
-    // and the fence-bound rate is what bottlenecks us, not host overhead.
+    // Enable engine ONCE. Don't reset between frames — that would also
+    // reset fb_swapper, briefly switching scanout back to FB0 each
+    // iteration and producing visible flicker. Instead, append each
+    // frame's commands to the ring at the current tail position.
     regs.write32(registers::CONTROL, registers::CONTROL_ENABLE);
 
     let start = std::time::Instant::now();
     let mut frame_idx: u32 = 0;
     let frame_count_at_start = regs.read32(registers::FRAME_COUNT);
+    let mut ring_pos: u32 = 0; // host-side ring write cursor
+
+    // One frame's commands: 1 FILL + ~13 COPYs + PRESENT + FENCE,
+    // each ≤ 28 bytes. ~500 bytes is comfortable; round up to 4 KB.
+    let frame_buf_size: usize = 4 * 1024;
 
     while start.elapsed() < anim_duration {
         let elapsed = start.elapsed().as_secs_f32();
-        // Triangle wave 0..1..0 with `half_period` to peak.
         let phase = (elapsed / half_period.as_secs_f32()) % 2.0;
         let normalised = if phase < 1.0 { phase } else { 2.0 - phase };
         let eased = ease_in_out_cubic(normalised);
         let pen_x = pen_x_min + (eased * travel) as i32;
 
-        // Build this frame's command stream.
-        let mut staging = vec![0u8; mem::RING_SIZE];
-        let mut writer = menu_core::ring::RingWriter::new(&mut staging)?;
-        writer.observe_head(0);
+        // Build this frame's command stream into a small per-frame
+        // buffer (not a ring — RingWriter would otherwise track its
+        // own tail and we'd lose sync with the device side).
+        let mut buf = Vec::with_capacity(frame_buf_size);
+        let mut emit = |cmd: &ProtoCommand| -> Result<(), Box<dyn std::error::Error>> {
+            let n = cmd.encoded_len();
+            let start_off = buf.len();
+            buf.resize(start_off + n, 0);
+            cmd.encode(&mut buf[start_off..start_off + n])?;
+            Ok(())
+        };
 
-        writer.push(&ProtoCommand::FillRect {
+        emit(&ProtoCommand::FillRect {
             dst: Rect::new(0, 0, mode.width, mode.height),
             color: dark_blue,
             blend: BlendMode::Opaque,
@@ -1496,7 +1508,7 @@ fn text_anim(base: u32) -> Result<(), Box<dyn std::error::Error>> {
                 let dst_x = (x + g.bearing_x as i32).max(0) as u16;
                 let dst_y_off = (atlas.ascent as i32) - (g.ymin as i32) - (g.height as i32);
                 let dst_y = (pen_y_top as i32 + dst_y_off).max(0) as u16;
-                writer.push(&ProtoCommand::CopyRect {
+                emit(&ProtoCommand::CopyRect {
                     tex_id: 0,
                     src: Rect::new(g.atlas_x, g.atlas_y, g.width, g.height),
                     dst: Rect::new(dst_x, dst_y, g.width, g.height),
@@ -1508,32 +1520,32 @@ fn text_anim(base: u32) -> Result<(), Box<dyn std::error::Error>> {
             x += g.advance as i32;
         }
 
-        writer.push(&ProtoCommand::Present)?;
+        emit(&ProtoCommand::Present)?;
         let fence_value = 0x0000_F000 + frame_idx;
-        writer.push(&ProtoCommand::Fence { value: fence_value })?;
+        emit(&ProtoCommand::Fence { value: fence_value })?;
 
-        let final_tail = writer.tail();
+        let frame_size = buf.len() as u32;
 
-        // Reset ring tail to 0 before staging this frame.
-        // To do that safely, ensure the previous frame retired (FENCE
-        // observed) which means HEAD == previous TAIL. Drain HEAD to
-        // 0 by resetting the engine isn't needed; just rely on the
-        // monotonic ring-tail with wrap. Easier: clear the engine
-        // and re-program the ring base each frame? That'd cost time.
-        //
-        // Simpler: just track host-side tail, write at that offset,
-        // wrap with NOPs. The RingWriter already handles wrap via
-        // observe_head + push. But for this simple test we always
-        // reset to tail=0 between frames after the previous frame's
-        // FENCE retires, then reset HEAD via CONTROL.CE.
-        regs.write32(registers::CONTROL, registers::CONTROL_CLEAR_ERROR);
-        regs.write32(registers::CONTROL, registers::CONTROL_ENABLE);
-        regs.write32(registers::RING_TAIL, 0);
+        // Bail if a wrap would be needed — for our 5 s × ~60 fps × ~500 B
+        // we never wrap the 1 MB ring, but make this explicit.
+        if ring_pos as usize + buf.len() > mem::RING_SIZE {
+            return Err(format!(
+                "ring would wrap at frame {frame_idx}; need wrap-handling for longer runs"
+            )
+            .into());
+        }
 
-        volatile_copy_to_devmem(ring_devmem_ptr, &staging[..final_tail as usize]);
+        // Volatile-copy this frame's bytes to the ring at the current
+        // host-side tail.
+        let dst_ptr = unsafe { ring_devmem_ptr.add(ring_pos as usize) };
+        volatile_copy_to_devmem(dst_ptr, &buf);
+
+        // Publish: ensure ring writes are visible, then advance TAIL.
         core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
-        regs.write32(registers::RING_TAIL, final_tail);
+        let new_tail = ring_pos + frame_size;
+        regs.write32(registers::RING_TAIL, new_tail);
         regs.write32(registers::RING_KICK, 1);
+        ring_pos = new_tail;
 
         // Wait for this frame's fence.
         let frame_start = std::time::Instant::now();
