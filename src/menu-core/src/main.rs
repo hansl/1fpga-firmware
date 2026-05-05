@@ -1454,6 +1454,15 @@ fn text_anim(base: u32) -> Result<(), Box<dyn std::error::Error>> {
     let pen_x_max = (mode.width as i32) - text_width - margin;
     let travel = (pen_x_max - pen_x_min).max(0) as f32;
 
+    // Dirty-rect strip: the text only moves horizontally within a band
+    // `line_height` tall. With triple-buffering we re-render the strip
+    // each frame; the area outside it stays at the background colour
+    // we paint into all 3 FBs during the warm-up phase.
+    let strip_x: u16 = 0;
+    let strip_w: u16 = mode.width;
+    let strip_y: u16 = pen_y_top;
+    let strip_h: u16 = atlas.line_height;
+
     let anim_duration = std::time::Duration::from_secs(5);
     let half_period = std::time::Duration::from_millis(1500); // each direction
 
@@ -1491,12 +1500,25 @@ fn text_anim(base: u32) -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         };
 
-        emit(&ProtoCommand::FillRect {
-            dst: Rect::new(0, 0, mode.width, mode.height),
-            color: dark_blue,
-            blend: BlendMode::Opaque,
-            ignore_clip: true,
-        })?;
+        // Warm-up: paint the full bg into each of the 3 FBs once
+        // (frames 0/1/2 land on render_idx 1/2/0 respectively under
+        // the swapper's rotation). After that, only refresh the strip
+        // around the text. Saves ~95% of the pixels per frame.
+        if frame_idx < 3 {
+            emit(&ProtoCommand::FillRect {
+                dst: Rect::new(0, 0, mode.width, mode.height),
+                color: dark_blue,
+                blend: BlendMode::Opaque,
+                ignore_clip: true,
+            })?;
+        } else {
+            emit(&ProtoCommand::FillRect {
+                dst: Rect::new(strip_x, strip_y, strip_w, strip_h),
+                color: dark_blue,
+                blend: BlendMode::Opaque,
+                ignore_clip: true,
+            })?;
+        }
 
         let mut x: i32 = pen_x;
         for ch in text.chars() {
