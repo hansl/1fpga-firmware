@@ -167,7 +167,12 @@ export function render(element: ReactNode): void {
     /* onDefaultTransitionIndicator */ () => {},
   );
 
-  reconciler.updateContainer(element, container, null, null);
+  // React 19 may schedule `updateContainer`'s commit asynchronously
+  // even for legacy roots; `flushSync` forces the mutations to land
+  // before we hand control to the Rust frame loop.
+  reconciler.flushSync(() => {
+    reconciler.updateContainer(element, container, null, null);
+  });
 
   gui.run(rootNode);
 }
