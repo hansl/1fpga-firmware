@@ -33,7 +33,7 @@ pub struct Node {
     pub parent: NodeId,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Tree {
     /// Slot 0 reserved for `NodeId::NONE`. Slot `i > 0` either holds a
     /// live node or `None` if the slot is free.
@@ -44,10 +44,17 @@ pub struct Tree {
     dirty: bool,
 }
 
+impl Default for Tree {
+    fn default() -> Self {
+        // The derived default would leave `nodes` empty, which makes
+        // the first `create()` return `NodeId(0)` — colliding with
+        // `NodeId::NONE`. Always reserve slot 0.
+        Self::new()
+    }
+}
+
 impl Tree {
     pub fn new() -> Self {
-        // Reserve slot 0 so `NodeId::NONE` never collides with a real
-        // node.
         Self {
             nodes: vec![None],
             free: Vec::new(),
