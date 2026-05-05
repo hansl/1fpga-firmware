@@ -89,6 +89,7 @@ module blit_engine (
         S_BLEND,           // pipeline stage so blend math meets timing
         S_WRITE,
         S_WRITE_WAIT,
+        S_FILL_BURST,      // Avalon-MM burst, 2 pixels per beat (FILL Opaque)
         S_DONE
     } state_e;
 
@@ -110,6 +111,8 @@ module blit_engine (
     logic [31:0] pixel_data;
     logic [31:0] src_pixel_q;        // computed source pixel held while we fetch dst
     logic [31:0] dst_pixel_q;        // captured dst pixel held while blend computes
+    logic [7:0]  burst_len_q;        // beats in current burst (1..255)
+    logic [7:0]  burst_done_q;       // beats accepted in current burst
 
     assign busy_o = (state != S_IDLE) & (state != S_DONE);
 
@@ -207,6 +210,19 @@ module blit_engine (
                                        : {32'd0, pixel_data};
                 ddram_we_o       = 1'b1;
             end
+            S_FILL_BURST: begin
+                // 2 pixels per beat, full byteenable, color replicated.
+                // Avalon-MM burst: address + burstcnt are looked at on
+                // the first beat by the slave; we hold them stable for
+                // the whole burst (slaves are tolerant). Master keeps
+                // we=1 and din stable (constant colour for FILL); slave
+                // accepts one beat per cycle of !waitrequest.
+                ddram_addr_o     = dst_pixel_byte_addr[31:3];
+                ddram_burstcnt_o = burst_len_q;
+                ddram_be_o       = 8'hFF;
+                ddram_din_o      = {color_q, color_q};
+                ddram_we_o       = 1'b1;
+            end
             default: ;
         endcase
     end
@@ -266,6 +282,8 @@ module blit_engine (
             pixel_data        <= '0;
             src_pixel_q       <= '0;
             dst_pixel_q       <= '0;
+            burst_len_q       <= '0;
+            burst_done_q      <= '0;
             done_o            <= 1'b0;
         end else begin
             done_o <= 1'b0;
@@ -314,17 +332,32 @@ module blit_engine (
                         state     <= S_ROW_INIT;
                     end else if (mode_q == MODE_COPY) begin
                         state <= S_FETCH_SRC;
-                    end else begin
-                        // FILL mode. For non-Opaque blend, route via
-                        // S_FETCH_DST so the constant src colour mixes
-                        // with the existing destination.
-                        if (blend_q == BLEND_OPAQUE) begin
+                    end else if (blend_q == BLEND_OPAQUE) begin
+                        // FILL Opaque — burst write 2 pixels per beat
+                        // when start + length are 2-pixel-aligned. For
+                        // odd start or odd remaining length, fall back
+                        // to per-pixel writes.
+                        automatic logic [15:0] remaining = dst_w_q - cur_x;
+                        // Beat-aligned start iff (dst_x + cur_x) is
+                        // even. Both bits xor together gives parity.
+                        automatic logic aligned_start =
+                            ~(dst_x_q[0] ^ cur_x[0]);
+                        automatic logic aligned_len = (remaining[0] == 1'b0);
+                        if (aligned_start && aligned_len && remaining > 16'd1) begin
+                            automatic logic [15:0] beats = remaining >> 1;
+                            burst_len_q  <= (beats > 16'd255)
+                                                ? 8'd255
+                                                : beats[7:0];
+                            burst_done_q <= 8'd0;
+                            state        <= S_FILL_BURST;
+                        end else begin
                             pixel_data <= color_q;
                             state      <= S_WRITE;
-                        end else begin
-                            src_pixel_q <= color_q;
-                            state       <= S_FETCH_DST;
                         end
+                    end else begin
+                        // FILL non-Opaque needs RMW.
+                        src_pixel_q <= color_q;
+                        state       <= S_FETCH_DST;
                     end
                 end
 
@@ -391,6 +424,20 @@ module blit_engine (
                 S_WRITE_WAIT: begin
                     cur_x <= cur_x + 16'd1;
                     state <= S_NEXT_PIXEL;
+                end
+
+                S_FILL_BURST: if (~ddram_busy_i) begin
+                    // One beat accepted this cycle.
+                    burst_done_q <= burst_done_q + 8'd1;
+                    if (burst_done_q + 8'd1 == burst_len_q) begin
+                        // Last beat of this burst. Advance cur_x by
+                        // 2 × beats. S_NEXT_PIXEL will re-evaluate and
+                        // either issue another burst or move to the
+                        // next row. The cycle through S_NEXT_PIXEL
+                        // (we=0) gives the slave a clean burst boundary.
+                        cur_x <= cur_x + ({8'd0, burst_len_q} <<< 1);
+                        state <= S_NEXT_PIXEL;
+                    end
                 end
 
                 S_DONE: begin
