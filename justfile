@@ -131,7 +131,10 @@ deploy-menu-ui mode="release-dev": (build-menu-ui mode)
 
 # Deploy the menu-ui JS bundle to the device (used with --bundle for dev iteration)
 deploy-menu-ui-bundle:
-    npm run -w @1fpga/frontend build
+    # Root-level build runs `@1fpga/schemas` then `@1fpga/frontend` in the
+    # right order; the latter imports the former, so building only frontend
+    # would fail with "Cannot find module '@1fpga/schemas'".
+    npm run build
     scp js/frontend/dist/menu_ui.js root@{{mister_ip}}:/media/fat/menu_ui_app.js
 
 # Run the menu-ui launcher on the device, loading the deployed JS bundle
