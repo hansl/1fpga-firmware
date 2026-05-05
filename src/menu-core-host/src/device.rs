@@ -473,6 +473,15 @@ impl Device {
         }
     }
 
+    /// Direct, low-level access to the register block. Most users
+    /// should prefer the higher-level methods; this is exposed for
+    /// diagnostics and pattern tests that intentionally poke at every
+    /// slot.
+    #[inline]
+    pub fn register_block(&self) -> registers::RegisterBlock {
+        self.regs
+    }
+
     // === crate-internal accessors used by Frame ===
 
     #[inline]

@@ -89,11 +89,11 @@ impl<'a> Frame<'a> {
 
     /// Append a `FILL_RECT` honouring the user clip.
     pub fn fill_rect(
-        &mut self,
+        mut self,
         dst: Rect,
         color: Rgba,
         blend: BlendMode,
-    ) -> Result<&mut Self, DeviceError> {
+    ) -> Result<Self, DeviceError> {
         self.push_cmd(&Command::FillRect {
             dst,
             color,
@@ -106,11 +106,11 @@ impl<'a> Frame<'a> {
     /// Append a `FILL_RECT` that bypasses the user clip (framebuffer
     /// bounds are still enforced).
     pub fn fill_rect_unclipped(
-        &mut self,
+        mut self,
         dst: Rect,
         color: Rgba,
         blend: BlendMode,
-    ) -> Result<&mut Self, DeviceError> {
+    ) -> Result<Self, DeviceError> {
         self.push_cmd(&Command::FillRect {
             dst,
             color,
@@ -122,12 +122,12 @@ impl<'a> Frame<'a> {
 
     /// Append a `COPY_RECT` referring to `tex`.
     pub fn copy_rect(
-        &mut self,
+        mut self,
         tex: &TextureHandle,
         src: Rect,
         dst: Rect,
         opts: CopyOpts,
-    ) -> Result<&mut Self, DeviceError> {
+    ) -> Result<Self, DeviceError> {
         self.push_cmd(&Command::CopyRect {
             tex_id: tex.id as u32,
             src,
@@ -140,20 +140,20 @@ impl<'a> Frame<'a> {
     }
 
     /// Set the user clip rectangle.
-    pub fn set_clip(&mut self, rect: Rect) -> Result<&mut Self, DeviceError> {
+    pub fn set_clip(mut self, rect: Rect) -> Result<Self, DeviceError> {
         self.push_cmd(&Command::SetClip(rect))?;
         Ok(self)
     }
 
     /// Clear the user clip.
-    pub fn clear_clip(&mut self) -> Result<&mut Self, DeviceError> {
+    pub fn clear_clip(mut self) -> Result<Self, DeviceError> {
         self.push_cmd(&Command::ClearClip)?;
         Ok(self)
     }
 
     /// Append a `PRESENT`. A frame may be submitted without one — useful
     /// for off-screen draws or initial setup.
-    pub fn present(&mut self) -> Result<&mut Self, DeviceError> {
+    pub fn present(mut self) -> Result<Self, DeviceError> {
         self.push_cmd(&Command::Present)?;
         self.will_present = true;
         Ok(self)
