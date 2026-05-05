@@ -1,6 +1,7 @@
 import commonjs from '@rollup/plugin-commonjs';
 import json from '@rollup/plugin-json';
 import { nodeResolve } from '@rollup/plugin-node-resolve';
+import replace from '@rollup/plugin-replace';
 import terser from '@rollup/plugin-terser';
 import typescript from '@rollup/plugin-typescript';
 import del from 'rollup-plugin-delete';
@@ -27,6 +28,15 @@ function commonPlugins() {
   return [
     codegen(),
     dbMigrations(),
+    // Boa has no `process` global. React + react-reconciler are full
+    // of `process.env.NODE_ENV === 'development'` guards; substitute
+    // at build time so terser DCE removes the dev branches entirely.
+    replace({
+      preventAssignment: true,
+      values: {
+        'process.env.NODE_ENV': JSON.stringify(production ? 'production' : 'development'),
+      },
+    }),
     nodeResolve({
       preferBuiltins: false,
     }),
