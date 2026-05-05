@@ -112,6 +112,11 @@ pub enum Command {
     /// string in white over a dark blue background using one
     /// COPY_RECT per glyph with SrcAlpha blend.
     TextTest,
+
+    /// Animate "Hello, 1FPGA!" sliding left-right with ease-in-out
+    /// cubic timing for ~5 seconds, reporting FPS at the end. Stresses
+    /// the blit engine + ring throughput.
+    TextAnim,
 }
 
 fn parse_u32_hex_or_dec(s: &str) -> Result<u32, std::num::ParseIntError> {
@@ -217,6 +222,13 @@ fn main() {
             Ok(()) => {}
             Err(e) => {
                 tracing::error!("text-test failed: {e}");
+                std::process::exit(1);
+            }
+        },
+        Some(Command::TextAnim) => match text_anim(base) {
+            Ok(()) => {}
+            Err(e) => {
+                tracing::error!("text-anim failed: {e}");
                 std::process::exit(1);
             }
         },
@@ -1361,5 +1373,203 @@ fn text_test(base: u32) -> Result<(), Box<dyn std::error::Error>> {
         "M2c3.4: check HDMI — should see \"{text}\" in white, centred on a \
          dark blue background"
     );
+    Ok(())
+}
+
+/// Cubic ease-in-out: t in [0,1] -> [0,1] with smooth start/end.
+fn ease_in_out_cubic(t: f32) -> f32 {
+    if t < 0.5 {
+        4.0 * t * t * t
+    } else {
+        let f = -2.0 * t + 2.0;
+        1.0 - f * f * f / 2.0
+    }
+}
+
+fn text_anim(base: u32) -> Result<(), Box<dyn std::error::Error>> {
+    bridge::enable_lwh2f()?;
+
+    let mut regs_mapper = DevMemMemoryMapper::create(REGS_PHYS_ADDR, 0x1000)
+        .map_err(|d| format!("mmap regs at {REGS_PHYS_ADDR:#X}: {d}"))?;
+    let regs = unsafe { registers::RegisterBlock::new(regs_mapper.as_mut_ptr::<u8>()) };
+
+    let id = regs.read32(registers::ID);
+    if id != protocol::ID_VALUE {
+        return Err(format!("bad ID {id:#010X}, expected {:#010X}", protocol::ID_VALUE).into());
+    }
+
+    let ring_phys = base + mem::RING_OFFSET as u32;
+    let mut ring_mapper = DevMemMemoryMapper::create(ring_phys as usize, mem::RING_SIZE)
+        .map_err(|d| format!("mmap ring at {ring_phys:#X}: {d}"))?;
+    let ring_devmem_ptr = ring_mapper.as_mut_ptr::<u8>();
+
+    regs.write32(registers::CONTROL, registers::CONTROL_CLEAR_ERROR);
+    regs.write32(registers::CONTROL, 0);
+    regs.write32(registers::RING_BASE, ring_phys);
+    regs.write32(registers::RING_SIZE, mem::RING_SIZE as u32);
+    regs.write32(registers::RING_TAIL, 0);
+
+    let mode = configure_framebuffer(&regs, base)?;
+    println!("Video: {}×{}", mode.width, mode.height);
+
+    // Build font atlas + upload + descriptor (same as text-test).
+    let charset: String = (b' '..=b'~').map(|b| b as char).collect();
+    let atlas = menu_core::text::build_atlas(NOTO_SANS, 48.0, &charset, 512, 512)?;
+    println!(
+        "Atlas: {}×{}, line_height={}, ascent={}",
+        atlas.width, atlas.height, atlas.line_height, atlas.ascent
+    );
+
+    let tex_phys = base + mem::TEX_POOL_OFFSET as u32;
+    let mut tex_mapper = DevMemMemoryMapper::create(tex_phys as usize, atlas.bytes.len())
+        .map_err(|d| format!("mmap texture pool at {tex_phys:#X}: {d}"))?;
+    volatile_copy_to_devmem(tex_mapper.as_mut_ptr::<u8>(), &atlas.bytes);
+
+    let tex_table_phys = base + mem::TEX_TABLE_OFFSET as u32;
+    let descriptor = TextureDescriptor::new(
+        tex_phys,
+        atlas.width as u32,
+        atlas.width,
+        atlas.height,
+        TextureFormat::A8,
+    );
+    let descriptor_bytes: [u8; DESCRIPTOR_SIZE] = unsafe { core::mem::transmute(descriptor) };
+    let mut desc_mapper = DevMemMemoryMapper::create(tex_table_phys as usize, DESCRIPTOR_SIZE)
+        .map_err(|d| format!("mmap descriptor table at {tex_table_phys:#X}: {d}"))?;
+    volatile_copy_to_devmem(desc_mapper.as_mut_ptr::<u8>(), &descriptor_bytes);
+
+    regs.write32(registers::TEX_TABLE_ADDR, tex_table_phys);
+    regs.write32(registers::TEX_TABLE_COUNT, 1);
+
+    // ---- Animation parameters ----
+    let text = "Hello, 1FPGA!";
+    let dark_blue = Rgba::new(0x10, 0x10, 0x40, 0xFF);
+    let white     = Rgba::new(0xFF, 0xFF, 0xFF, 0xFF);
+    let text_width = atlas.measure(text) as i32;
+    let pen_y_top = ((mode.height / 2).saturating_sub(atlas.line_height / 2)) as u16;
+
+    // Travel between left edge and right edge, with margin.
+    let margin = 32_i32;
+    let pen_x_min = margin;
+    let pen_x_max = (mode.width as i32) - text_width - margin;
+    let travel = (pen_x_max - pen_x_min).max(0) as f32;
+
+    let anim_duration = std::time::Duration::from_secs(5);
+    let half_period = std::time::Duration::from_millis(1500); // each direction
+
+    // ---- Each-frame ring usage: fully drain before pushing the next. ----
+    // Less efficient than continuous ring filling but trivially correct
+    // and the fence-bound rate is what bottlenecks us, not host overhead.
+    regs.write32(registers::CONTROL, registers::CONTROL_ENABLE);
+
+    let start = std::time::Instant::now();
+    let mut frame_idx: u32 = 0;
+    let frame_count_at_start = regs.read32(registers::FRAME_COUNT);
+
+    while start.elapsed() < anim_duration {
+        let elapsed = start.elapsed().as_secs_f32();
+        // Triangle wave 0..1..0 with `half_period` to peak.
+        let phase = (elapsed / half_period.as_secs_f32()) % 2.0;
+        let normalised = if phase < 1.0 { phase } else { 2.0 - phase };
+        let eased = ease_in_out_cubic(normalised);
+        let pen_x = pen_x_min + (eased * travel) as i32;
+
+        // Build this frame's command stream.
+        let mut staging = vec![0u8; mem::RING_SIZE];
+        let mut writer = menu_core::ring::RingWriter::new(&mut staging)?;
+        writer.observe_head(0);
+
+        writer.push(&ProtoCommand::FillRect {
+            dst: Rect::new(0, 0, mode.width, mode.height),
+            color: dark_blue,
+            blend: BlendMode::Opaque,
+            ignore_clip: true,
+        })?;
+
+        let mut x: i32 = pen_x;
+        for ch in text.chars() {
+            let g = match atlas.glyph(ch) {
+                Some(g) => *g,
+                None => continue,
+            };
+            if g.width > 0 && g.height > 0 {
+                let dst_x = (x + g.bearing_x as i32).max(0) as u16;
+                let dst_y_off = (atlas.ascent as i32) - (g.ymin as i32) - (g.height as i32);
+                let dst_y = (pen_y_top as i32 + dst_y_off).max(0) as u16;
+                writer.push(&ProtoCommand::CopyRect {
+                    tex_id: 0,
+                    src: Rect::new(g.atlas_x, g.atlas_y, g.width, g.height),
+                    dst: Rect::new(dst_x, dst_y, g.width, g.height),
+                    blend: BlendMode::SrcAlpha,
+                    filter: Filter::Nearest,
+                    tint: Some(white),
+                })?;
+            }
+            x += g.advance as i32;
+        }
+
+        writer.push(&ProtoCommand::Present)?;
+        let fence_value = 0x0000_F000 + frame_idx;
+        writer.push(&ProtoCommand::Fence { value: fence_value })?;
+
+        let final_tail = writer.tail();
+
+        // Reset ring tail to 0 before staging this frame.
+        // To do that safely, ensure the previous frame retired (FENCE
+        // observed) which means HEAD == previous TAIL. Drain HEAD to
+        // 0 by resetting the engine isn't needed; just rely on the
+        // monotonic ring-tail with wrap. Easier: clear the engine
+        // and re-program the ring base each frame? That'd cost time.
+        //
+        // Simpler: just track host-side tail, write at that offset,
+        // wrap with NOPs. The RingWriter already handles wrap via
+        // observe_head + push. But for this simple test we always
+        // reset to tail=0 between frames after the previous frame's
+        // FENCE retires, then reset HEAD via CONTROL.CE.
+        regs.write32(registers::CONTROL, registers::CONTROL_CLEAR_ERROR);
+        regs.write32(registers::CONTROL, registers::CONTROL_ENABLE);
+        regs.write32(registers::RING_TAIL, 0);
+
+        volatile_copy_to_devmem(ring_devmem_ptr, &staging[..final_tail as usize]);
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+        regs.write32(registers::RING_TAIL, final_tail);
+        regs.write32(registers::RING_KICK, 1);
+
+        // Wait for this frame's fence.
+        let frame_start = std::time::Instant::now();
+        let frame_timeout = std::time::Duration::from_millis(500);
+        loop {
+            let f = regs.read32(registers::FENCE_VALUE);
+            if f == fence_value {
+                break;
+            }
+            let status = regs.read32(registers::STATUS);
+            if status & registers::STATUS_ERROR != 0 {
+                let err = regs.read32(registers::ERROR_INFO);
+                return Err(format!(
+                    "fetcher error at frame {frame_idx}: STATUS={status:#010X} ERROR_INFO={err:#010X}"
+                )
+                .into());
+            }
+            if frame_start.elapsed() > frame_timeout {
+                return Err(format!("frame {frame_idx} fence timeout").into());
+            }
+        }
+
+        frame_idx += 1;
+    }
+
+    let total_elapsed = start.elapsed().as_secs_f32();
+    let displayed = regs.read32(registers::FRAME_COUNT) - frame_count_at_start;
+    println!(
+        "Submitted {frame_idx} frames in {total_elapsed:.2} s — submit FPS: {:.1}",
+        frame_idx as f32 / total_elapsed
+    );
+    println!(
+        "Displayed {displayed} frames — display FPS: {:.1} (capped at HDMI vsync rate)",
+        displayed as f32 / total_elapsed
+    );
+
+    regs.write32(registers::CONTROL, 0);
     Ok(())
 }

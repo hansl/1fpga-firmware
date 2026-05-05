@@ -130,3 +130,7 @@ blend-test-menu-core:
 # Run the TTF text-rendering visual test on the device (look at HDMI)
 text-test-menu-core:
     ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core text-test'
+
+# Run the TTF text animation perf test on the device (look at HDMI; reports FPS)
+text-anim-menu-core:
+    ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core text-anim'
