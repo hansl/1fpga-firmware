@@ -34,6 +34,11 @@ const REGS_PHYS_ADDR: usize = 0xFF21_0000;
 // declare here to satisfy `unused_crate_dependencies` on the binary.
 use thiserror as _;
 
+// `menu_core_host` is reached transitively via this package's `lib.rs`
+// re-exports; the binary doesn't reference it directly yet (Task #20
+// will rewrite the subcommands to use its runtime API).
+use menu_core_host as _;
+
 // Used inside the library's `text` module — declared here to satisfy
 // `unused_crate_dependencies` on the binary target.
 use fontdue as _;

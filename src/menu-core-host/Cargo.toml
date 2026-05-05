@@ -1,0 +1,19 @@
+[package]
+name = "menu-core-host"
+version = "0.1.0"
+edition = "2024"
+authors = ["Hans Larsen <hans.larsen@gmail.com>"]
+description = "Host runtime for the 1FPGA menu-core FPGA bitstream — command-buffer encoding, ring management, and device lifecycle"
+license = "Apache-2.0"
+repository = "https://github.com/1fpga/firmware.git"
+
+[lints]
+workspace = true
+
+[dependencies]
+cyclone-v = { workspace = true }
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+pretty_assertions = "1.4"

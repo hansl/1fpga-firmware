@@ -3347,10 +3347,21 @@ dependencies = [
  "core_affinity",
  "cyclone-v",
  "fontdue",
+ "menu-core-host",
  "pretty_assertions",
  "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "menu-core-host"
+version = "0.1.0"
+dependencies = [
+ "cyclone-v",
+ "pretty_assertions",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
