@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use crate::device::Device;
 use crate::devmem::volatile_copy_to_devmem;
 use crate::error::DeviceError;
+use crate::protocol::commands::TARGET_FRAMEBUFFER;
 use crate::protocol::{BlendMode, Command, Filter, Rect, Rgba, registers};
 use crate::ring::RingWriter;
 use crate::texture::TextureHandle;
@@ -156,6 +157,28 @@ impl<'a> Frame<'a> {
     pub fn present(mut self) -> Result<Self, DeviceError> {
         self.push_cmd(&Command::Present)?;
         self.will_present = true;
+        Ok(self)
+    }
+
+    /// Redirect subsequent draws to render into `target`'s pixel data
+    /// instead of the framebuffer. Pair with
+    /// [`Self::set_target_framebuffer`] to switch back. The target
+    /// must be RGBA8888 with `pitch_bytes == width * 4` (PROTOCOL.md
+    /// §5.6).
+    pub fn set_target(mut self, target: &TextureHandle) -> Result<Self, DeviceError> {
+        self.push_cmd(&Command::SetRenderTarget {
+            tex_id: target.id,
+        })?;
+        Ok(self)
+    }
+
+    /// Restore the framebuffer as the active render target. Default at
+    /// the start of every frame; only needed after a
+    /// [`Self::set_target`] call.
+    pub fn set_target_framebuffer(mut self) -> Result<Self, DeviceError> {
+        self.push_cmd(&Command::SetRenderTarget {
+            tex_id: TARGET_FRAMEBUFFER,
+        })?;
         Ok(self)
     }
 

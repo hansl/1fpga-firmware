@@ -414,6 +414,7 @@ lets the FPGA route a command to the right execution unit with a single
 | `0x02` | FENCE      | 1              | Synchronization marker; writes value to FENCE_VALUE     |
 | `0x03` | SET_CLIP   | 2              | Set clipping rectangle                                  |
 | `0x04` | CLEAR_CLIP | 0              | Remove clipping                                         |
+| `0x05` | SET_RENDER_TARGET | 1       | Redirect subsequent draws into a texture (§5.7)         |
 | `0x10` | FILL_RECT  | 3              | Solid color rectangle (auto-clamped to framebuffer)     |
 | `0x11` | COPY_RECT  | 5 or 6         | Textured rectangle (with optional scaling, tint, blend). `length_w = 6` iff `tint_en = 1` |
 | `0xFF` | EXTENDED   | —              | Reserved for future protocol extension (see §10); MUST raise `ERR_BAD_OPCODE` in v0 |
@@ -484,6 +485,19 @@ subsequent non-`ignore_clip` draws to be no-ops.
 
 No arguments. Drawing is unrestricted (equivalent to clip rect equal to
 the full framebuffer).
+
+#### SET_RENDER_TARGET (`0x05`)
+
+```
+length_w = 1, flags = 0
+Word 0: tex_id (low 16) | reserved (high 16, must be 0)
+```
+
+The reserved sentinel `tex_id = 0xFFFF` selects the framebuffer (the
+default target). Any other `tex_id` selects a texture in the descriptor
+table (§6); the FPGA reads that descriptor to obtain `data_addr`,
+`width`, `height`, and `pitch_bytes`, and routes subsequent
+`FILL_RECT` / `COPY_RECT` writes there. See §5.7.
 
 #### FILL_RECT (`0x10`)
 
@@ -655,6 +669,48 @@ value — the FPGA intersects it with the framebuffer bounds. There is
 no error for an out-of-bounds clip. A clip whose intersection with
 the framebuffer is empty causes subsequent non-`ignore_clip` draws to
 be no-ops.
+
+### 5.6 Render-to-texture (`SET_RENDER_TARGET`)
+
+The default render target is the framebuffer (the back-buffer being
+prepared for the next `PRESENT`). `SET_RENDER_TARGET tex_id` redirects
+subsequent draws into a texture's pixel data:
+
+```
+SET_RENDER_TARGET tex_id_a       -- subsequent draws write into tex A
+FILL_RECT ...
+COPY_RECT ...
+SET_RENDER_TARGET 0xFFFF         -- back to framebuffer
+COPY_RECT tex_id_a, ...          -- now read from tex A
+```
+
+**Constraints (v1):**
+
+- The target texture's `format` MUST be `RGBA8888` (`0`); A8 RTT is not
+  supported.
+- The target texture's `pitch_bytes` MUST equal `width * 4` (no
+  sub-region RTT into a larger atlas).
+- `SET_CLIP` continues to apply with target dimensions in place of the
+  framebuffer dimensions. The clip's intersection with the target
+  bounds is what gets enforced. `CLEAR_CLIP` reverts to the full
+  current target.
+- `PRESENT` MUST be issued with the framebuffer as the active target.
+  Issuing `PRESENT` while another target is active is a host bug;
+  behaviour is unspecified (the FPGA may silently retire it without
+  swap, or raise `ERR_BAD_OPCODE` — implementations choose).
+
+**Synchronization:**
+
+A texture written via RTT in one batch and sampled via `COPY_RECT` in
+another batch MUST have a `FENCE` retired between them. Within the
+same submitted batch, write-then-read ordering on the same texture is
+implementation-defined and SHOULD be avoided.
+
+**Default target on reset:**
+
+`CONTROL.SE = 1` (soft reset) and `CONTROL.CE = 1` (clear error) both
+reset the active target to the framebuffer. `CONTROL.E = 1` (enable)
+leaves the active target untouched.
 
 ---
 

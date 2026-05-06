@@ -76,6 +76,7 @@ pub const OP_PRESENT: u8 = 0x01;
 pub const OP_FENCE: u8 = 0x02;
 pub const OP_SET_CLIP: u8 = 0x03;
 pub const OP_CLEAR_CLIP: u8 = 0x04;
+pub const OP_SET_RENDER_TARGET: u8 = 0x05;
 pub const OP_FILL_RECT: u8 = 0x10;
 pub const OP_COPY_RECT: u8 = 0x11;
 pub const OP_EXTENDED: u8 = 0xFF;
@@ -87,6 +88,10 @@ const FILL_FLAG_IGNORE_CLIP: u16 = 1 << 2;
 
 // COPY_RECT flags: bits [1:0] blend, bits [3:2] filter, bit 4 tint_en.
 const COPY_FLAG_TINT_EN: u16 = 1 << 4;
+
+/// Sentinel `tex_id` for [`Command::SetRenderTarget`] that selects the
+/// framebuffer (the default render target).
+pub const TARGET_FRAMEBUFFER: u16 = 0xFFFF;
 
 /// High-level command representation. Each variant corresponds 1:1 to
 /// an opcode; the encoder (`encode`) handles flag packing, optional
@@ -110,6 +115,11 @@ pub enum Command {
 
     /// Disable the user clip rectangle.
     ClearClip,
+
+    /// Redirect subsequent draws to a texture, or back to the
+    /// framebuffer. `tex_id == TARGET_FRAMEBUFFER` selects the
+    /// framebuffer (the default at frame start). See PROTOCOL.md §5.6.
+    SetRenderTarget { tex_id: u16 },
 
     /// Solid-color rectangle. `ignore_clip = true` bypasses the user
     /// clip rect (framebuffer bounds are still enforced).
@@ -151,6 +161,7 @@ impl Command {
             Command::Fence { .. } => 1,
             Command::SetClip(_) => 2,
             Command::ClearClip => 0,
+            Command::SetRenderTarget { .. } => 1,
             Command::FillRect { .. } => 3,
             Command::CopyRect { tint, .. } => {
                 if tint.is_some() {
@@ -205,6 +216,10 @@ impl Command {
                 write_u32_le(&mut args[0..4], pack_xy(r.x, r.y));
                 write_u32_le(&mut args[4..8], pack_xy(r.w, r.h));
             }
+            Command::SetRenderTarget { tex_id } => {
+                // Word 0: tex_id in low 16, reserved (must be 0) in high 16.
+                write_u32_le(&mut args[0..4], tex_id as u32);
+            }
             Command::FillRect { dst, color, .. } => {
                 write_u32_le(&mut args[0..4], pack_xy(dst.x, dst.y));
                 write_u32_le(&mut args[4..8], pack_xy(dst.w, dst.h));
@@ -241,6 +256,7 @@ impl Command {
             Command::Fence { .. } => (OP_FENCE, length_w, 0),
             Command::SetClip(_) => (OP_SET_CLIP, length_w, 0),
             Command::ClearClip => (OP_CLEAR_CLIP, length_w, 0),
+            Command::SetRenderTarget { .. } => (OP_SET_RENDER_TARGET, length_w, 0),
             Command::FillRect {
                 blend, ignore_clip, ..
             } => {
@@ -361,6 +377,28 @@ mod tests {
     fn clear_clip_is_4_bytes() {
         let bytes = enc(&Command::ClearClip);
         assert_eq!(bytes, vec![0x00, 0x00, 0x00, 0x04]);
+    }
+
+    #[test]
+    fn set_render_target_packs_tex_id() {
+        // SET_RENDER_TARGET (0x05), length_w=1, flags=0 → header LE [00,00,01,05]
+        // tex_id 0x1234 → arg word LE [34, 12, 00, 00]
+        let bytes = enc(&Command::SetRenderTarget { tex_id: 0x1234 });
+        assert_eq!(
+            bytes,
+            vec![
+                0x00, 0x00, 0x01, 0x05, // header
+                0x34, 0x12, 0x00, 0x00, // tex_id
+            ]
+        );
+    }
+
+    #[test]
+    fn set_render_target_framebuffer_sentinel() {
+        let bytes = enc(&Command::SetRenderTarget {
+            tex_id: TARGET_FRAMEBUFFER,
+        });
+        assert_eq!(&bytes[4..8], &[0xFF, 0xFF, 0x00, 0x00]);
     }
 
     #[test]

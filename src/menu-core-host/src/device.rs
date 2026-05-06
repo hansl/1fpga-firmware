@@ -360,6 +360,82 @@ impl Device {
         self.next_tex_id = 0;
     }
 
+    /// Allocate an RGBA8888 render-target texture with the given
+    /// dimensions. Pixel data is left undefined (the caller must fully
+    /// paint the target before sampling from it). The returned
+    /// [`TextureHandle`] can be passed to `Frame::set_target` and to
+    /// `Frame::copy_rect`.
+    pub fn create_render_target(
+        &mut self,
+        width: u16,
+        height: u16,
+    ) -> Result<TextureHandle, DeviceError> {
+        if self.tex_pool_map.is_none() {
+            self.init_texture_storage()?;
+        }
+        if width == 0 || height == 0 {
+            return Err(DeviceError::TextureStrideTooSmall {
+                stride: 0,
+                row_bytes: 0,
+            });
+        }
+        if self.next_tex_id >= self.tex_table_capacity {
+            return Err(DeviceError::DescriptorTableFull {
+                capacity: self.tex_table_capacity as u32,
+            });
+        }
+
+        let stride: u32 = (width as u32) * 4;
+        let needed_bytes: u32 = stride.saturating_mul(height as u32);
+        let phys = self
+            .tex_alloc
+            .alloc(needed_bytes, 16)
+            .map_err(|e| match e {
+                AllocError::OutOfMemory {
+                    requested,
+                    remaining,
+                } => DeviceError::TexturePoolExhausted {
+                    needed: requested,
+                    free: remaining,
+                },
+                AllocError::BadAlignment(_) => unreachable!("16 is power of two"),
+            })?;
+
+        // Write the descriptor (data isn't initialized — the FPGA only
+        // reads the texture after the host has painted into it).
+        let descriptor = TextureDescriptor::new(
+            phys,
+            stride,
+            width,
+            height,
+            crate::protocol::TextureFormat::Rgba8888,
+        );
+        // SAFETY: TextureDescriptor is repr(C) 32-byte, no padding.
+        let descriptor_bytes = unsafe {
+            core::slice::from_raw_parts(
+                (&descriptor as *const TextureDescriptor) as *const u8,
+                DESCRIPTOR_SIZE,
+            )
+        };
+        let id = self.next_tex_id;
+        let table_offset = (id as usize) * DESCRIPTOR_SIZE;
+        let table_map = self.tex_table_map.as_mut().expect("init checked above");
+        // SAFETY: table_map sized to capacity*32 ≥ id*32+32.
+        unsafe {
+            let dst = table_map.as_mut_ptr().add(table_offset);
+            volatile_copy_to_devmem(dst, descriptor_bytes);
+        }
+        self.next_tex_id = id.wrapping_add(1);
+
+        Ok(TextureHandle {
+            id,
+            width,
+            height,
+            format: crate::protocol::TextureFormat::Rgba8888,
+            phys_addr: phys,
+        })
+    }
+
     /// Capacity (in slots) of the texture descriptor table.
     #[inline]
     pub fn texture_capacity(&self) -> u16 {
