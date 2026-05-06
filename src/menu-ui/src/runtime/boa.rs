@@ -15,6 +15,8 @@ use boa_runtime::extensions::ConsoleExtension;
 use boa_runtime::{ConsoleState, Logger};
 use tracing::{debug, error, info, warn};
 
+use crate::runtime::executor::FrameJobExecutor;
+
 /// Build a fresh Boa context with the runtime extensions and our
 /// `1fpga:gui` host module registered.
 ///
@@ -26,7 +28,11 @@ use tracing::{debug, error, info, warn};
 /// real timer it queues work that never runs.
 pub fn build_context() -> JsResult<(Context, Rc<MapModuleLoader>)> {
     let loader = Rc::new(MapModuleLoader::new());
-    let mut context = Context::builder().module_loader(loader.clone()).build()?;
+    let executor = FrameJobExecutor::new();
+    let mut context = Context::builder()
+        .module_loader(loader.clone())
+        .job_executor(executor)
+        .build()?;
     boa_runtime::register(ConsoleExtension(TracingLogger), None, &mut context)?;
     boa_runtime::interval::register(&mut context)?;
     crate::host::register(&loader, &mut context)?;

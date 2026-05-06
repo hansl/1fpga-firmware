@@ -263,6 +263,7 @@ fn dump_tree(tree: &Tree, id: NodeId, depth: usize) {
 }
 
 mod boa;
+pub mod executor;
 pub mod fps;
 
 /// Configuration for [`run`].
