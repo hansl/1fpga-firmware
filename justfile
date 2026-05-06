@@ -179,3 +179,7 @@ text-anim-menu-core:
 # Run the M2c2 SET_CLIP / CLEAR_CLIP visual test on the device (look at HDMI)
 clip-test-menu-core:
     ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core clip-test'
+
+# Run the N4.5 SET_RENDER_TARGET visual test on the device (look at HDMI)
+rtt-test-menu-core:
+    ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core rtt-test'

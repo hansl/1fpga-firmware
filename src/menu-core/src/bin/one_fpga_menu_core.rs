@@ -99,6 +99,12 @@ pub enum Command {
 
     /// Visual test for SET_CLIP / CLEAR_CLIP using a centred clip rect.
     ClipTest,
+
+    /// Visual test for SET_RENDER_TARGET. Allocates a 200×200
+    /// RGBA8888 render target, paints four colored quadrants into it,
+    /// then COPY_RECTs the cached texture to the centre of the FB.
+    /// Validates the FPGA's RTT path end-to-end.
+    RttTest,
 }
 
 fn parse_u32_hex_or_dec(s: &str) -> Result<u32, std::num::ParseIntError> {
@@ -162,6 +168,7 @@ fn main() {
         Some(Command::TextTest) => text_test(base).map_err(Into::into),
         Some(Command::TextAnim) => text_anim(base).map_err(Into::into),
         Some(Command::ClipTest) => clip_test(base).map_err(Into::into),
+        Some(Command::RttTest) => rtt_test(base).map_err(Into::into),
         None => {
             info!(
                 "no subcommand given — re-run with `probe`, `ring-test`, `draw-test`, …, or `--print-layout`"
@@ -709,6 +716,57 @@ fn clip_test(base: u32) -> Result<(), DeviceError> {
     println!(
         "M2c2: check HDMI — green bg, red {clip_w}×{clip_h} centre, blue 80×80 \
          top-left (ignore_clip) and top-right (after CLEAR_CLIP)"
+    );
+    Ok(())
+}
+
+fn rtt_test(base: u32) -> Result<(), DeviceError> {
+    let mut device = open_ready(base)?;
+    let info = device.video_info();
+    println!("Video: {}×{}", info.width, info.height);
+
+    // Allocate a 200×200 render target.
+    let rt = device.create_render_target(200, 200)?;
+    println!("RT allocated: tex_id={}, phys={:#010X}", rt.id, rt.phys_addr);
+
+    // Paint four quadrants into the RT, then blit it onto the FB.
+    let q0 = Rgba::new(0xFF, 0x40, 0x40, 0xFF); // red TL
+    let q1 = Rgba::new(0x40, 0xFF, 0x40, 0xFF); // green TR
+    let q2 = Rgba::new(0x40, 0x80, 0xFF, 0xFF); // blue BL
+    let q3 = Rgba::new(0xFF, 0xC0, 0x40, 0xFF); // amber BR
+
+    let bg = Rgba::new(0x10, 0x10, 0x18, 0xFF);
+    let dst_x = info.width.saturating_sub(200) / 2;
+    let dst_y = info.height.saturating_sub(200) / 2;
+
+    device
+        .begin_frame()
+        // Render-into-texture phase.
+        .set_target(&rt)?
+        .fill_rect_unclipped(Rect::new(0,   0,   100, 100), q0, BlendMode::Opaque)?
+        .fill_rect_unclipped(Rect::new(100, 0,   100, 100), q1, BlendMode::Opaque)?
+        .fill_rect_unclipped(Rect::new(0,   100, 100, 100), q2, BlendMode::Opaque)?
+        .fill_rect_unclipped(Rect::new(100, 100, 100, 100), q3, BlendMode::Opaque)?
+        // Switch back to the framebuffer and use the RT as a source.
+        .set_target_framebuffer()?
+        .fill_rect_unclipped(
+            Rect::new(0, 0, info.width, info.height),
+            bg,
+            BlendMode::Opaque,
+        )?
+        .copy_rect(
+            &rt,
+            Rect::new(0, 0, 200, 200),
+            Rect::new(dst_x, dst_y, 200, 200),
+            CopyOpts::default(),
+        )?
+        .present()?
+        .submit()?
+        .wait_presented(Duration::from_millis(5000))?;
+
+    println!(
+        "rtt-test: check HDMI — 200×200 four-quadrant tile (red TL, green TR, \
+         blue BL, amber BR) centred on dark navy"
     );
     Ok(())
 }
