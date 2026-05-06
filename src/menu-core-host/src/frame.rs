@@ -273,4 +273,23 @@ impl FenceToken<'_> {
         self.device
             .wait_frame_count(self.pre_frame_count.wrapping_add(1), remaining)
     }
+
+    /// Like [`wait_presented`](Self::wait_presented) but also returns
+    /// `(fence_wait, frame_count_wait)`. Useful for instrumentation:
+    /// the first measures FPGA command-stream completion, the second
+    /// measures the wait for the next HDMI vsync.
+    pub fn wait_presented_timed(
+        self,
+        timeout: Duration,
+    ) -> Result<(u32, Duration, Duration), DeviceError> {
+        let start = Instant::now();
+        self.device.wait_fence(self.fence_value, timeout)?;
+        let fence_done = Instant::now();
+        let remaining = timeout.saturating_sub(fence_done - start);
+        let count = self
+            .device
+            .wait_frame_count(self.pre_frame_count.wrapping_add(1), remaining)?;
+        let scanout_done = Instant::now();
+        Ok((count, fence_done - start, scanout_done - fence_done))
+    }
 }

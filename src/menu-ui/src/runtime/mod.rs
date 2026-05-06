@@ -418,7 +418,8 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     let mut t_text_pop = Duration::ZERO;
     let mut t_layout = Duration::ZERO;
     let mut t_paint = Duration::ZERO;
-    let mut t_present = Duration::ZERO;
+    let mut t_fence = Duration::ZERO;
+    let mut t_scanout = Duration::ZERO;
 
     while running.load(Ordering::SeqCst) {
         let t0 = Instant::now();
@@ -515,9 +516,8 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
 
         let t7 = Instant::now();
 
-        frame.present()?.submit()?.wait_presented(timeout)?;
-
-        let t8 = Instant::now();
+        let (_count, fence_dt, scanout_dt) =
+            frame.present()?.submit()?.wait_presented_timed(timeout)?;
 
         ui_state.with_tree_mut(|t| t.clear_dirty());
         fps_counter.record_frame();
@@ -529,7 +529,8 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         t_text_pop += t5 - t4;
         t_layout += t6 - t5;
         t_paint += t7 - t6;
-        t_present += t8 - t7;
+        t_fence += fence_dt;
+        t_scanout += scanout_dt;
 
         frame_idx = frame_idx.wrapping_add(1);
 
@@ -537,7 +538,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
             let n = TIMING_LOG_PERIOD as u32;
             let avg = |t: Duration| t.as_micros() as u32 / n;
             tracing::info!(
-                "frame timings (us avg over {n}): jobs={} input={} text_prep={} images={} text_pop={} layout={} paint={} present={} total={}",
+                "frame timings (us avg over {n}): jobs={} input={} text_prep={} images={} text_pop={} layout={} paint={} fence={} scanout={} total={}",
                 avg(t_jobs),
                 avg(t_input),
                 avg(t_text_prep),
@@ -545,8 +546,9 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                 avg(t_text_pop),
                 avg(t_layout),
                 avg(t_paint),
-                avg(t_present),
-                avg(t_jobs + t_input + t_text_prep + t_images + t_text_pop + t_layout + t_paint + t_present),
+                avg(t_fence),
+                avg(t_scanout),
+                avg(t_jobs + t_input + t_text_prep + t_images + t_text_pop + t_layout + t_paint + t_fence + t_scanout),
             );
             t_jobs = Duration::ZERO;
             t_input = Duration::ZERO;
@@ -555,7 +557,8 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
             t_text_pop = Duration::ZERO;
             t_layout = Duration::ZERO;
             t_paint = Duration::ZERO;
-            t_present = Duration::ZERO;
+            t_fence = Duration::ZERO;
+            t_scanout = Duration::ZERO;
         }
     }
 
