@@ -18,12 +18,14 @@ use menu_core_host::mem;
 use crate::host::UiState;
 use crate::vdom::{NodeId, Tree};
 
+/// Verbose tree dump used for diagnostics. Only emits at DEBUG level
+/// so production logs stay quiet.
 fn dump_tree(tree: &Tree, id: NodeId, depth: usize) {
     let Some(node) = tree.get(id) else {
-        info!("{:indent$}[{}] <missing>", "", id.0, indent = depth * 2);
+        debug!("{:indent$}[{}] <missing>", "", id.0, indent = depth * 2);
         return;
     };
-    info!(
+    debug!(
         "{:indent$}[{}] {:?} style={:?}",
         "",
         id.0,
@@ -130,7 +132,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
 
     let namespace = module.namespace(&mut context);
     let main_fn = namespace.get(js_string!("main"), &mut context)?;
-    info!(
+    debug!(
         "main export resolved: callable={}, type={}",
         main_fn.as_callable().is_some(),
         main_fn.type_of()
@@ -141,14 +143,13 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         &[],
         &mut context,
     )?;
-    info!("main() initial call returned, awaiting promise chain");
     while let Some(p) = result.as_promise() {
         match p.await_blocking(&mut context) {
             Ok(v) => result = v,
             Err(e) => return Err(e.into()),
         }
     }
-    info!("main() resolved; tree root = {}", ui_state.root().0);
+    debug!("main() resolved; tree root = {}", ui_state.root().0);
     ui_state.with_tree(|t| dump_tree(t, ui_state.root(), 0));
 
     // 4. Frame loop.
@@ -165,16 +166,11 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     }
 
     let timeout = Duration::from_millis(500);
-    let mut frame_idx: u32 = 0;
     while running.load(Ordering::SeqCst) {
         let frame = device.begin_frame();
         let frame = ui_state.with_tree(|tree| crate::paint::paint(tree, root, &fb, frame))?;
         frame.present()?.submit()?.wait_presented(timeout)?;
         ui_state.with_tree_mut(|t| t.clear_dirty());
-        if frame_idx == 0 {
-            info!("first frame presented");
-        }
-        frame_idx = frame_idx.wrapping_add(1);
     }
 
     info!("menu-ui: stopping engine");

@@ -17,7 +17,6 @@ const box: CSSProperties = {
 };
 
 export function App() {
-  console.log('App() rendering');
   return (
     <div style={root}>
       <div style={box} />
