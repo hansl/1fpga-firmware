@@ -1,9 +1,15 @@
 //! Per-frame command builder + fence token.
 //!
 //! [`Frame`] is acquired via [`Device::begin_frame`], populated with
-//! draw calls, then handed off to [`Frame::submit`] which copies the
-//! batched commands into the device-side ring, kicks the engine, and
-//! returns a [`FenceToken`] for synchronisation.
+//! draw calls, then handed off to [`Frame::submit`] which advances
+//! `RING_TAIL`, kicks the engine, and returns a [`FenceToken`] for
+//! synchronisation.
+//!
+//! Commands stream **directly** into the device's ring buffer in DDR3
+//! as they're appended — there is no staging buffer or bulk copy at
+//! submit time. Each `push_cmd` call encodes the command into a small
+//! stack-allocated scratch and `volatile_copy_to_devmem`s it into the
+//! ring at the host-tracked tail offset.
 //!
 //! [`Device::begin_frame`]: crate::device::Device::begin_frame
 
@@ -15,7 +21,7 @@ use crate::devmem::volatile_copy_to_devmem;
 use crate::error::DeviceError;
 use crate::protocol::commands::TARGET_FRAMEBUFFER;
 use crate::protocol::{BlendMode, Command, Filter, Rect, Rgba, registers};
-use crate::ring::RingWriter;
+use crate::ring::RingError;
 use crate::texture::TextureHandle;
 
 /// Optional parameters for [`Frame::copy_rect`].
@@ -54,23 +60,38 @@ impl Default for CopyOpts {
 /// ```
 pub struct Frame<'a> {
     device: &'a mut Device,
-    staging: Vec<u8>,
+    /// Ring size in bytes (power of two; cached at frame start).
+    ring_size: u32,
+    /// `ring_size - 1` for cheap modulo via `& mask`.
+    ring_mask: u32,
+    /// Host-tracked write offset into the ring. Advanced by every
+    /// `push_cmd`; written into `RING_TAIL` at `submit`.
     tail: u32,
+    /// Cached FPGA-side `RING_HEAD` at frame start, used for free-space
+    /// accounting. We don't re-read it mid-frame; for typical workloads
+    /// the ring is far larger than one frame's commands.
     head: u32,
     pre_frame_count: u32,
     will_present: bool,
 }
 
+/// Encoded length of the largest single command (COPY_RECT with tint =
+/// 7 words = 28 bytes). The push scratch buffer is sized to this so any
+/// command — and any wrap-pad NOP, which is bounded by the same upper
+/// limit — fits without heap allocation.
+const MAX_CMD_BYTES: usize = 32;
+
 impl<'a> Frame<'a> {
     pub(crate) fn new(device: &'a mut Device) -> Self {
-        let ring_size = device.ring_size_bytes();
-        let staging = vec![0u8; ring_size];
+        let ring_size = device.ring_size_bytes() as u32;
+        debug_assert!(ring_size.is_power_of_two());
         let tail = device.ring_tail();
         let head = device.read_ring_head();
         let pre_frame_count = device.frame_count();
         Self {
             device,
-            staging,
+            ring_size,
+            ring_mask: ring_size - 1,
             tail,
             head,
             pre_frame_count,
@@ -78,13 +99,65 @@ impl<'a> Frame<'a> {
         }
     }
 
+    /// Encode `cmd` and stream it into the ring at the current tail,
+    /// inserting a NOP-pad first if the command would otherwise straddle
+    /// the physical end of the ring (see PROTOCOL.md §4 — the FPGA
+    /// fetcher requires every command to live contiguously).
+    ///
+    /// Mirrors the algorithm in [`crate::ring::RingWriter::push`] but
+    /// targets `/dev/mem` directly via `volatile_copy_to_devmem` instead
+    /// of an in-memory `&mut [u8]` slice.
     fn push_cmd(&mut self, cmd: &Command) -> Result<(), DeviceError> {
-        let new_tail = {
-            let mut writer = RingWriter::with_state(&mut self.staging, self.tail, self.head)?;
-            writer.push(cmd)?;
-            writer.tail()
-        };
-        self.tail = new_tail;
+        let need = cmd.encoded_len();
+        debug_assert!(
+            need <= MAX_CMD_BYTES,
+            "command encoded_len ({need}) exceeds MAX_CMD_BYTES",
+        );
+
+        // NOP-pad if the command would cross the physical end of the
+        // ring. `pad_bytes` is the gap between tail and ring_end; the
+        // pad itself is encoded as a single NOP whose length covers
+        // exactly that span.
+        let to_end = (self.ring_size - self.tail) as usize;
+        let pad_bytes = if need > to_end { to_end } else { 0 };
+        let total = pad_bytes + need;
+
+        // Free-space check (one word of margin so empty/full are
+        // distinguishable, per §4.2).
+        let free = self
+            .head
+            .wrapping_sub(self.tail)
+            .wrapping_sub(4)
+            & self.ring_mask;
+        if total as u32 > free {
+            return Err(DeviceError::Ring(RingError::Full {
+                need: total,
+                free: free as usize,
+            }));
+        }
+
+        let mut buf = [0u8; MAX_CMD_BYTES];
+        let ring_ptr = self.device.ring_devmem_ptr();
+
+        if pad_bytes > 0 {
+            debug_assert_eq!(pad_bytes % 4, 0);
+            // Pad-NOP: padding_words counts argument words, so its total
+            // encoded size is 4 + 4*padding_words = pad_bytes.
+            let padding_words = ((pad_bytes / 4) - 1) as u8;
+            let nop = Command::Nop { padding_words };
+            nop.encode(&mut buf[..pad_bytes]).map_err(RingError::from)?;
+            // SAFETY: ring_ptr maps `ring_size` bytes; tail < ring_size
+            // and tail+pad_bytes <= ring_size (pad fills exactly to end).
+            unsafe { volatile_copy_to_devmem(ring_ptr.add(self.tail as usize), &buf[..pad_bytes]) };
+            self.tail = (self.tail + pad_bytes as u32) & self.ring_mask;
+            debug_assert_eq!(self.tail, 0, "NOP-pad should wrap tail to 0");
+        }
+
+        cmd.encode(&mut buf[..need]).map_err(RingError::from)?;
+        // SAFETY: ring_ptr maps `ring_size` bytes; tail+need <= ring_size
+        // (we either just wrapped to 0 or `to_end >= need`).
+        unsafe { volatile_copy_to_devmem(ring_ptr.add(self.tail as usize), &buf[..need]) };
+        self.tail = (self.tail + need as u32) & self.ring_mask;
         Ok(())
     }
 
@@ -182,38 +255,20 @@ impl<'a> Frame<'a> {
         Ok(self)
     }
 
-    /// Encode a trailing `FENCE`, copy the staging buffer into the
-    /// device-side ring, advance `RING_TAIL`, and pulse `RING_KICK`.
+    /// Append a trailing `FENCE`, advance `RING_TAIL`, and pulse
+    /// `RING_KICK`.
+    ///
+    /// Commands have already streamed into the ring as they were
+    /// pushed (see [`Self::push_cmd`]); submit just publishes the new
+    /// tail to the FPGA after a release fence so the DDR3 writes are
+    /// visible before the consumer can observe the bump.
     pub fn submit(mut self) -> Result<FenceToken<'a>, DeviceError> {
         let fence_value = self.device.allocate_fence();
         self.push_cmd(&Command::Fence {
             value: fence_value,
         })?;
 
-        let prev_tail = self.device.ring_tail();
         let new_tail = self.tail;
-        let ring_size = self.staging.len();
-        let ring_ptr = self.device.ring_devmem_ptr();
-
-        if new_tail >= prev_tail {
-            let start = prev_tail as usize;
-            let end = new_tail as usize;
-            // SAFETY: `ring_ptr` is a /dev/mem mapping of `ring_size`
-            // bytes; the slice indexes stay within the staging buffer
-            // (also `ring_size` bytes); `volatile_copy_to_devmem` writes
-            // byte-by-byte volatile.
-            unsafe {
-                volatile_copy_to_devmem(ring_ptr.add(start), &self.staging[start..end]);
-            }
-        } else {
-            // Wrapped: write [prev_tail .. ring_size), then [0 .. new_tail).
-            let start = prev_tail as usize;
-            let end = new_tail as usize;
-            unsafe {
-                volatile_copy_to_devmem(ring_ptr.add(start), &self.staging[start..ring_size]);
-                volatile_copy_to_devmem(ring_ptr, &self.staging[..end]);
-            }
-        }
 
         // dsb-st: ensure DDR3 writes are visible before RING_TAIL advance.
         fence(Ordering::Release);
