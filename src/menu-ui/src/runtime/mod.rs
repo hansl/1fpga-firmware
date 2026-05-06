@@ -405,7 +405,24 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     let mut pump = Pump::open_all();
     let router = IntentRouter::new();
     let mut event_buf: Vec<RawInputEvent> = Vec::new();
+    // Per-stage timing accumulators. Every TIMING_LOG_PERIOD frames
+    // we log the average per-stage cost. Tells us where the frame
+    // budget actually goes (so we can tell tick_jobs from layout
+    // from present, etc.).
+    use std::time::Instant;
+    const TIMING_LOG_PERIOD: u32 = 60;
+    let mut t_jobs = Duration::ZERO;
+    let mut t_input = Duration::ZERO;
+    let mut t_text_prep = Duration::ZERO;
+    let mut t_images = Duration::ZERO;
+    let mut t_text_pop = Duration::ZERO;
+    let mut t_layout = Duration::ZERO;
+    let mut t_paint = Duration::ZERO;
+    let mut t_present = Duration::ZERO;
+
     while running.load(Ordering::SeqCst) {
+        let t0 = Instant::now();
+
         // 0a. Drive the JS job queue forward by one tick. We can't
         //     use `context.run_jobs()` here — it blocks until every
         //     queued job (including future-scheduled timeouts) is
@@ -416,6 +433,8 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         if let Err(e) = boa::tick_jobs(&executor, &mut context) {
             tracing::warn!("tick_jobs error: {e}");
         }
+
+        let t1 = Instant::now();
 
         // 0b. Pump input. Drain pending evdev events, translate to
         //     intents, dispatch any subscribed JS listeners.
@@ -431,6 +450,8 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
             tracing::warn!("tick_jobs error: {e}");
         }
 
+        let t2 = Instant::now();
+
         // 1. Resolve text style inheritance once for the frame.
         let text_styles = ui_state.with_tree(|tree| crate::text::resolve(tree, root));
 
@@ -439,10 +460,14 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         //    before begin_frame.
         ui_state.with_tree(|tree| crate::text::prepare(tree, &text_styles, &mut fonts, &mut device))?;
 
+        let t3 = Instant::now();
+
         // 3. Prepare images: walk the tree, decode + upload any
         //    `<img>` whose `src` we haven't seen yet. Failures are
         //    cached so we don't retry every frame.
         ui_state.with_tree(|tree| prepare_images(tree, root, &mut images, &mut device));
+
+        let t4 = Instant::now();
 
         // 4. Populate text cache: allocate render-target textures for
         //    any (content, font, size, color) tuples we haven't seen
@@ -450,6 +475,8 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         let pendings = ui_state.with_tree(|tree| {
             text_cache.populate(tree, &text_styles, &fonts, &mut device)
         })?;
+
+        let t5 = Instant::now();
 
         // 5. Compute layout. Taffy's measure function consults the
         //    font atlas / image registry for text and img leaves.
@@ -464,6 +491,8 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                 &images,
             )
         });
+
+        let t6 = Instant::now();
 
         // 6. Begin frame: render pending text into their RTs first
         //    (target = RT, glyphs, target = framebuffer), then paint
@@ -483,10 +512,51 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
             )
         })?;
         let frame = paint_canary(frame, &fb, frame_idx)?;
+
+        let t7 = Instant::now();
+
         frame.present()?.submit()?.wait_presented(timeout)?;
+
+        let t8 = Instant::now();
+
         ui_state.with_tree_mut(|t| t.clear_dirty());
         fps_counter.record_frame();
+
+        t_jobs += t1 - t0;
+        t_input += t2 - t1;
+        t_text_prep += t3 - t2;
+        t_images += t4 - t3;
+        t_text_pop += t5 - t4;
+        t_layout += t6 - t5;
+        t_paint += t7 - t6;
+        t_present += t8 - t7;
+
         frame_idx = frame_idx.wrapping_add(1);
+
+        if frame_idx % TIMING_LOG_PERIOD == 0 {
+            let n = TIMING_LOG_PERIOD as u32;
+            let avg = |t: Duration| t.as_micros() as u32 / n;
+            tracing::info!(
+                "frame timings (us avg over {n}): jobs={} input={} text_prep={} images={} text_pop={} layout={} paint={} present={} total={}",
+                avg(t_jobs),
+                avg(t_input),
+                avg(t_text_prep),
+                avg(t_images),
+                avg(t_text_pop),
+                avg(t_layout),
+                avg(t_paint),
+                avg(t_present),
+                avg(t_jobs + t_input + t_text_prep + t_images + t_text_pop + t_layout + t_paint + t_present),
+            );
+            t_jobs = Duration::ZERO;
+            t_input = Duration::ZERO;
+            t_text_prep = Duration::ZERO;
+            t_images = Duration::ZERO;
+            t_text_pop = Duration::ZERO;
+            t_layout = Duration::ZERO;
+            t_paint = Duration::ZERO;
+            t_present = Duration::ZERO;
+        }
     }
 
     info!("menu-ui: stopping engine");
