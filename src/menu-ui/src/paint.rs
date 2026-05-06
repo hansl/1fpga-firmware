@@ -226,8 +226,16 @@ fn paint_text<'a>(
     if cached.width == 0 || cached.height == 0 {
         return Ok(frame);
     }
+    // Round dst.x down to a 16-pixel multiple so the framebuffer write
+    // address is 64-byte aligned at cur_x=0. This lets the FPGA blit
+    // engine engage its 16-pixel burst tier from the start of every
+    // text row instead of bottoming out at smaller bursts. Visual
+    // shift is at most 15 px left of where Taffy placed the text;
+    // imperceptible at our typical sizes.
+    let raw_x = clamp_u16(lay.x);
+    let aligned_x = raw_x & !15;
     let dst = Rect::new(
-        clamp_u16(lay.x),
+        aligned_x,
         clamp_u16(lay.y),
         cached.width,
         cached.height,
