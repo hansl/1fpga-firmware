@@ -7,7 +7,7 @@
 //! once per frame into a `HashMap<NodeId, ResolvedTextStyle>` so
 //! layout's measure function and paint share the same answer.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use menu_core_host::device::Device;
 use menu_core_host::protocol::Rgba;
@@ -203,21 +203,36 @@ impl TextCache {
 }
 
 /// Ensure every `(font, px_size)` pair used by text nodes in the tree
-/// has a built+uploaded atlas. Called before layout each frame; cheap
-/// when nothing new is needed (just hashmap lookups in `ensure`).
+/// has a built+uploaded atlas covering all the chars actually rendered.
+/// Called before layout each frame; cheap when nothing new is needed
+/// (just hashmap lookups in `ensure`). Atlas rebuilds happen only
+/// when a new char is encountered for that (font, size).
 pub fn prepare(
     tree: &Tree,
     resolved: &HashMap<NodeId, ResolvedTextStyle>,
     registry: &mut FontRegistry,
     device: &mut Device,
 ) -> Result<(), FontError> {
+    // Gather the unique character set per (font, size) by scanning
+    // every text node's content. Demand-driven so unicode beyond ASCII
+    // (middle dot, smart quotes, em dash, accented chars, …) renders
+    // correctly without bloating atlases for unused glyphs.
+    let mut needed: HashMap<(String, u16), HashSet<char>> = HashMap::new();
     for (id, rs) in resolved {
         let Some(node) = tree.get(*id) else {
             continue;
         };
-        if matches!(node.kind, NodeKind::Text { .. }) {
-            registry.ensure(device, &rs.font_name, rs.px_size.round() as u16)?;
+        let NodeKind::Text { content } = &node.kind else {
+            continue;
+        };
+        let key = (rs.font_name.clone(), rs.px_size.round() as u16);
+        let chars = needed.entry(key).or_default();
+        for ch in content.chars() {
+            chars.insert(ch);
         }
+    }
+    for ((font, size), chars) in needed {
+        registry.ensure(device, &font, size, &chars)?;
     }
     Ok(())
 }

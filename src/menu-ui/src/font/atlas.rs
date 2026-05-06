@@ -54,6 +54,13 @@ impl FontAtlas {
         self.glyphs.get(&ch).or_else(|| self.glyphs.get(&'?'))
     }
 
+    /// Return `true` if the atlas has a real entry for `ch` (not the
+    /// `'?'` fallback). Used by the registry to decide whether to
+    /// rebuild the atlas with an expanded charset.
+    pub fn has_glyph(&self, ch: char) -> bool {
+        self.glyphs.contains_key(&ch)
+    }
+
     /// Total advance width of `text` if rendered with this atlas.
     pub fn measure(&self, text: &str) -> u32 {
         let mut total: i32 = 0;

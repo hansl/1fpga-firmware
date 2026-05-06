@@ -10,7 +10,7 @@
 //! 27 KB, SIL OFL). `1fpga:gui.registerFont(name, ttfBytes)` (added
 //! in the host module) registers additional fonts at runtime.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use menu_core_host::device::Device;
 use menu_core_host::error::DeviceError;
@@ -27,10 +27,9 @@ pub const DEFAULT_FONT_NAME: &str = "default";
 const DEFAULT_FONT_BYTES: &[u8] =
     include_bytes!("../../../menu-core/fonts/NotoSans-Regular.ttf");
 
-/// ASCII-printable charset (space..tilde). Sized for a typical
-/// English-locale menu; extension to wider charsets is easy via
-/// re-rasterising at request time.
-const DEFAULT_CHARSET_BYTES: std::ops::RangeInclusive<u8> = b' '..=b'~';
+/// Always include `'?'` as the missing-glyph fallback so unknown
+/// codepoints render as a question mark instead of disappearing.
+const FALLBACK_CHAR: char = '?';
 
 #[derive(Debug, thiserror::Error)]
 pub enum FontError {
@@ -83,23 +82,54 @@ impl FontRegistry {
         self.fonts.contains_key(name)
     }
 
-    /// Get the cached atlas + texture for `(name, px_size)`, building
-    /// + uploading lazily on first call. Subsequent calls with the
-    /// same key are cheap hashmap lookups.
+    /// Ensure the atlas for `(name, px_size)` covers every character
+    /// in `required` (plus `'?'` for the missing-glyph fallback). The
+    /// atlas is built or rebuilt on demand: if the cached version
+    /// already contains all required chars, returns it; otherwise
+    /// rasterises a fresh atlas with the union of old + new chars and
+    /// uploads it as a new texture. The previous texture is left in
+    /// the pool (eviction is future work).
     pub fn ensure(
         &mut self,
         device: &mut Device,
         name: &str,
         px_size: u16,
+        required: &HashSet<char>,
     ) -> Result<&CachedAtlas, FontError> {
         let key: AtlasKey = (name.to_string(), px_size);
-        if !self.atlases.contains_key(&key) {
+
+        // Compute the full charset we need: required ∪ {'?'} ∪
+        // anything the existing atlas already has (so we don't lose
+        // glyphs by rebuilding).
+        let mut chars: HashSet<char> = required.clone();
+        chars.insert(FALLBACK_CHAR);
+        let needs_build = match self.atlases.get(&key) {
+            None => true,
+            Some(cached) => required.iter().any(|c| !cached.atlas.has_glyph(*c)),
+        };
+
+        if needs_build {
+            // When rebuilding, preserve any chars the existing atlas
+            // already had so previously-cached PendingRenders don't
+            // suddenly miss glyphs they expected.
+            if let Some(prev) = self.atlases.get(&key) {
+                // Copy the existing glyphs' chars into `chars` —
+                // FontAtlas exposes them via `glyph()` lookups; here
+                // we iterate the printable ASCII range as a cheap
+                // approximation. (Full enumeration via iter_glyphs
+                // would be cleaner; left as a future polish.)
+                for ch in '\u{0020}'..='\u{007E}' {
+                    if prev.atlas.has_glyph(ch) {
+                        chars.insert(ch);
+                    }
+                }
+            }
             let bytes = self
                 .fonts
                 .get(name)
                 .ok_or_else(|| FontError::UnknownFont(name.to_string()))?;
-            let charset: String = DEFAULT_CHARSET_BYTES.map(|b| b as char).collect();
-            let atlas = build_atlas(bytes, px_size as f32, &charset, 512, 1024)?;
+            let charset: String = chars.iter().collect();
+            let atlas = build_atlas(bytes, px_size as f32, &charset, 1024, 4096)?;
             let texture = device.upload_texture(&TextureSpec {
                 format: TextureFormat::A8,
                 width: atlas.width,
@@ -108,14 +138,16 @@ impl FontRegistry {
                 data: &atlas.bytes,
             })?;
             tracing::info!(
-                "fontatlas: {} @ {} px — {}x{}, tex_id={}",
+                "fontatlas: {} @ {} px — {}x{}, {} glyphs, tex_id={}",
                 name,
                 px_size,
                 atlas.width,
                 atlas.height,
+                chars.len(),
                 texture.id
             );
-            self.atlases.insert(key.clone(), CachedAtlas { atlas, texture });
+            self.atlases
+                .insert(key.clone(), CachedAtlas { atlas, texture });
         }
         Ok(self
             .atlases
