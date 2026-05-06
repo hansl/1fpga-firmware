@@ -11,12 +11,15 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use boa_engine::module::{IntoJsModule, MapModuleLoader};
+use boa_engine::object::builtins::JsFunction;
 use boa_engine::{
     Context, JsArgs, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction,
     js_string,
 };
 use boa_macros::{Finalize, JsData, Trace};
 
+use crate::input::events::InputSource;
+use crate::input::state::{InputState, ListenerId, ListenerKind, ListenerScope};
 use crate::style::{
     Style, parse_align_items, parse_color, parse_display, parse_flex_direction, parse_flex_wrap,
     parse_justify_content, parse_overflow, parse_position,
@@ -92,6 +95,34 @@ pub fn register(loader: &MapModuleLoader, context: &mut Context) -> JsResult<()>
         (
             js_string!("setStyle"),
             NativeFunction::from_fn_ptr(set_style),
+        ),
+        (
+            js_string!("addIntentListener"),
+            NativeFunction::from_fn_ptr(add_intent_listener),
+        ),
+        (
+            js_string!("addRawInputListener"),
+            NativeFunction::from_fn_ptr(add_raw_input_listener),
+        ),
+        (
+            js_string!("removeListener"),
+            NativeFunction::from_fn_ptr(remove_listener),
+        ),
+        (
+            js_string!("pushFocus"),
+            NativeFunction::from_fn_ptr(push_focus),
+        ),
+        (
+            js_string!("popFocus"),
+            NativeFunction::from_fn_ptr(pop_focus),
+        ),
+        (
+            js_string!("setFocus"),
+            NativeFunction::from_fn_ptr(set_focus_host),
+        ),
+        (
+            js_string!("getFocus"),
+            NativeFunction::from_fn_ptr(get_focus),
         ),
         (
             js_string!("run"),
@@ -246,6 +277,129 @@ fn run_app(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
     let state = ui_state(context)?;
     state.set_root(id);
     Ok(JsValue::undefined())
+}
+
+// ===== Input listeners + focus =====
+
+fn input_state(context: &mut Context) -> JsResult<InputState> {
+    context.get_data::<InputState>().cloned().ok_or_else(|| {
+        JsError::from_native(
+            JsNativeError::error().with_message("InputState not installed in Boa context"),
+        )
+    })
+}
+
+/// `addIntentListener(name, handler, opts?) -> id`. `opts` may
+/// contain `{ global: true }` (default false) and `{ nodeId: u32 }`
+/// (defaults to the current focus, or "any focus" if none set).
+fn add_intent_listener(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let name = args
+        .get_or_undefined(0)
+        .to_string(context)?
+        .to_std_string_escaped();
+    let handler = args
+        .get_or_undefined(1)
+        .as_object()
+        .and_then(|o| JsFunction::from_object(o.clone()))
+        .ok_or_else(|| {
+            JsError::from_native(JsNativeError::typ().with_message("expected handler function"))
+        })?;
+    let scope = parse_scope(args.get_or_undefined(2), context)?;
+    let state = input_state(context)?;
+    let id = state.add(ListenerKind::Intent { name }, scope, handler);
+    Ok(JsValue::from(id.0))
+}
+
+/// `addRawInputListener(source, handler, opts?) -> id`. `source` is
+/// `'keyboard' | 'gamepad' | 'mouse'`.
+fn add_raw_input_listener(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let source_str = args
+        .get_or_undefined(0)
+        .to_string(context)?
+        .to_std_string_escaped();
+    let source = match source_str.as_str() {
+        "keyboard" => InputSource::Keyboard,
+        "gamepad" => InputSource::Gamepad,
+        "mouse" => InputSource::Mouse,
+        other => {
+            return Err(JsError::from_native(
+                JsNativeError::error()
+                    .with_message(format!("unknown raw input source: {other}")),
+            ));
+        }
+    };
+    let handler = args
+        .get_or_undefined(1)
+        .as_object()
+        .and_then(|o| JsFunction::from_object(o.clone()))
+        .ok_or_else(|| {
+            JsError::from_native(JsNativeError::typ().with_message("expected handler function"))
+        })?;
+    let scope = parse_scope(args.get_or_undefined(2), context)?;
+    let state = input_state(context)?;
+    let id = state.add(ListenerKind::Raw { source }, scope, handler);
+    Ok(JsValue::from(id.0))
+}
+
+fn remove_listener(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let id = ListenerId(args.get_or_undefined(0).to_u32(context)?);
+    let state = input_state(context)?;
+    Ok(JsValue::from(state.remove(id)))
+}
+
+fn push_focus(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let id = args.get_or_undefined(0).to_u32(context)?;
+    input_state(context)?.push_focus(id);
+    Ok(JsValue::undefined())
+}
+
+fn pop_focus(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let popped = input_state(context)?.pop_focus();
+    Ok(popped.map(JsValue::from).unwrap_or(JsValue::null()))
+}
+
+fn set_focus_host(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = args.get_or_undefined(0).to_u32(context)?;
+    input_state(context)?.set_focus(id);
+    Ok(JsValue::undefined())
+}
+
+fn get_focus(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let f = input_state(context)?.focus();
+    Ok(f.map(JsValue::from).unwrap_or(JsValue::null()))
+}
+
+/// Parse the optional `opts` object passed to `add*Listener`. Default
+/// scope is `Global` (so handlers fire regardless of focus); pass
+/// `{ global: false, nodeId: <id> }` to scope to a specific subtree.
+fn parse_scope(value: &JsValue, context: &mut Context) -> JsResult<ListenerScope> {
+    let Some(opts) = value.as_object() else {
+        return Ok(ListenerScope::Global);
+    };
+    let global_v = opts.get(js_string!("global"), context)?;
+    let global = global_v.is_undefined() || global_v.to_boolean();
+    if global {
+        return Ok(ListenerScope::Global);
+    }
+    let node_v = opts.get(js_string!("nodeId"), context)?;
+    if node_v.is_undefined() || node_v.is_null() {
+        return Ok(ListenerScope::Global);
+    }
+    Ok(ListenerScope::Focused {
+        node_id: node_v.to_u32(context)?,
+    })
 }
 
 // ===== Style argument parsers =====

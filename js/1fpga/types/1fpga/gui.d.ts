@@ -122,4 +122,66 @@ declare module '1fpga:gui' {
    * the runtime starts driving a frame loop with this root.
    */
   export function run(root: NodeId): void;
+
+  // ===== Input =====================================================
+
+  /** A high-level intent dispatched by the runtime's intent router. */
+  export interface IntentEvent {
+    name: string;
+    kind: 'pressed' | 'released' | 'repeat';
+  }
+
+  /** Raw keyboard / gamepad / mouse event passed to `addRawInputListener`. */
+  export interface RawInputEvent {
+    source: 'keyboard' | 'gamepad' | 'mouse';
+    /** Linux evdev keycode for keyboard / gamepad button. */
+    code?: number;
+    pressed?: boolean;
+    /** True iff this is a kernel auto-repeat fire. (Keyboard only.) */
+    repeat?: boolean;
+    /** Gamepad axis events. */
+    kind?: 'button' | 'axis' | 'move' | 'wheel';
+    axis?: number;
+    value?: number;
+    /** Mouse motion / wheel deltas. */
+    dx?: number;
+    dy?: number;
+    delta?: number;
+  }
+
+  /** Optional per-listener configuration. */
+  export interface ListenerOpts {
+    /** When `true` (default), the listener fires regardless of focus.
+     *  When `false`, it only fires when the focused subtree includes
+     *  `nodeId`. */
+    global?: boolean;
+    nodeId?: NodeId;
+  }
+
+  /** Subscribe to a high-level intent. Returns a numeric `id` —
+   *  pass it to `removeListener` to unsubscribe. */
+  export function addIntentListener(
+    name: string,
+    handler: (e: IntentEvent) => void,
+    opts?: ListenerOpts,
+  ): number;
+
+  /** Subscribe to raw events from a specific input source. */
+  export function addRawInputListener(
+    source: 'keyboard' | 'gamepad' | 'mouse',
+    handler: (e: RawInputEvent) => void,
+    opts?: ListenerOpts,
+  ): number;
+
+  /** Unsubscribe a listener previously returned by `add*Listener`. */
+  export function removeListener(id: number): boolean;
+
+  /** Push `node` onto the focus stack — it becomes the active focus. */
+  export function pushFocus(node: NodeId): void;
+  /** Pop the top of the focus stack and return the previous value. */
+  export function popFocus(): NodeId | null;
+  /** Replace the entire focus stack with just `node`. */
+  export function setFocus(node: NodeId): void;
+  /** Read the current focus (top of stack), or null if empty. */
+  export function getFocus(): NodeId | null;
 }

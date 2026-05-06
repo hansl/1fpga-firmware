@@ -20,8 +20,14 @@ use menu_core_host::protocol::{BlendMode, Rect, Rgba};
 use crate::font::{FontError, FontRegistry};
 use crate::host::UiState;
 use crate::image::ImageRegistry;
+use crate::input::events::{InputSource, RawInputEvent};
+use crate::input::pump::Pump;
+use crate::input::router::{IntentKind, IntentRouter};
+use crate::input::state::InputState;
 use crate::text::TextCache;
 use crate::vdom::{NodeId, NodeKind, Tree};
+
+use boa_engine::{JsObject, JsValue};
 
 /// Compile-time build identifier — package version. Logged at startup
 /// so a glance at the device output confirms which binary is running.
@@ -50,6 +56,157 @@ fn paint_canary<'a>(
     let x = fb.width.saturating_sub(SIZE + 8);
     let y = 8u16;
     frame.fill_rect_unclipped(Rect::new(x, y, SIZE, SIZE), color, BlendMode::Opaque)
+}
+
+/// Translate one raw event to intents and dispatch JS listeners. Raw
+/// listeners for the event's source also fire (so input boxes /
+/// global hotkeys work). Snapshot listener lists before calling so
+/// handlers that subscribe / unsubscribe during dispatch don't
+/// invalidate iteration.
+fn dispatch_input(
+    input_state: &InputState,
+    router: &IntentRouter,
+    ev: &RawInputEvent,
+    context: &mut boa_engine::Context,
+) -> Result<(), RuntimeError> {
+    // Raw listeners (one per source).
+    let raw_handlers = input_state.snapshot_raw(ev.source());
+    if !raw_handlers.is_empty() {
+        let arg = raw_event_to_js(ev, context)?;
+        for h in raw_handlers {
+            if let Err(e) = h.call(&JsValue::undefined(), &[arg.clone()], context) {
+                tracing::warn!("raw input handler threw: {e}");
+            }
+        }
+    }
+    // Intent dispatches.
+    let intents = router.translate(ev);
+    for intent in intents {
+        let handlers = input_state.snapshot_intent(&intent.name);
+        if handlers.is_empty() {
+            continue;
+        }
+        let arg = intent_to_js(&intent, context)?;
+        for h in handlers {
+            if let Err(e) = h.call(&JsValue::undefined(), &[arg.clone()], context) {
+                tracing::warn!("intent handler '{}' threw: {e}", intent.name);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Build a JS object describing an intent dispatch:
+/// `{ name: 'confirm', kind: 'pressed' | 'released' | 'repeat' }`.
+fn intent_to_js(
+    intent: &crate::input::router::IntentDispatch,
+    context: &mut boa_engine::Context,
+) -> Result<JsValue, RuntimeError> {
+    let obj = JsObject::with_null_proto();
+    obj.set(
+        js_string!("name"),
+        js_string!(intent.name.clone()),
+        false,
+        context,
+    )
+    .map_err(boa_err)?;
+    obj.set(
+        js_string!("kind"),
+        js_string!(match intent.kind {
+            IntentKind::Pressed => "pressed",
+            IntentKind::Released => "released",
+            IntentKind::Repeat => "repeat",
+        }),
+        false,
+        context,
+    )
+    .map_err(boa_err)?;
+    Ok(JsValue::from(obj))
+}
+
+/// Build a JS object describing a raw input event. Shape varies by
+/// source — keyboard gets {code, pressed, kind, mods}, gamepad gets
+/// {kind: 'button'|'axis', ...}, mouse similar.
+fn raw_event_to_js(
+    ev: &RawInputEvent,
+    context: &mut boa_engine::Context,
+) -> Result<JsValue, RuntimeError> {
+    use crate::input::events::{GamepadKind, MouseKind};
+    let obj = JsObject::with_null_proto();
+    let source = match ev.source() {
+        InputSource::Keyboard => "keyboard",
+        InputSource::Gamepad => "gamepad",
+        InputSource::Mouse => "mouse",
+    };
+    obj.set(js_string!("source"), js_string!(source), false, context)
+        .map_err(boa_err)?;
+    match ev {
+        RawInputEvent::Keyboard(k) => {
+            obj.set(js_string!("code"), JsValue::from(k.code), false, context)
+                .map_err(boa_err)?;
+            obj.set(
+                js_string!("pressed"),
+                JsValue::from(k.pressed),
+                false,
+                context,
+            )
+            .map_err(boa_err)?;
+            obj.set(
+                js_string!("repeat"),
+                JsValue::from(matches!(k.kind, crate::input::events::KeyKind::Repeat)),
+                false,
+                context,
+            )
+            .map_err(boa_err)?;
+        }
+        RawInputEvent::Gamepad(g) => match g.kind {
+            GamepadKind::Button { code, pressed } => {
+                obj.set(js_string!("kind"), js_string!("button"), false, context)
+                    .map_err(boa_err)?;
+                obj.set(js_string!("code"), JsValue::from(code), false, context)
+                    .map_err(boa_err)?;
+                obj.set(js_string!("pressed"), JsValue::from(pressed), false, context)
+                    .map_err(boa_err)?;
+            }
+            GamepadKind::Axis { axis, value } => {
+                obj.set(js_string!("kind"), js_string!("axis"), false, context)
+                    .map_err(boa_err)?;
+                obj.set(js_string!("axis"), JsValue::from(axis), false, context)
+                    .map_err(boa_err)?;
+                obj.set(js_string!("value"), JsValue::from(value), false, context)
+                    .map_err(boa_err)?;
+            }
+        },
+        RawInputEvent::Mouse(m) => match m.kind {
+            MouseKind::Move { dx, dy } => {
+                obj.set(js_string!("kind"), js_string!("move"), false, context)
+                    .map_err(boa_err)?;
+                obj.set(js_string!("dx"), JsValue::from(dx), false, context)
+                    .map_err(boa_err)?;
+                obj.set(js_string!("dy"), JsValue::from(dy), false, context)
+                    .map_err(boa_err)?;
+            }
+            MouseKind::Button { code, pressed } => {
+                obj.set(js_string!("kind"), js_string!("button"), false, context)
+                    .map_err(boa_err)?;
+                obj.set(js_string!("code"), JsValue::from(code), false, context)
+                    .map_err(boa_err)?;
+                obj.set(js_string!("pressed"), JsValue::from(pressed), false, context)
+                    .map_err(boa_err)?;
+            }
+            MouseKind::Wheel { delta } => {
+                obj.set(js_string!("kind"), js_string!("wheel"), false, context)
+                    .map_err(boa_err)?;
+                obj.set(js_string!("delta"), JsValue::from(delta), false, context)
+                    .map_err(boa_err)?;
+            }
+        },
+    }
+    Ok(JsValue::from(obj))
+}
+
+fn boa_err(e: boa_engine::JsError) -> RuntimeError {
+    RuntimeError::Js(format!("{e}"))
 }
 
 /// Walk the tree under `root` and load every `<img src>` we haven't
@@ -182,7 +339,9 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     // 3. Build the Boa context and evaluate the bundle.
     let (mut context, _loader) = boa::build_context()?;
     let ui_state = UiState::default();
+    let input_state = InputState::new();
     context.insert_data(ui_state.clone());
+    context.insert_data(input_state.clone());
 
     let module = {
         let source = Source::from_bytes(&bundle);
@@ -233,7 +392,21 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     let mut fonts = FontRegistry::new();
     let mut text_cache = TextCache::new();
     let mut images = ImageRegistry::new();
+    let mut pump = Pump::open_all();
+    let router = IntentRouter::new();
+    let mut event_buf: Vec<RawInputEvent> = Vec::new();
     while running.load(Ordering::SeqCst) {
+        // 0. Pump input. Drain pending evdev events, translate to
+        //    intents, dispatch any subscribed JS listeners. Both
+        //    intent-listeners and raw-listeners fire here, before
+        //    the frame's prepare/paint passes — so handler-driven
+        //    setState is reflected in the same frame.
+        event_buf.clear();
+        pump.drain(&mut event_buf);
+        for ev in event_buf.drain(..) {
+            dispatch_input(&input_state, &router, &ev, &mut context)?;
+        }
+
         // 1. Resolve text style inheritance once for the frame.
         let text_styles = ui_state.with_tree(|tree| crate::text::resolve(tree, root));
 

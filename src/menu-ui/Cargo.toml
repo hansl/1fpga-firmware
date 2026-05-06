@@ -26,7 +26,9 @@ clap = { version = "4.3.5", features = ["derive"] }
 clap-verbosity-flag = "2.0.1"
 core_affinity = "0.8.1"
 ctrlc = "3.4"
+evdev = "0.13"
 fontdue = "0.9"
+libc = { workspace = true }
 menu-core-host = { workspace = true }
 png = "0.17"
 taffy = { version = "0.10", default-features = false, features = ["std", "flexbox", "block_layout", "taffy_tree"] }
