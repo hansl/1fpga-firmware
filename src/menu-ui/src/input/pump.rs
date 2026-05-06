@@ -7,7 +7,6 @@
 //! pure-Rust crate that talks to the kernel's event interface
 //! directly, with no SDL build dependencies.
 
-use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 
 use evdev::{Device, EventSummary, KeyCode};
@@ -67,6 +66,12 @@ impl Pump {
                         // delivery to the kernel's tty).
                         tracing::debug!("input: grab {} failed: {e}", path.display());
                     }
+                    if let Err(e) = dev.set_nonblocking(true) {
+                        warn!(
+                            "input: set_nonblocking failed for {}: {e}; pump may block",
+                            path.display()
+                        );
+                    }
                     let source = classify(&dev);
                     info!(
                         "input: opened {} ({:?}, name={:?})",
@@ -97,13 +102,11 @@ impl Pump {
         let n = self.devices.len();
         for i in 0..n {
             let source = self.devices[i].source;
-            // Capture path for diagnostics outside the fetch borrow.
             let path = self.devices[i].path.clone();
-            // Materialize the iterator into a Vec so the device
-            // borrow ends before we touch `self.mods`.
-            let events: Vec<evdev::InputEvent> = match nonblocking_fetch(
-                &mut self.devices[i].dev,
-            ) {
+            // `set_nonblocking(true)` was applied at open time; this
+            // returns `WouldBlock` immediately when the kernel queue
+            // is empty.
+            let events: Vec<evdev::InputEvent> = match self.devices[i].dev.fetch_events() {
                 Ok(it) => it.collect(),
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Vec::new(),
                 Err(e) => {
@@ -111,6 +114,14 @@ impl Pump {
                     Vec::new()
                 }
             };
+            if !events.is_empty() {
+                tracing::info!(
+                    "input: drained {} events from {} ({:?})",
+                    events.len(),
+                    path.display(),
+                    source
+                );
+            }
             for ev in events {
                 if let Some(raw) = translate_event(ev, source, &mut self.mods) {
                     out.push(raw);
@@ -118,22 +129,6 @@ impl Pump {
             }
         }
     }
-}
-
-/// Try to drain pending events without blocking. Sets O_NONBLOCK on
-/// the fd if not already set so subsequent `fetch_events` returns
-/// `WouldBlock` instead of waiting.
-fn nonblocking_fetch(
-    dev: &mut Device,
-) -> std::io::Result<impl Iterator<Item = evdev::InputEvent> + '_> {
-    use std::os::fd::AsRawFd;
-    let fd = dev.as_raw_fd();
-    // SAFETY: libc fcntl on a valid fd; flags returned in i32.
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL, 0) };
-    if flags & libc::O_NONBLOCK == 0 {
-        let _ = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
-    }
-    dev.fetch_events()
 }
 
 fn classify(dev: &Device) -> InputSource {
@@ -237,16 +232,3 @@ fn update_mods(code: KeyCode, pressed: bool, mods: &mut KeyMods) {
     }
 }
 
-// Suppress the "unused import" warning on macOS where fd ops compile
-// but the fcntl path is gated behind libc which compiles everywhere.
-#[allow(dead_code)]
-fn _silence_unused() -> i32 {
-    let _ = libc::O_NONBLOCK;
-    0
-}
-
-// Bring `AsRawFd` in scope for `nonblocking_fetch` even on hosts
-// without `std::os::fd` exposing it through the prelude.
-const _: fn() = || {
-    let _ = <Device as AsRawFd>::as_raw_fd;
-};

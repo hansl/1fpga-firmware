@@ -18,7 +18,6 @@ use boa_runtime as _;
 use ctrlc as _;
 use evdev as _;
 use fontdue as _;
-use libc as _;
 use menu_core_host as _;
 use png as _;
 use taffy as _;

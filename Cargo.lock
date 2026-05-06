@@ -3429,7 +3429,6 @@ dependencies = [
  "ctrlc",
  "evdev",
  "fontdue",
- "libc 1.0.0-alpha.3",
  "menu-core-host",
  "png 0.17.16",
  "taffy",
