@@ -451,21 +451,6 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
             tracing::warn!("tick_jobs error: {e}");
         }
 
-        // 0d. Skip the entire paint+present pipeline when the React
-        //     tree hasn't changed since the last paint. The FPGA's
-        //     fb_swapper doesn't rotate without a PRESENT, so the
-        //     display continues showing the last-painted frame at zero
-        //     ongoing cost. With this, static screens cost essentially
-        //     nothing per frame; only state changes (input, timer
-        //     callbacks) trigger a repaint.
-        let scene_dirty = ui_state.with_tree(|t| t.dirty());
-        if !scene_dirty {
-            // Yield briefly so we don't spin. ~16ms approximates one
-            // 60Hz vsync period, which bounds input-event latency.
-            std::thread::sleep(Duration::from_millis(16));
-            continue;
-        }
-
         let t2 = Instant::now();
 
         // 1. Resolve text style inheritance once for the frame.
