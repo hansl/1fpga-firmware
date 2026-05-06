@@ -1,9 +1,9 @@
 //! Paint a [`Tree`] into a `menu_core_host::Frame`.
 //!
-//! N4: handles both `<div>` (background fill) and `<text>` (per-glyph
-//! `COPY_RECT` from the font atlas, SrcAlpha-blended, tinted with the
-//! resolved color). All node positions come from the precomputed
-//! layout map.
+//! N4.5: text nodes blit a cached pre-rendered RT instead of issuing
+//! one COPY_RECT per glyph. The caching is driven by
+//! [`crate::text::TextCache`] and renders happen once per
+//! `(content, font, size, color)` tuple via [`render_pending_text`].
 
 use std::collections::HashMap;
 
@@ -14,8 +14,71 @@ use menu_core_host::protocol::{BlendMode, Filter, Rect, Rgba};
 
 use crate::font::FontRegistry;
 use crate::layout::ComputedLayout;
-use crate::text::ResolvedTextStyle;
+use crate::text::{CacheKey, PendingRender, ResolvedTextStyle, TextCache};
 use crate::vdom::{NodeId, NodeKind, Tree};
+
+/// Render every [`PendingRender`] into its allocated render-target
+/// texture. Called inside a [`Frame`] after `begin_frame` and before
+/// `paint`. Restores the active target to the framebuffer on exit.
+pub fn render_pending_text<'a>(
+    mut frame: Frame<'a>,
+    pendings: &[PendingRender],
+    fonts: &FontRegistry,
+) -> Result<Frame<'a>, DeviceError> {
+    if pendings.is_empty() {
+        return Ok(frame);
+    }
+    for p in pendings {
+        let Some(cached) = fonts.get(&p.font_name, p.px_size) else {
+            continue;
+        };
+        let atlas = &cached.atlas;
+        let glyph_tex = &cached.texture;
+
+        // Switch destination to this RT and clear it transparent.
+        frame = frame.set_target(&p.texture)?;
+        frame = frame.fill_rect_unclipped(
+            Rect::new(0, 0, p.width, p.height),
+            Rgba::TRANSPARENT,
+            BlendMode::Opaque,
+        )?;
+
+        // Walk glyphs; the RT is exactly the text's bounding box, so
+        // the pen starts at (0, baseline=ascent).
+        let baseline_y = atlas.ascent as i32;
+        let mut pen_x: i32 = 0;
+        for ch in p.content.chars() {
+            let g = match atlas.glyph(ch) {
+                Some(g) => *g,
+                None => continue,
+            };
+            if g.width > 0 && g.height > 0 {
+                let dst_x = pen_x + g.bearing_x as i32;
+                let dst_y = baseline_y - g.ymin as i32 - g.height as i32;
+                if dst_x >= 0 && dst_y >= 0 {
+                    frame = frame.copy_rect(
+                        glyph_tex,
+                        Rect::new(g.atlas_x, g.atlas_y, g.width, g.height),
+                        Rect::new(
+                            clamp_u16(dst_x as f32),
+                            clamp_u16(dst_y as f32),
+                            g.width,
+                            g.height,
+                        ),
+                        CopyOpts {
+                            blend: BlendMode::SrcAlpha,
+                            filter: Filter::Nearest,
+                            tint: Some(p.color),
+                        },
+                    )?;
+                }
+            }
+            pen_x += g.advance as i32;
+        }
+    }
+    // Back to the framebuffer for the main paint pass.
+    frame.set_target_framebuffer()
+}
 
 /// Walk the tree and paint each node into `frame`.
 pub fn paint<'a>(
@@ -24,7 +87,7 @@ pub fn paint<'a>(
     fb: &FramebufferConfig,
     layouts: &HashMap<NodeId, ComputedLayout>,
     text_styles: &HashMap<NodeId, ResolvedTextStyle>,
-    fonts: &FontRegistry,
+    text_cache: &TextCache,
     mut frame: Frame<'a>,
 ) -> Result<Frame<'a>, DeviceError> {
     // Background clear.
@@ -43,7 +106,7 @@ pub fn paint<'a>(
         root,
         layouts,
         text_styles,
-        fonts,
+        text_cache,
         frame,
         /* skip_root_bg */ true,
     )?;
@@ -55,7 +118,7 @@ fn paint_subtree<'a>(
     id: NodeId,
     layouts: &HashMap<NodeId, ComputedLayout>,
     text_styles: &HashMap<NodeId, ResolvedTextStyle>,
-    fonts: &FontRegistry,
+    text_cache: &TextCache,
     mut frame: Frame<'a>,
     skip_root_bg: bool,
 ) -> Result<Frame<'a>, DeviceError> {
@@ -87,12 +150,12 @@ fn paint_subtree<'a>(
             }
         }
         NodeKind::Text { content } => {
-            frame = paint_text(content, id, lay, text_styles, fonts, frame)?;
+            frame = paint_text(content, id, lay, text_styles, text_cache, frame)?;
         }
     }
 
     for &child in &node.children {
-        frame = paint_subtree(tree, child, layouts, text_styles, fonts, frame, false)?;
+        frame = paint_subtree(tree, child, layouts, text_styles, text_cache, frame, false)?;
     }
     Ok(frame)
 }
@@ -102,57 +165,43 @@ fn paint_text<'a>(
     id: NodeId,
     lay: &ComputedLayout,
     text_styles: &HashMap<NodeId, ResolvedTextStyle>,
-    fonts: &FontRegistry,
-    mut frame: Frame<'a>,
+    text_cache: &TextCache,
+    frame: Frame<'a>,
 ) -> Result<Frame<'a>, DeviceError> {
-    let resolved = match text_styles.get(&id) {
-        Some(r) => r,
-        None => return Ok(frame),
+    let Some(rs) = text_styles.get(&id) else {
+        return Ok(frame);
     };
-    let cached = match fonts.get(&resolved.font_name, resolved.px_size.round() as u16) {
-        Some(c) => c,
-        None => {
-            // Atlas missing — prepare phase didn't run or failed for
-            // this font. Skip rather than crash; the canary still
-            // proves the loop is alive.
-            return Ok(frame);
-        }
+    let key = CacheKey {
+        content: content.to_string(),
+        font_name: rs.font_name.clone(),
+        px_size: rs.px_size.round() as u16,
+        color: rs.color.to_u32(),
     };
-    let atlas = &cached.atlas;
-    let tex = &cached.texture;
-
-    let baseline_y = lay.y as i32 + atlas.ascent as i32;
-    let mut pen_x: i32 = lay.x as i32;
-
-    for ch in content.chars() {
-        let g = match atlas.glyph(ch) {
-            Some(g) => *g,
-            None => continue,
-        };
-        if g.width > 0 && g.height > 0 {
-            let dst_x = pen_x + g.bearing_x as i32;
-            let dst_y = baseline_y - g.ymin as i32 - g.height as i32;
-            if dst_x >= 0 && dst_y >= 0 {
-                frame = frame.copy_rect(
-                    tex,
-                    Rect::new(g.atlas_x, g.atlas_y, g.width, g.height),
-                    Rect::new(
-                        clamp_u16(dst_x as f32),
-                        clamp_u16(dst_y as f32),
-                        g.width,
-                        g.height,
-                    ),
-                    CopyOpts {
-                        blend: BlendMode::SrcAlpha,
-                        filter: Filter::Nearest,
-                        tint: Some(resolved.color),
-                    },
-                )?;
-            }
-        }
-        pen_x += g.advance as i32;
+    let Some(cached) = text_cache.lookup(&key) else {
+        // Should have been populated before paint. Skip silently.
+        return Ok(frame);
+    };
+    if cached.width == 0 || cached.height == 0 {
+        return Ok(frame);
     }
-    Ok(frame)
+    let dst = Rect::new(
+        clamp_u16(lay.x),
+        clamp_u16(lay.y),
+        cached.width,
+        cached.height,
+    );
+    frame.copy_rect(
+        &cached.texture,
+        Rect::new(0, 0, cached.width, cached.height),
+        dst,
+        CopyOpts {
+            // Color baked into the RT; SrcAlpha so transparent areas
+            // outside the glyphs don't overwrite the framebuffer.
+            blend: BlendMode::SrcAlpha,
+            filter: Filter::Nearest,
+            tint: None,
+        },
+    )
 }
 
 #[inline]

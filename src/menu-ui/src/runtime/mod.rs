@@ -19,6 +19,7 @@ use menu_core_host::protocol::{BlendMode, Rect, Rgba};
 
 use crate::font::{FontError, FontRegistry};
 use crate::host::UiState;
+use crate::text::TextCache;
 use crate::vdom::{NodeId, Tree};
 
 /// Compile-time build identifier — package version. Logged at startup
@@ -203,6 +204,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     let timeout = Duration::from_millis(500);
     let mut frame_idx: u32 = 0;
     let mut fonts = FontRegistry::new();
+    let mut text_cache = TextCache::new();
     while running.load(Ordering::SeqCst) {
         // 1. Resolve text style inheritance once for the frame.
         let text_styles = ui_state.with_tree(|tree| crate::text::resolve(tree, root));
@@ -212,7 +214,14 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         //    before begin_frame.
         ui_state.with_tree(|tree| crate::text::prepare(tree, &text_styles, &mut fonts, &mut device))?;
 
-        // 3. Compute layout. Taffy's measure function consults the
+        // 3. Populate text cache: allocate render-target textures for
+        //    any (content, font, size, color) tuples we haven't seen
+        //    yet. Returns the list of pendings to render this frame.
+        let pendings = ui_state.with_tree(|tree| {
+            text_cache.populate(tree, &text_styles, &fonts, &mut device)
+        })?;
+
+        // 4. Compute layout. Taffy's measure function consults the
         //    (now-built) font atlas for text nodes' intrinsic sizes.
         let layouts = ui_state.with_tree(|tree| {
             crate::layout::compute(
@@ -225,10 +234,13 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
             )
         });
 
-        // 4. Paint.
+        // 5. Begin frame: render pending text into their RTs first
+        //    (target = RT, glyphs, target = framebuffer), then paint
+        //    the normal tree using the cached RTs.
         let frame = device.begin_frame();
+        let frame = crate::paint::render_pending_text(frame, &pendings, &fonts)?;
         let frame = ui_state.with_tree(|tree| {
-            crate::paint::paint(tree, root, &fb, &layouts, &text_styles, &fonts, frame)
+            crate::paint::paint(tree, root, &fb, &layouts, &text_styles, &text_cache, frame)
         })?;
         let frame = paint_canary(frame, &fb, frame_idx)?;
         frame.present()?.submit()?.wait_presented(timeout)?;

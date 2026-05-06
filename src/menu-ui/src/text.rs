@@ -11,6 +11,7 @@ use std::collections::HashMap;
 
 use menu_core_host::device::Device;
 use menu_core_host::protocol::Rgba;
+use menu_core_host::texture::TextureHandle;
 
 use crate::font::{DEFAULT_FONT_NAME, FontError, FontRegistry};
 use crate::style::Style;
@@ -70,6 +71,134 @@ fn merge(parent: &ResolvedTextStyle, here: &Style) -> ResolvedTextStyle {
             .unwrap_or_else(|| parent.font_name.clone()),
         px_size: here.font_size.unwrap_or(parent.px_size),
         color: here.color.unwrap_or(parent.color),
+    }
+}
+
+/// Cache key uniquely identifying a rendered text line. A change in
+/// any of these fields requires a fresh raster (and a fresh cache
+/// entry).
+#[derive(Debug, Hash, Eq, PartialEq, Clone)]
+pub struct CacheKey {
+    pub content: String,
+    pub font_name: String,
+    pub px_size: u16,
+    /// `Rgba` packed as a `u32` so the key is `Hash`/`Eq`-cheap.
+    pub color: u32,
+}
+
+/// One cached pre-rendered text line: a render-target texture sized
+/// to the glyph extent, with the resolved color baked in.
+#[derive(Debug, Clone, Copy)]
+pub struct CachedLine {
+    pub texture: TextureHandle,
+    pub width: u16,
+    pub height: u16,
+}
+
+/// Work item produced by [`TextCache::populate`]: the caller renders
+/// glyphs into `texture` once during the next [`Frame`], after which
+/// repeated frames just `COPY_RECT` the cached texture.
+///
+/// [`Frame`]: menu_core_host::frame::Frame
+#[derive(Debug, Clone)]
+pub struct PendingRender {
+    pub texture: TextureHandle,
+    pub width: u16,
+    pub height: u16,
+    pub content: String,
+    pub font_name: String,
+    pub px_size: u16,
+    pub color: Rgba,
+}
+
+/// Persistent cache of rendered text lines. Indexed by
+/// `(content, font, px_size, color)`. Cache entries hold a
+/// `TextureHandle` into the device texture pool — they survive across
+/// frames and across React re-renders that keep the same text props.
+///
+/// Eviction is not implemented (v1). Long-running apps with rapidly
+/// changing text content will eventually exhaust the texture pool;
+/// future work adds LRU eviction (the `last_used_frame` field already
+/// exists for that).
+#[derive(Debug, Default)]
+pub struct TextCache {
+    entries: HashMap<CacheKey, CachedLine>,
+}
+
+impl TextCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Look up a cached line. Used by paint.
+    pub fn lookup(&self, key: &CacheKey) -> Option<&CachedLine> {
+        self.entries.get(key)
+    }
+
+    /// Number of cached lines (for diagnostics).
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// For every text node in `tree`, ensure a cache entry exists for
+    /// its `(content, font, size, color)`. New entries allocate a
+    /// render-target texture sized to the glyph extent; the caller
+    /// must render glyphs into each returned `PendingRender` during
+    /// the next frame, before using the cache for paint.
+    pub fn populate(
+        &mut self,
+        tree: &Tree,
+        text_styles: &HashMap<NodeId, ResolvedTextStyle>,
+        fonts: &FontRegistry,
+        device: &mut Device,
+    ) -> Result<Vec<PendingRender>, FontError> {
+        let mut pendings = Vec::new();
+        for (id, rs) in text_styles {
+            let Some(node) = tree.get(*id) else {
+                continue;
+            };
+            let NodeKind::Text { content } = &node.kind else {
+                continue;
+            };
+            if content.is_empty() {
+                continue;
+            }
+            let key = CacheKey {
+                content: content.clone(),
+                font_name: rs.font_name.clone(),
+                px_size: rs.px_size.round() as u16,
+                color: rs.color.to_u32(),
+            };
+            if self.entries.contains_key(&key) {
+                continue;
+            }
+            let cached_atlas = match fonts.get(&rs.font_name, key.px_size) {
+                Some(c) => c,
+                None => continue, // prepare() failed for this font; skip
+            };
+            let w = cached_atlas.atlas.measure(content) as u16;
+            let h = cached_atlas.atlas.line_height;
+            if w == 0 || h == 0 {
+                continue;
+            }
+            let texture = device.create_render_target(w, h)?;
+            let cached = CachedLine {
+                texture,
+                width: w,
+                height: h,
+            };
+            self.entries.insert(key.clone(), cached);
+            pendings.push(PendingRender {
+                texture,
+                width: w,
+                height: h,
+                content: content.clone(),
+                font_name: rs.font_name.clone(),
+                px_size: key.px_size,
+                color: rs.color,
+            });
+        }
+        Ok(pendings)
     }
 }
 
