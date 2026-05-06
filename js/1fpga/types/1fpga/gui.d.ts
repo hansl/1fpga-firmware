@@ -184,4 +184,12 @@ declare module '1fpga:gui' {
   export function setFocus(node: NodeId): void;
   /** Read the current focus (top of stack), or null if empty. */
   export function getFocus(): NodeId | null;
+
+  // ===== Diagnostics ===============================================
+
+  /**
+   * Rolling-average frames-per-second over the last 1-second window.
+   * Returns 0 until the first window completes (first frame).
+   */
+  export function fps(): number;
 }

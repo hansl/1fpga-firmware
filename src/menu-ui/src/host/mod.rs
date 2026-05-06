@@ -20,6 +20,7 @@ use boa_macros::{Finalize, JsData, Trace};
 
 use crate::input::events::InputSource;
 use crate::input::state::{InputState, ListenerId, ListenerKind, ListenerScope};
+use crate::runtime::fps::FpsCounter;
 use crate::style::{
     Style, parse_align_items, parse_color, parse_display, parse_flex_direction, parse_flex_wrap,
     parse_justify_content, parse_overflow, parse_position,
@@ -123,6 +124,10 @@ pub fn register(loader: &MapModuleLoader, context: &mut Context) -> JsResult<()>
         (
             js_string!("getFocus"),
             NativeFunction::from_fn_ptr(get_focus),
+        ),
+        (
+            js_string!("fps"),
+            NativeFunction::from_fn_ptr(fps_host),
         ),
         (
             js_string!("run"),
@@ -379,6 +384,14 @@ fn set_focus_host(
 fn get_focus(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let f = input_state(context)?.focus();
     Ok(f.map(JsValue::from).unwrap_or(JsValue::null()))
+}
+
+fn fps_host(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let fps = context
+        .get_data::<FpsCounter>()
+        .map(|c| c.current())
+        .unwrap_or(0.0);
+    Ok(JsValue::from(fps))
 }
 
 /// Parse the optional `opts` object passed to `add*Listener`. Default

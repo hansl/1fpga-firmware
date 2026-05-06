@@ -1,5 +1,6 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { CSSProperties } from 'react';
+import * as gui from '1fpga:gui';
 
 import { useIntent } from './hooks';
 
@@ -41,9 +42,24 @@ const hint: CSSProperties = {
   marginTop: 24,
 };
 
+const fpsStyle: CSSProperties = {
+  position: 'absolute',
+  top: 12,
+  left: 12,
+  fontSize: 24,
+  color: '#60ff60',
+};
+
 export function App() {
   const [count, setCount] = useState(0);
   const [direction, setDirection] = useState<string>('-');
+  const [fps, setFps] = useState(0);
+
+  // Poll the runtime's rolling FPS every 250ms.
+  useEffect(() => {
+    const id = setInterval(() => setFps(gui.fps()), 250);
+    return () => clearInterval(id);
+  }, []);
 
   useIntent(
     'confirm',
@@ -92,6 +108,7 @@ export function App() {
 
   return (
     <div style={root}>
+      <div style={fpsStyle}>{`${fps.toFixed(1)} fps`}</div>
       <div style={title}>menu-ui · N6</div>
       <div style={subtitle}>input router · live</div>
       <div style={stats}>{statsLine}</div>

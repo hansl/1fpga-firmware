@@ -263,6 +263,7 @@ fn dump_tree(tree: &Tree, id: NodeId, depth: usize) {
 }
 
 mod boa;
+pub mod fps;
 
 /// Configuration for [`run`].
 #[derive(Debug, Default, Clone)]
@@ -347,8 +348,10 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     let (mut context, _loader) = boa::build_context()?;
     let ui_state = UiState::default();
     let input_state = InputState::new();
+    let fps_counter = fps::FpsCounter::new();
     context.insert_data(ui_state.clone());
     context.insert_data(input_state.clone());
+    context.insert_data(fps_counter.clone());
 
     let module = {
         let source = Source::from_bytes(&bundle);
@@ -478,6 +481,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         let frame = paint_canary(frame, &fb, frame_idx)?;
         frame.present()?.submit()?.wait_presented(timeout)?;
         ui_state.with_tree_mut(|t| t.clear_dirty());
+        fps_counter.record_frame();
         frame_idx = frame_idx.wrapping_add(1);
     }
 
