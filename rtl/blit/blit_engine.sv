@@ -97,12 +97,15 @@ module blit_engine (
     localparam logic [1:0] BLEND_SRCALPHA = 2'd1;
     localparam logic [1:0] BLEND_ADDITIVE = 2'd2;
 
-    // The pair-COPY path doubles throughput on RGBA→RGBA blits whenever
-    // both src and dst rects start on an 8-byte boundary (which is the
-    // common case: text RTs pitch is width*4 with width even). Each
-    // iteration reads/writes a 64-bit beat = 2 RGBA pixels in one DDRAM
-    // round-trip instead of two. Misaligned starts and odd remainders
-    // fall back to the per-pixel path.
+    // Burst-COPY path (RGBA→RGBA): each transaction reads/writes up to
+    // BURST_BEATS_MAX consecutive 64-bit beats (= 2 RGBA pixels each).
+    // S_NEXT_PIXEL picks the largest aligned burst that fits the
+    // remainder of the row; misaligned starts and odd-length tails fall
+    // back to the per-pixel path. A8 sources stay per-pixel (different
+    // addressing).
+    //
+    // BURST_BEATS_MAX = 8 (16 RGBA pixels per transaction). The slave's
+    // burstcnt tolerates this — FILL_BURST already uses up to 255.
     typedef enum logic [4:0] {
         S_IDLE,
         S_ROW_INIT,
@@ -115,15 +118,18 @@ module blit_engine (
         S_WRITE,
         S_WRITE_WAIT,
         S_FILL_BURST,      // Avalon-MM burst, 2 pixels per beat (FILL Opaque)
-        S_FETCH_SRC_PAIR,  // 64-bit src read (RGBA pair)
-        S_WAIT_SRC_PAIR,
-        S_FETCH_DST_PAIR,  // 64-bit dst read for RMW
-        S_WAIT_DST_PAIR,
-        S_BLEND_PAIR,
-        S_WRITE_PAIR,      // 64-bit dst write (full byteenable)
-        S_WRITE_WAIT_PAIR,
+        S_FETCH_SRC_BURST, // burst src read (1..8 beats = 2..16 RGBA pixels)
+        S_WAIT_SRC_BURST,
+        S_FETCH_DST_BURST, // burst dst read for RMW
+        S_WAIT_DST_BURST,
+        S_BLEND_BURST,     // sequential blend: 1 pixel/cycle, in-place into src_buf
+        S_WRITE_BURST,     // burst dst write
         S_DONE
     } state_e;
+
+    // Burst sizing.
+    localparam int BURST_BEATS_MAX  = 8;
+    localparam int BURST_PIXELS_MAX = BURST_BEATS_MAX * 2;
 
     state_e      state;
     logic        mode_q;
@@ -145,12 +151,25 @@ module blit_engine (
     logic [31:0] dst_pixel_q;        // captured dst pixel held while blend computes
     logic [7:0]  burst_len_q;        // beats in current burst (1..255)
     logic [7:0]  burst_done_q;       // beats accepted in current burst
-    // 64-bit pair holding registers. src_pair_q stores the 2 src pixels
-    // already tinted; dst_pair_q the 2 captured dst pixels; pair_data_q
-    // the final 2 pixels to write.
-    logic [63:0] src_pair_q;
-    logic [63:0] dst_pair_q;
-    logic [63:0] pair_data_q;
+
+    // Burst-COPY working set:
+    //   src_buf — captured src pixels (already tinted), reused for the
+    //             blended output during S_BLEND_BURST so the 4×16×32-bit
+    //             write port doesn't double-up on register usage.
+    //   dst_buf — captured dst pixels for RMW.
+    //   alpha_or  / alpha_and  — accumulated across all src pixels in the
+    //                            burst so the burst-level fast paths can
+    //                            decide skip / direct-write / RMW with one
+    //                            comparison.
+    logic [31:0] src_buf [0:BURST_PIXELS_MAX-1];
+    logic [31:0] dst_buf [0:BURST_PIXELS_MAX-1];
+    logic [7:0]  alpha_or_q;
+    logic [7:0]  alpha_and_q;
+    // Active burst length in beats (1..BURST_BEATS_MAX).
+    logic [3:0]  copy_burst_len_q;
+    // Per-burst beat / pixel cursors.
+    logic [3:0]  copy_beat_idx_q;
+    logic [4:0]  copy_pixel_idx_q;
 
     assign busy_o = (state != S_IDLE) & (state != S_DONE);
 
@@ -262,24 +281,33 @@ module blit_engine (
                                        : {32'd0, pixel_data};
                 ddram_we_o       = 1'b1;
             end
-            S_FETCH_SRC_PAIR: begin
-                // 64-bit aligned read: full byteenable, 2 RGBA pixels per beat.
+            S_FETCH_SRC_BURST: begin
+                // Multi-beat aligned read. Slave latches addr+burstcnt
+                // on the first cycle (beat_idx == 0) and streams beats
+                // back via dout_valid. We hold rd=1 until the slave
+                // accepts it (~busy), then move to wait.
                 ddram_addr_o     = src_pixel_byte_addr[31:3];
-                ddram_burstcnt_o = 8'd1;
+                ddram_burstcnt_o = {4'd0, copy_burst_len_q};
                 ddram_be_o       = 8'hFF;
                 ddram_rd_o       = 1'b1;
             end
-            S_FETCH_DST_PAIR: begin
+            S_FETCH_DST_BURST: begin
                 ddram_addr_o     = dst_pixel_byte_addr[31:3];
-                ddram_burstcnt_o = 8'd1;
+                ddram_burstcnt_o = {4'd0, copy_burst_len_q};
                 ddram_be_o       = 8'hFF;
                 ddram_rd_o       = 1'b1;
             end
-            S_WRITE_PAIR: begin
+            S_WRITE_BURST: begin
+                // Hold address+burstcnt+we for the whole burst. din
+                // changes per beat — we emit the (2k, 2k+1) pixel pair
+                // for the current beat_idx.
                 ddram_addr_o     = dst_pixel_byte_addr[31:3];
-                ddram_burstcnt_o = 8'd1;
+                ddram_burstcnt_o = {4'd0, copy_burst_len_q};
                 ddram_be_o       = 8'hFF;
-                ddram_din_o      = pair_data_q;
+                ddram_din_o      = {
+                    src_buf[{copy_beat_idx_q, 1'b1}],
+                    src_buf[{copy_beat_idx_q, 1'b0}]
+                };
                 ddram_we_o       = 1'b1;
             end
             S_FILL_BURST: begin
@@ -330,6 +358,7 @@ module blit_engine (
     endfunction
 
     // ---- FSM transitions -------------------------------------------
+    integer i;
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state             <= S_IDLE;
@@ -356,9 +385,15 @@ module blit_engine (
             dst_pixel_q       <= '0;
             burst_len_q       <= '0;
             burst_done_q      <= '0;
-            src_pair_q        <= '0;
-            dst_pair_q        <= '0;
-            pair_data_q       <= '0;
+            for (i = 0; i < BURST_PIXELS_MAX; i = i + 1) begin
+                src_buf[i] <= '0;
+                dst_buf[i] <= '0;
+            end
+            alpha_or_q        <= '0;
+            alpha_and_q       <= '0;
+            copy_burst_len_q  <= 4'd0;
+            copy_beat_idx_q   <= 4'd0;
+            copy_pixel_idx_q  <= 5'd0;
             done_o            <= 1'b0;
         end else begin
             done_o <= 1'b0;
@@ -448,24 +483,57 @@ module blit_engine (
                         cur_y_off <= cur_y_off + 16'd1;
                         state     <= S_ROW_INIT;
                     end else if (mode_q == MODE_COPY) begin
-                        // Pair-COPY eligibility: RGBA src + dst, both
-                        // pixel byte-addresses 8-byte aligned (i.e. their
-                        // x is even), and at least 2 pixels remaining in
-                        // the row. Misaligned ends or A8 sources fall
-                        // back to the per-pixel path.
+                        // Burst-COPY dispatch: pick the largest aligned
+                        // burst that fits the remainder of the row.
+                        // Both src and dst pixel byte-addresses must be
+                        // (burst_pixels * 4)-byte aligned for the slave to
+                        // accept the burst. Falls back through smaller
+                        // bursts down to the per-pixel path. A8 sources
+                        // bypass burst entirely (different addressing).
                         automatic logic [15:0] remaining_copy;
-                        automatic logic        dst_aligned_pair;
-                        automatic logic        src_aligned_pair;
-                        automatic logic        pair_eligible;
-                        remaining_copy   = dst_w_q - cur_x;
-                        dst_aligned_pair = ~(dst_x_q[0] ^ cur_x[0]);
-                        src_aligned_pair = ~(src_x_q[0] ^ cur_x[0]);
-                        pair_eligible    = (format_q == FMT_RGBA)
-                                         & dst_aligned_pair
-                                         & src_aligned_pair
-                                         & (remaining_copy >= 16'd2);
-                        if (pair_eligible) begin
-                            state <= S_FETCH_SRC_PAIR;
+                        automatic logic [5:0]  src_lo;
+                        automatic logic [5:0]  dst_lo;
+                        automatic logic        rgba;
+                        remaining_copy = dst_w_q - cur_x;
+                        src_lo = src_pixel_byte_addr[5:0];
+                        dst_lo = dst_pixel_byte_addr[5:0];
+                        rgba = (format_q == FMT_RGBA);
+                        if (rgba && (remaining_copy >= 16'd16)
+                            && (src_lo == 6'd0) && (dst_lo == 6'd0)) begin
+                            // 16 px / 8 beats / 64-byte aligned.
+                            copy_burst_len_q <= 4'd8;
+                            copy_beat_idx_q  <= 4'd0;
+                            copy_pixel_idx_q <= 5'd0;
+                            alpha_or_q       <= 8'd0;
+                            alpha_and_q      <= 8'hFF;
+                            state            <= S_FETCH_SRC_BURST;
+                        end else if (rgba && (remaining_copy >= 16'd8)
+                                     && (src_lo[4:0] == 5'd0)
+                                     && (dst_lo[4:0] == 5'd0)) begin
+                            copy_burst_len_q <= 4'd4;
+                            copy_beat_idx_q  <= 4'd0;
+                            copy_pixel_idx_q <= 5'd0;
+                            alpha_or_q       <= 8'd0;
+                            alpha_and_q      <= 8'hFF;
+                            state            <= S_FETCH_SRC_BURST;
+                        end else if (rgba && (remaining_copy >= 16'd4)
+                                     && (src_lo[3:0] == 4'd0)
+                                     && (dst_lo[3:0] == 4'd0)) begin
+                            copy_burst_len_q <= 4'd2;
+                            copy_beat_idx_q  <= 4'd0;
+                            copy_pixel_idx_q <= 5'd0;
+                            alpha_or_q       <= 8'd0;
+                            alpha_and_q      <= 8'hFF;
+                            state            <= S_FETCH_SRC_BURST;
+                        end else if (rgba && (remaining_copy >= 16'd2)
+                                     && (src_lo[2:0] == 3'd0)
+                                     && (dst_lo[2:0] == 3'd0)) begin
+                            copy_burst_len_q <= 4'd1;
+                            copy_beat_idx_q  <= 4'd0;
+                            copy_pixel_idx_q <= 5'd0;
+                            alpha_or_q       <= 8'd0;
+                            alpha_and_q      <= 8'hFF;
+                            state            <= S_FETCH_SRC_BURST;
                         end else begin
                             state <= S_FETCH_SRC;
                         end
@@ -598,21 +666,28 @@ module blit_engine (
                     end
                 end
 
-                // ----- Pair-COPY path (RGBA + aligned, ≥2 pixels) -----
-                S_FETCH_SRC_PAIR: if (~ddram_busy_i) begin
-                    state <= S_WAIT_SRC_PAIR;
+                // ----- Burst-COPY path (RGBA + aligned, ≥burst_pixels) -----
+                S_FETCH_SRC_BURST: if (~ddram_busy_i) begin
+                    state <= S_WAIT_SRC_BURST;
                 end
 
-                S_WAIT_SRC_PAIR: if (ddram_dout_valid_i) begin
-                    // The 64-bit beat holds two RGBA pixels. cur_x is the
-                    // lower-x pixel of the pair, so it lives in the low
-                    // half of the beat (DDRAM is little-endian).
+                S_WAIT_SRC_BURST: if (ddram_dout_valid_i) begin
+                    // Each beat is a 64-bit word holding two RGBA pixels
+                    // (low 32 = lower-x pixel, high 32 = upper-x). Apply
+                    // tint per-pixel as we capture, and accumulate alpha
+                    // OR/AND so the burst-level fast-path decision after
+                    // the last beat is one comparison.
                     automatic logic [31:0] src_lo;
                     automatic logic [31:0] src_hi;
                     automatic logic [31:0] computed_lo;
                     automatic logic [31:0] computed_hi;
+                    automatic logic [4:0]  pix_lo_idx;
+                    automatic logic [4:0]  pix_hi_idx;
                     automatic logic [7:0]  alpha_lo;
                     automatic logic [7:0]  alpha_hi;
+                    automatic logic [7:0]  next_alpha_or;
+                    automatic logic [7:0]  next_alpha_and;
+                    automatic logic        is_last_beat;
                     src_lo = ddram_dout_i[31:0];
                     src_hi = ddram_dout_i[63:32];
                     if (tint_en_q) begin
@@ -632,59 +707,99 @@ module blit_engine (
                         computed_lo = src_lo;
                         computed_hi = src_hi;
                     end
+                    pix_lo_idx = {copy_beat_idx_q, 1'b0};
+                    pix_hi_idx = {copy_beat_idx_q, 1'b1};
+                    src_buf[pix_lo_idx] <= computed_lo;
+                    src_buf[pix_hi_idx] <= computed_hi;
+
                     alpha_lo = ch_a(computed_lo);
                     alpha_hi = ch_a(computed_hi);
+                    next_alpha_or  = alpha_or_q  | alpha_lo | alpha_hi;
+                    next_alpha_and = alpha_and_q & alpha_lo & alpha_hi;
+                    alpha_or_q  <= next_alpha_or;
+                    alpha_and_q <= next_alpha_and;
 
-                    src_pair_q <= {computed_hi, computed_lo};
-
-                    // Pair-level fast paths:
-                    //   Opaque blend OR both alphas == 0xFF → write src
-                    //                                          directly.
-                    //   SrcAlpha + both alphas == 0          → skip pair.
-                    //   anything else                         → fall to
-                    //                                          dst RMW.
-                    if ((blend_q == BLEND_OPAQUE)
-                        || ((blend_q == BLEND_SRCALPHA)
-                            && (alpha_lo == 8'hFF) && (alpha_hi == 8'hFF))) begin
-                        pair_data_q <= {computed_hi, computed_lo};
-                        state       <= S_WRITE_PAIR;
-                    end else if ((blend_q == BLEND_SRCALPHA)
-                                 && (alpha_lo == 8'h00) && (alpha_hi == 8'h00)) begin
-                        cur_x <= cur_x + 16'd2;
-                        state <= S_NEXT_PIXEL;
+                    is_last_beat = (copy_beat_idx_q + 4'd1 == copy_burst_len_q);
+                    if (is_last_beat) begin
+                        // Whole burst captured. Burst-level fast paths:
+                        //   Opaque blend OR every alpha == 0xFF → write
+                        //     src buffer directly, skip the dst fetch.
+                        //   SrcAlpha + every alpha == 0          → skip
+                        //     this burst entirely (no read, no write).
+                        //   anything else                         → fall
+                        //     into dst RMW for the whole burst.
+                        copy_beat_idx_q <= 4'd0;
+                        if ((blend_q == BLEND_OPAQUE)
+                            || ((blend_q == BLEND_SRCALPHA)
+                                && (next_alpha_and == 8'hFF))) begin
+                            state <= S_WRITE_BURST;
+                        end else if ((blend_q == BLEND_SRCALPHA)
+                                     && (next_alpha_or == 8'h00)) begin
+                            cur_x <= cur_x + {11'd0, copy_burst_len_q, 1'b0};
+                            state <= S_NEXT_PIXEL;
+                        end else begin
+                            state <= S_FETCH_DST_BURST;
+                        end
                     end else begin
-                        state <= S_FETCH_DST_PAIR;
+                        copy_beat_idx_q <= copy_beat_idx_q + 4'd1;
                     end
                 end
 
-                S_FETCH_DST_PAIR: if (~ddram_busy_i) begin
-                    state <= S_WAIT_DST_PAIR;
+                S_FETCH_DST_BURST: if (~ddram_busy_i) begin
+                    state <= S_WAIT_DST_BURST;
                 end
 
-                S_WAIT_DST_PAIR: if (ddram_dout_valid_i) begin
-                    dst_pair_q <= ddram_dout_i;
-                    state      <= S_BLEND_PAIR;
+                S_WAIT_DST_BURST: if (ddram_dout_valid_i) begin
+                    automatic logic [4:0] pix_lo_idx;
+                    automatic logic [4:0] pix_hi_idx;
+                    automatic logic       is_last_beat;
+                    pix_lo_idx = {copy_beat_idx_q, 1'b0};
+                    pix_hi_idx = {copy_beat_idx_q, 1'b1};
+                    dst_buf[pix_lo_idx] <= ddram_dout_i[31:0];
+                    dst_buf[pix_hi_idx] <= ddram_dout_i[63:32];
+
+                    is_last_beat = (copy_beat_idx_q + 4'd1 == copy_burst_len_q);
+                    if (is_last_beat) begin
+                        copy_beat_idx_q  <= 4'd0;
+                        copy_pixel_idx_q <= 5'd0;
+                        state            <= S_BLEND_BURST;
+                    end else begin
+                        copy_beat_idx_q <= copy_beat_idx_q + 4'd1;
+                    end
                 end
 
-                S_BLEND_PAIR: begin
-                    // Blend each half independently. blend_pixel is pure
-                    // combinational; both calls fan out from the same
-                    // captured sources so timing closure should match
-                    // the per-pixel S_BLEND path.
-                    pair_data_q <= {
-                        blend_pixel(src_pair_q[63:32], dst_pair_q[63:32], blend_q),
-                        blend_pixel(src_pair_q[31:0],  dst_pair_q[31:0],  blend_q)
-                    };
-                    state <= S_WRITE_PAIR;
+                S_BLEND_BURST: begin
+                    // Sequential per-pixel blend. blend_pixel is pure
+                    // combinational; doing it 1 pixel/cycle keeps the
+                    // critical path identical to the per-pixel S_BLEND
+                    // and amortises ~16 cycles over a burst that already
+                    // saved many bus round-trips. Result lands back in
+                    // src_buf so S_WRITE_BURST can stream it out.
+                    automatic logic [4:0] total_pixels;
+                    total_pixels = {copy_burst_len_q, 1'b0};
+                    src_buf[copy_pixel_idx_q] <= blend_pixel(
+                        src_buf[copy_pixel_idx_q],
+                        dst_buf[copy_pixel_idx_q],
+                        blend_q
+                    );
+                    if (copy_pixel_idx_q + 5'd1 == total_pixels) begin
+                        copy_pixel_idx_q <= 5'd0;
+                        state            <= S_WRITE_BURST;
+                    end else begin
+                        copy_pixel_idx_q <= copy_pixel_idx_q + 5'd1;
+                    end
                 end
 
-                S_WRITE_PAIR: if (~ddram_busy_i) begin
-                    state <= S_WRITE_WAIT_PAIR;
-                end
-
-                S_WRITE_WAIT_PAIR: begin
-                    cur_x <= cur_x + 16'd2;
-                    state <= S_NEXT_PIXEL;
+                S_WRITE_BURST: if (~ddram_busy_i) begin
+                    automatic logic is_last_beat;
+                    is_last_beat = (copy_beat_idx_q + 4'd1 == copy_burst_len_q);
+                    if (is_last_beat) begin
+                        copy_beat_idx_q <= 4'd0;
+                        cur_x <= cur_x + {11'd0, copy_burst_len_q, 1'b0};
+                        state <= S_NEXT_PIXEL;
+                    end else begin
+                        copy_beat_idx_q <= copy_beat_idx_q + 4'd1;
+                    end
                 end
 
                 S_DONE: begin
