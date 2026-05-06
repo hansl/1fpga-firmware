@@ -1,25 +1,25 @@
 // React hooks wrapping the `1fpga:gui` input bindings. Each hook
 // subscribes on mount + dependency change, unsubscribes on cleanup.
 //
-// We use `useLayoutEffect` (sync, fires during commit) rather than
-// `useEffect` (passive, deferred). Boa has no scheduler, so passive
-// effects would never run and listeners would never register.
+// Implementation notes:
+// - useLayoutEffect (sync, fires during commit) instead of useEffect.
+//   Boa has no scheduler; passive effects would never run.
+// - Handlers are wrapped in `flushAfter` so setState calls inside
+//   them commit synchronously. Without this wrap, React queues the
+//   update but never flushes it to a re-render.
 
 import { useLayoutEffect } from 'react';
 import * as gui from '1fpga:gui';
+import { flushAfter } from './reconciler';
 
-/**
- * Subscribe to a high-level intent (e.g. `'confirm'`, `'navigate_up'`).
- * `handler` fires on every press / repeat / release; gate on
- * `e.kind === 'pressed'` if you only want presses.
- */
 export function useIntent(
   name: string,
   handler: (e: gui.IntentEvent) => void,
   opts?: gui.ListenerOpts,
 ): void {
   useLayoutEffect(() => {
-    const id = gui.addIntentListener(name, handler, opts);
+    const wrapped = (e: gui.IntentEvent) => flushAfter(() => handler(e));
+    const id = gui.addIntentListener(name, wrapped, opts);
     return () => {
       gui.removeListener(id);
     };
@@ -27,14 +27,14 @@ export function useIntent(
   }, [name, handler, opts?.global, opts?.nodeId]);
 }
 
-/** Subscribe to raw events from a given input source. */
 export function useRawInput(
   source: 'keyboard' | 'gamepad' | 'mouse',
   handler: (e: gui.RawInputEvent) => void,
   opts?: gui.ListenerOpts,
 ): void {
   useLayoutEffect(() => {
-    const id = gui.addRawInputListener(source, handler, opts);
+    const wrapped = (e: gui.RawInputEvent) => flushAfter(() => handler(e));
+    const id = gui.addRawInputListener(source, wrapped, opts);
     return () => {
       gui.removeListener(id);
     };

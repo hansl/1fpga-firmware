@@ -181,3 +181,13 @@ export function render(element: ReactNode): void {
 
   gui.run(rootNode);
 }
+
+/**
+ * Runs `fn` and forces any setState updates it produced to commit
+ * synchronously. Without this wrapper, setState calls fired from
+ * input-event handlers queue React work that never runs (Boa has no
+ * scheduler, so passive flush never fires).
+ */
+export function flushAfter<R>(fn: () => R): R {
+  return reconciler.flushSyncFromReconciler(fn);
+}
