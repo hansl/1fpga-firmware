@@ -499,20 +499,24 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         //    (target = RT, glyphs, target = framebuffer), then paint
         //    the normal tree using the cached RTs and images.
         let frame = device.begin_frame();
-        let frame = crate::paint::render_pending_text(frame, &pendings, &fonts)?;
-        let frame = ui_state.with_tree(|tree| {
-            crate::paint::paint(
-                tree,
-                root,
-                &fb,
-                &layouts,
-                &text_styles,
-                &text_cache,
-                &images,
-                frame,
-            )
-        })?;
-        let frame = paint_canary(frame, &fb, frame_idx)?;
+        // DIAGNOSTIC: skip all paint to measure FPGA per-frame floor.
+        // Just begin_frame -> present -> fence with zero draws.
+        let _ = (&pendings, &layouts, &text_styles, &text_cache, &images, &fb);
+        let _ = ui_state.root();
+        // let frame = crate::paint::render_pending_text(frame, &pendings, &fonts)?;
+        // let frame = ui_state.with_tree(|tree| {
+        //     crate::paint::paint(
+        //         tree,
+        //         root,
+        //         &fb,
+        //         &layouts,
+        //         &text_styles,
+        //         &text_cache,
+        //         &images,
+        //         frame,
+        //     )
+        // })?;
+        // let frame = paint_canary(frame, &fb, frame_idx)?;
 
         let t7 = Instant::now();
 
