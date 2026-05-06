@@ -30,12 +30,16 @@ pub const FB_SLOT_SIZE: usize = 8 * 1024 * 1024;
 /// Size of the command ring buffer (must be a power of two).
 pub const RING_SIZE: usize = 1024 * 1024;
 
-/// Size of the texture descriptor table (128 KB = 4096 × 32 B default).
-pub const TEX_TABLE_SIZE: usize = 128 * 1024;
+/// Size of the texture descriptor table (2 MB = 65 536 × 32 B max).
+/// `tex_id` is 16-bit on the wire, so the absolute ceiling is
+/// `0x10000` slots; we reserve `0xFFFF` as the framebuffer sentinel
+/// (PROTOCOL.md §5.6) so `DEFAULT_TEX_TABLE_COUNT = 65 535`.
+pub const TEX_TABLE_SIZE: usize = 2 * 1024 * 1024;
 
-/// Default number of texture descriptor entries. See PROTOCOL.md §2.3
-/// — this is an allocation size, not a protocol limit.
-pub const DEFAULT_TEX_TABLE_COUNT: u32 = 4096;
+/// Default number of texture descriptor entries. Capped at the
+/// 16-bit `tex_id` ceiling minus the framebuffer sentinel
+/// (`0xFFFF`). See PROTOCOL.md §2.3.
+pub const DEFAULT_TEX_TABLE_COUNT: u32 = 65_535;
 
 /// Size of the texture data pool (224 MB).
 pub const TEX_POOL_SIZE: usize = 224 * 1024 * 1024;
