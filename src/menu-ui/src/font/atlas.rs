@@ -105,6 +105,15 @@ pub fn build_atlas(
     let mut glyphs = HashMap::new();
 
     for ch in charset.chars() {
+        // Skip codepoints the font doesn't have a real glyph for.
+        // fontdue returns the `.notdef` (empty box) glyph for missing
+        // chars, which we'd otherwise insert into the atlas as if it
+        // were a real entry — `glyph()` would then return that box
+        // instead of falling back to `?`. `lookup_glyph_index` returns
+        // 0 for missing chars (per OpenType convention).
+        if ch != '\u{0}' && font.lookup_glyph_index(ch) == 0 {
+            continue;
+        }
         let (metrics, bitmap) = font.rasterize(ch, px_size);
         let gw = metrics.width as u32;
         let gh = metrics.height as u32;

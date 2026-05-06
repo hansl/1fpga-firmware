@@ -43,20 +43,12 @@ const hint: CSSProperties = {
 
 export function App() {
   const [count, setCount] = useState(0);
-  const [direction, setDirection] = useState<string>('—');
-
-  console.log('App rendering, count=', count, 'direction=', direction);
+  const [direction, setDirection] = useState<string>('-');
 
   useIntent(
     'confirm',
     useCallback((e) => {
-      console.log('confirm handler fired, kind=', e.kind);
-      if (e.kind === 'pressed') {
-        setCount((c) => {
-          console.log('setCount running, prev=', c);
-          return c + 1;
-        });
-      }
+      if (e.kind === 'pressed') setCount((c) => c + 1);
     }, []),
   );
   useIntent(
@@ -90,16 +82,20 @@ export function App() {
     }, []),
   );
 
+  // Note: JSX text interpolation produces multiple text nodes, and
+  // our layout doesn't yet flow text inline (each text node is a
+  // block-level child). Compose with a template literal so the
+  // entire line is one text node.
+  const statsLine = `count: ${count}   ·   nav: ${direction}`;
+  const hintLine =
+    'Enter/Space → +1   ·   Esc/Backspace → -1   ·   Arrows → navigate';
+
   return (
     <div style={root}>
       <div style={title}>menu-ui · N6</div>
       <div style={subtitle}>input router · live</div>
-      <div style={stats}>
-        count: {count}   ·   nav: {direction}
-      </div>
-      <div style={hint}>
-        Enter/Space ➝ +1   ·   Esc/Backspace ➝ −1   ·   Arrows ➝ navigate
-      </div>
+      <div style={stats}>{statsLine}</div>
+      <div style={hint}>{hintLine}</div>
     </div>
   );
 }
