@@ -1,16 +1,15 @@
 // React hooks wrapping the `1fpga:gui` input bindings. Each hook
 // subscribes on mount + dependency change, unsubscribes on cleanup.
 //
-// Implementation notes:
-// - useLayoutEffect (sync, fires during commit) instead of useEffect.
-//   Boa has no scheduler; passive effects would never run.
-// - Handlers are wrapped in `flushAfter` so setState calls inside
-//   them commit synchronously. Without this wrap, React queues the
-//   update but never flushes it to a re-render.
+// Implementation note: useLayoutEffect (sync, fires during commit)
+// instead of useEffect, because useEffect's passive flush relies on
+// the scheduler firing — and even though we wired setTimeout into the
+// runtime, React 19's reconciler defers passive effects past the
+// render that triggered them. useLayoutEffect ensures listener
+// registration completes before the runtime's first frame loop tick.
 
 import { useLayoutEffect } from 'react';
 import * as gui from '1fpga:gui';
-import { flushAfter } from './reconciler';
 
 export function useIntent(
   name: string,
@@ -18,8 +17,7 @@ export function useIntent(
   opts?: gui.ListenerOpts,
 ): void {
   useLayoutEffect(() => {
-    const wrapped = (e: gui.IntentEvent) => flushAfter(() => handler(e));
-    const id = gui.addIntentListener(name, wrapped, opts);
+    const id = gui.addIntentListener(name, handler, opts);
     return () => {
       gui.removeListener(id);
     };
@@ -33,8 +31,7 @@ export function useRawInput(
   opts?: gui.ListenerOpts,
 ): void {
   useLayoutEffect(() => {
-    const wrapped = (e: gui.RawInputEvent) => flushAfter(() => handler(e));
-    const id = gui.addRawInputListener(source, wrapped, opts);
+    const id = gui.addRawInputListener(source, handler, opts);
     return () => {
       gui.removeListener(id);
     };

@@ -17,10 +17,18 @@ use tracing::{debug, error, info, warn};
 
 /// Build a fresh Boa context with the runtime extensions and our
 /// `1fpga:gui` host module registered.
+///
+/// Registers `setTimeout` / `setInterval` / `clearTimeout` /
+/// `clearInterval` globals via `boa_runtime::interval`. Those queue
+/// `TimeoutJob`s on the context's job queue; the runtime drains them
+/// once per frame via `context.run_jobs()`. React's internal scheduler
+/// relies on `setTimeout` to flush queued state updates — without a
+/// real timer it queues work that never runs.
 pub fn build_context() -> JsResult<(Context, Rc<MapModuleLoader>)> {
     let loader = Rc::new(MapModuleLoader::new());
     let mut context = Context::builder().module_loader(loader.clone()).build()?;
     boa_runtime::register(ConsoleExtension(TracingLogger), None, &mut context)?;
+    boa_runtime::interval::register(&mut context)?;
     crate::host::register(&loader, &mut context)?;
     Ok((context, loader))
 }

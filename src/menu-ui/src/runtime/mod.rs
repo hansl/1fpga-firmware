@@ -403,15 +403,25 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     let router = IntentRouter::new();
     let mut event_buf: Vec<RawInputEvent> = Vec::new();
     while running.load(Ordering::SeqCst) {
-        // 0. Pump input. Drain pending evdev events, translate to
-        //    intents, dispatch any subscribed JS listeners. Both
-        //    intent-listeners and raw-listeners fire here, before
-        //    the frame's prepare/paint passes — so handler-driven
-        //    setState is reflected in the same frame.
+        // 0a. Drain the JS job queue. React's scheduler enqueues
+        //     setTimeout(fn, 0) jobs to flush queued state updates;
+        //     they only run when we explicitly ask for them.
+        if let Err(e) = context.run_jobs() {
+            tracing::warn!("run_jobs error: {e}");
+        }
+
+        // 0b. Pump input. Drain pending evdev events, translate to
+        //     intents, dispatch any subscribed JS listeners.
         event_buf.clear();
         pump.drain(&mut event_buf);
         for ev in event_buf.drain(..) {
             dispatch_input(&input_state, &router, &ev, &mut context)?;
+        }
+
+        // 0c. Run jobs again — handlers above may have called
+        //     setTimeout (directly or via React's setState scheduler).
+        if let Err(e) = context.run_jobs() {
+            tracing::warn!("run_jobs error: {e}");
         }
 
         // 1. Resolve text style inheritance once for the frame.
