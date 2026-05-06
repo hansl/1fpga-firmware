@@ -59,13 +59,11 @@ impl Pump {
             }
             match Device::open(&path) {
                 Ok(mut dev) => {
-                    if let Err(e) = dev.grab() {
-                        // Non-fatal: another process may have it. We
-                        // can still read events without exclusive
-                        // access (just won't suppress duplicate
-                        // delivery to the kernel's tty).
-                        tracing::debug!("input: grab {} failed: {e}", path.display());
-                    }
+                    // Don't grab — we just want to read events.
+                    // EVIOCGRAB requires exclusive access and fails if
+                    // another process already has it; without grab we
+                    // get a copy of every event and don't fight for
+                    // ownership.
                     if let Err(e) = dev.set_nonblocking(true) {
                         warn!(
                             "input: set_nonblocking failed for {}: {e}; pump may block",
