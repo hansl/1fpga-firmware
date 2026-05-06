@@ -448,6 +448,7 @@ module blit_engine (
                     automatic logic [31:0] src_word;
                     automatic logic [7:0]  sampled_alpha;
                     automatic logic [31:0] computed_src;
+                    automatic logic [7:0]  src_alpha;
                     if (format_q == FMT_A8) begin
                         sampled_alpha = pick_byte(ddram_dout_i, src_pixel_byte_addr[2:0]);
                         computed_src = pack_pixel(
@@ -469,10 +470,26 @@ module blit_engine (
                             computed_src = src_word;
                         end
                     end
+                    src_alpha = ch_a(computed_src);
 
+                    // Fast paths for SrcAlpha — saves DDRAM round-trips
+                    // for the common cases at glyph edges and interiors.
+                    //   alpha == 0xFF → out = src, no dst read needed.
+                    //   alpha == 0x00 → out = dst, skip both read and write.
+                    // (Both follow from the SrcAlpha blend formula
+                    //  out.RGB = src.RGB + dst.RGB * (1 - src.A) / 256
+                    //  with computed_src already premultiplied by alpha.)
                     if (blend_q == BLEND_OPAQUE) begin
                         pixel_data <= computed_src;
                         state      <= S_WRITE;
+                    end else if ((blend_q == BLEND_SRCALPHA)
+                                 && (src_alpha == 8'hFF)) begin
+                        pixel_data <= computed_src;
+                        state      <= S_WRITE;
+                    end else if ((blend_q == BLEND_SRCALPHA)
+                                 && (src_alpha == 8'h00)) begin
+                        cur_x <= cur_x + 16'd1;
+                        state <= S_NEXT_PIXEL;
                     end else begin
                         src_pixel_q <= computed_src;
                         state       <= S_FETCH_DST;
