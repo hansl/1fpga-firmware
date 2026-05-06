@@ -168,11 +168,14 @@ export function render(element: ReactNode): void {
   );
 
   // React 19 may schedule `updateContainer`'s commit asynchronously
-  // even for legacy roots; `flushSync` forces the mutations to land
-  // before we hand control to the Rust frame loop.
-  reconciler.flushSync(() => {
-    reconciler.updateContainer(element, container, null, null);
-  });
+  // even for legacy roots. `updateContainerSync` (which the typings
+  // expose but the official Reconciler<...> type omits) forces the
+  // mutations to land before we hand control to the Rust frame loop.
+  // Note: the public `flushSync` method declared on `Reconciler<...>`
+  // doesn't actually exist on the runtime object — only
+  // `flushSyncFromReconciler` does. Stick with `updateContainerSync`.
+  reconciler.updateContainerSync(element, container, null, null);
+  reconciler.flushSyncWork();
 
   gui.run(rootNode);
 }
