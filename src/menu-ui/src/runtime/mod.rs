@@ -83,6 +83,13 @@ fn dispatch_input(
     let intents = router.translate(ev);
     for intent in intents {
         let handlers = input_state.snapshot_intent(&intent.name);
+        info!(
+            "input: {:?} -> intent '{}' kind={:?} ({} listeners)",
+            ev.source(),
+            intent.name,
+            intent.kind,
+            handlers.len()
+        );
         if handlers.is_empty() {
             continue;
         }

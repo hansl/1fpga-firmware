@@ -1,7 +1,11 @@
 // React hooks wrapping the `1fpga:gui` input bindings. Each hook
 // subscribes on mount + dependency change, unsubscribes on cleanup.
+//
+// We use `useLayoutEffect` (sync, fires during commit) rather than
+// `useEffect` (passive, deferred). Boa has no scheduler, so passive
+// effects would never run and listeners would never register.
 
-import { useEffect } from 'react';
+import { useLayoutEffect } from 'react';
 import * as gui from '1fpga:gui';
 
 /**
@@ -14,7 +18,7 @@ export function useIntent(
   handler: (e: gui.IntentEvent) => void,
   opts?: gui.ListenerOpts,
 ): void {
-  useEffect(() => {
+  useLayoutEffect(() => {
     const id = gui.addIntentListener(name, handler, opts);
     return () => {
       gui.removeListener(id);
@@ -29,7 +33,7 @@ export function useRawInput(
   handler: (e: gui.RawInputEvent) => void,
   opts?: gui.ListenerOpts,
 ): void {
-  useEffect(() => {
+  useLayoutEffect(() => {
     const id = gui.addRawInputListener(source, handler, opts);
     return () => {
       gui.removeListener(id);

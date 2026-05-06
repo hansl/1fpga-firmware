@@ -79,12 +79,15 @@ impl InputState {
         let mut inner = self.inner.borrow_mut();
         let id = ListenerId(inner.next_id);
         inner.next_id = inner.next_id.wrapping_add(1);
+        let kind_dbg = format!("{:?}", kind);
         inner.listeners.push(Listener {
             id,
             kind,
             scope,
             handler,
         });
+        let total = inner.listeners.len();
+        tracing::info!("input: + listener {} {} (total={})", id.0, kind_dbg, total);
         id
     }
 
