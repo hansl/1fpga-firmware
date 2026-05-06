@@ -16,6 +16,7 @@
 //! text, images, react-reconciler, and input on top.
 
 pub mod host;
+pub mod layout;
 pub mod paint;
 pub mod runtime;
 pub mod style;

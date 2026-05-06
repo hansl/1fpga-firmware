@@ -27,6 +27,7 @@ clap-verbosity-flag = "2.0.1"
 core_affinity = "0.8.1"
 ctrlc = "3.4"
 menu-core-host = { workspace = true }
+taffy = { version = "0.10", default-features = false, features = ["std", "flexbox", "block_layout", "taffy_tree"] }
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

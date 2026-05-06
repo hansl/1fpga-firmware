@@ -17,7 +17,10 @@ use boa_engine::{
 };
 use boa_macros::{Finalize, JsData, Trace};
 
-use crate::style::{Style, parse_color};
+use crate::style::{
+    Style, parse_align_items, parse_color, parse_display, parse_flex_direction, parse_flex_wrap,
+    parse_justify_content, parse_overflow, parse_position,
+};
 use crate::vdom::{NodeId, NodeKind, Tree};
 
 /// JS-visible mutable handle to the host tree, the registered root,
@@ -194,30 +197,89 @@ fn parse_style_arg(value: &JsValue, context: &mut Context) -> JsResult<Style> {
     parse_style_value(&style_v, context)
 }
 
-/// Decode a flat style object into a [`Style`].
+/// Decode a flat style object into a [`Style`]. Tolerant: any field
+/// absent / `undefined` / unknown-keyword leaves the corresponding
+/// `Style` slot as `None`.
 fn parse_style_value(value: &JsValue, context: &mut Context) -> JsResult<Style> {
     let mut out = Style::default();
-    let Some(style_obj) = value.as_object() else {
+    let Some(o) = value.as_object() else {
         return Ok(out);
     };
 
-    let bg = style_obj.get(js_string!("backgroundColor"), context)?;
-    if !bg.is_undefined() {
-        let s = bg.to_string(context)?.to_std_string_escaped();
-        out.background_color = parse_color(&s);
+    out.display = read_keyword(&o, "display", context, parse_display)?;
+    out.position = read_keyword(&o, "position", context, parse_position)?;
+    out.flex_direction = read_keyword(&o, "flexDirection", context, parse_flex_direction)?;
+    out.flex_wrap = read_keyword(&o, "flexWrap", context, parse_flex_wrap)?;
+    out.justify_content = read_keyword(&o, "justifyContent", context, parse_justify_content)?;
+    out.align_items = read_keyword(&o, "alignItems", context, parse_align_items)?;
+    out.align_self = read_keyword(&o, "alignSelf", context, parse_align_items)?;
+    out.overflow = read_keyword(&o, "overflow", context, parse_overflow)?;
+
+    out.flex_grow = read_f32(&o, "flexGrow", context)?;
+    out.flex_shrink = read_f32(&o, "flexShrink", context)?;
+    out.flex_basis = read_f32(&o, "flexBasis", context)?;
+    out.gap = read_f32(&o, "gap", context)?;
+
+    out.top = read_f32(&o, "top", context)?;
+    out.right = read_f32(&o, "right", context)?;
+    out.bottom = read_f32(&o, "bottom", context)?;
+    out.left = read_f32(&o, "left", context)?;
+
+    out.width = read_f32(&o, "width", context)?;
+    out.height = read_f32(&o, "height", context)?;
+    out.min_width = read_f32(&o, "minWidth", context)?;
+    out.max_width = read_f32(&o, "maxWidth", context)?;
+    out.min_height = read_f32(&o, "minHeight", context)?;
+    out.max_height = read_f32(&o, "maxHeight", context)?;
+
+    out.padding_top = read_f32(&o, "paddingTop", context)?;
+    out.padding_right = read_f32(&o, "paddingRight", context)?;
+    out.padding_bottom = read_f32(&o, "paddingBottom", context)?;
+    out.padding_left = read_f32(&o, "paddingLeft", context)?;
+    if let Some(p) = read_f32(&o, "padding", context)? {
+        out.padding_top.get_or_insert(p);
+        out.padding_right.get_or_insert(p);
+        out.padding_bottom.get_or_insert(p);
+        out.padding_left.get_or_insert(p);
     }
-    out.width = read_u16(&style_obj, "width", context)?;
-    out.height = read_u16(&style_obj, "height", context)?;
-    out.top = read_u16(&style_obj, "top", context)?;
-    out.left = read_u16(&style_obj, "left", context)?;
+    out.margin_top = read_f32(&o, "marginTop", context)?;
+    out.margin_right = read_f32(&o, "marginRight", context)?;
+    out.margin_bottom = read_f32(&o, "marginBottom", context)?;
+    out.margin_left = read_f32(&o, "marginLeft", context)?;
+    if let Some(m) = read_f32(&o, "margin", context)? {
+        out.margin_top.get_or_insert(m);
+        out.margin_right.get_or_insert(m);
+        out.margin_bottom.get_or_insert(m);
+        out.margin_left.get_or_insert(m);
+    }
+
+    let bg = o.get(js_string!("backgroundColor"), context)?;
+    if !bg.is_undefined() {
+        out.background_color = parse_color(&bg.to_string(context)?.to_std_string_escaped());
+    }
+    out.opacity = read_f32(&o, "opacity", context)?;
+
     Ok(out)
 }
 
-fn read_u16(obj: &JsObject, key: &str, context: &mut Context) -> JsResult<Option<u16>> {
+fn read_f32(obj: &JsObject, key: &str, context: &mut Context) -> JsResult<Option<f32>> {
     let v = obj.get(JsString::from(key), context)?;
     if v.is_undefined() || v.is_null() {
         return Ok(None);
     }
-    let n = v.to_u32(context)?;
-    Ok(Some(n.min(u16::MAX as u32) as u16))
+    Ok(Some(v.to_number(context)? as f32))
+}
+
+fn read_keyword<T>(
+    obj: &JsObject,
+    key: &str,
+    context: &mut Context,
+    parse: fn(&str) -> Option<T>,
+) -> JsResult<Option<T>> {
+    let v = obj.get(JsString::from(key), context)?;
+    if v.is_undefined() || v.is_null() {
+        return Ok(None);
+    }
+    let s = v.to_string(context)?.to_std_string_escaped();
+    Ok(parse(&s))
 }

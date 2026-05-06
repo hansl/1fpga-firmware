@@ -167,8 +167,18 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
 
     let timeout = Duration::from_millis(500);
     while running.load(Ordering::SeqCst) {
+        // Compute layout against the current tree + framebuffer
+        // viewport. Today this rebuilds the Taffy tree from scratch
+        // every frame; cheap for menu-sized trees, swap to incremental
+        // sync if a future profile shows it as the bottleneck.
+        let layouts = ui_state.with_tree(|tree| {
+            crate::layout::compute(tree, root, fb.width as f32, fb.height as f32)
+        });
+
         let frame = device.begin_frame();
-        let frame = ui_state.with_tree(|tree| crate::paint::paint(tree, root, &fb, frame))?;
+        let frame = ui_state.with_tree(|tree| {
+            crate::paint::paint(tree, root, &fb, &layouts, frame)
+        })?;
         frame.present()?.submit()?.wait_presented(timeout)?;
         ui_state.with_tree_mut(|t| t.clear_dirty());
     }

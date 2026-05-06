@@ -6,25 +6,61 @@ declare module '1fpga:gui' {
    */
   export type NodeId = number;
 
-  /**
-   * Style fields recognised by N1 (more land in later milestones).
-   * `width` / `height` / `top` / `left` are integer pixels.
-   * `backgroundColor` is a CSS color string (`#rgb`, `#rrggbb`,
-   * `#rrggbbaa`).
-   */
+  /** A length value, in pixels. (No `%` / `em` / `rem` yet.) */
+  export type Length = number;
+
+  /** Style fields recognised by the runtime. Every field is optional;
+   *  unset fields fall back to the layout engine's CSS defaults.
+   *  Lengths are pixels. Colors are CSS color strings: `#rgb`,
+   *  `#rrggbb`, `#rrggbbaa`. */
   export interface Style {
+    // ---- Layout ------------------------------------------------------
+    display?: 'block' | 'flex';
+    position?: 'relative' | 'absolute';
+    flexDirection?: 'row' | 'column' | 'row-reverse' | 'column-reverse';
+    flexWrap?: 'nowrap' | 'wrap' | 'wrap-reverse';
+    justifyContent?:
+      | 'flex-start' | 'flex-end' | 'center'
+      | 'space-between' | 'space-around' | 'space-evenly';
+    alignItems?: 'stretch' | 'flex-start' | 'flex-end' | 'center' | 'baseline';
+    alignSelf?: 'stretch' | 'flex-start' | 'flex-end' | 'center' | 'baseline';
+    flexGrow?: number;
+    flexShrink?: number;
+    flexBasis?: Length;
+    gap?: Length;
+
+    // ---- Position offsets (mostly meaningful for position:absolute) -
+    top?: Length;
+    right?: Length;
+    bottom?: Length;
+    left?: Length;
+
+    // ---- Box ---------------------------------------------------------
+    width?: Length;
+    height?: Length;
+    minWidth?: Length;
+    maxWidth?: Length;
+    minHeight?: Length;
+    maxHeight?: Length;
+    padding?: Length;
+    paddingTop?: Length;
+    paddingRight?: Length;
+    paddingBottom?: Length;
+    paddingLeft?: Length;
+    margin?: Length;
+    marginTop?: Length;
+    marginRight?: Length;
+    marginBottom?: Length;
+    marginLeft?: Length;
+
+    // ---- Visual ------------------------------------------------------
     backgroundColor?: string;
-    width?: number;
-    height?: number;
-    top?: number;
-    left?: number;
+    opacity?: number;
+    overflow?: 'visible' | 'hidden';
   }
 
-  /**
-   * Props bag accepted by `createInstance`. Mirrors React's instance
-   * props shape so the upcoming reconciler integration drops in
-   * unchanged.
-   */
+  /** Props bag accepted by `createInstance` / `commitUpdate`. Mirrors
+   *  React's instance props shape. */
   export interface Props {
     style?: Style;
     className?: string;
@@ -32,7 +68,7 @@ declare module '1fpga:gui' {
   }
 
   /**
-   * Allocate a new host node. `type` selects the renderer; N1 ships
+   * Allocate a new host node. `type` selects the renderer; N3 ships
    * `'div'` only.
    */
   export function createInstance(type: 'div', props?: Props): NodeId;
@@ -42,8 +78,8 @@ declare module '1fpga:gui' {
 
   /**
    * Insert `child` into `parent`'s children list immediately before
-   * `before`. If `before` is no longer a child of `parent`, falls
-   * back to appending.
+   * `before`. If `before` is no longer a child of `parent`, falls back
+   * to appending.
    */
   export function insertBefore(parent: NodeId, child: NodeId, before: NodeId): void;
 
