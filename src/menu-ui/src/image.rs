@@ -1,0 +1,219 @@
+//! Image registry: PNG decode + texture cache.
+//!
+//! N5 supports PNG only. `<img src="...">` references a filesystem
+//! path; the registry decodes once per unique `src`, uploads the
+//! pixel data as an RGBA8888 texture, and caches the resulting
+//! `TextureHandle` plus intrinsic dimensions. Subsequent references
+//! to the same `src` are pure hashmap lookups.
+//!
+//! Images that fail to load (missing file, bad PNG, format unsupported)
+//! return a `Failed` entry so we don't retry every frame; the paint
+//! path skips drawing them.
+
+use std::collections::HashMap;
+use std::io::BufReader;
+use std::path::Path;
+
+use menu_core_host::device::Device;
+use menu_core_host::error::DeviceError;
+use menu_core_host::protocol::TextureFormat;
+use menu_core_host::texture::{TextureHandle, TextureSpec};
+
+#[derive(Debug, thiserror::Error)]
+pub enum ImageError {
+    #[error("io reading image '{path}': {source}")]
+    Io {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("png decode failed for '{path}': {detail}")]
+    Decode { path: String, detail: String },
+    #[error("device error uploading image '{path}': {source}")]
+    Device {
+        path: String,
+        #[source]
+        source: DeviceError,
+    },
+}
+
+/// One cached image. `Loaded` carries the texture + intrinsic dims;
+/// `Failed` records the error string so paint can skip without
+/// retrying every frame.
+#[derive(Debug, Clone)]
+pub enum CachedImage {
+    Loaded {
+        texture: TextureHandle,
+        width: u16,
+        height: u16,
+    },
+    Failed {
+        reason: String,
+    },
+}
+
+/// Path-keyed image cache. Lookup-and-load is `&mut` because misses
+/// upload a new texture; once cached, lookups are read-only.
+#[derive(Debug, Default)]
+pub struct ImageRegistry {
+    entries: HashMap<String, CachedImage>,
+}
+
+impl ImageRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Get-or-load. Returns the cached entry for `src`, decoding
+    /// + uploading on the first reference. Failures are cached as
+    /// `CachedImage::Failed` so we don't pound the disk every frame.
+    pub fn get_or_load(&mut self, device: &mut Device, src: &str) -> CachedImage {
+        if let Some(entry) = self.entries.get(src) {
+            return entry.clone();
+        }
+        let entry = match decode_and_upload(device, src) {
+            Ok((texture, width, height)) => CachedImage::Loaded {
+                texture,
+                width,
+                height,
+            },
+            Err(e) => {
+                tracing::warn!("image '{src}' failed to load: {e}");
+                CachedImage::Failed {
+                    reason: format!("{e}"),
+                }
+            }
+        };
+        self.entries.insert(src.to_string(), entry.clone());
+        entry
+    }
+
+    /// Read-only lookup. Returns `None` if `src` hasn't been seen
+    /// before. Used by layout's measure function — paint already
+    /// owns `&mut device` so it goes through `get_or_load`.
+    pub fn get(&self, src: &str) -> Option<&CachedImage> {
+        self.entries.get(src)
+    }
+}
+
+fn decode_and_upload(
+    device: &mut Device,
+    src: &str,
+) -> Result<(TextureHandle, u16, u16), ImageError> {
+    let file = std::fs::File::open(Path::new(src)).map_err(|e| ImageError::Io {
+        path: src.to_string(),
+        source: e,
+    })?;
+    let decoder = png::Decoder::new(BufReader::new(file));
+    let mut reader = decoder.read_info().map_err(|e| ImageError::Decode {
+        path: src.to_string(),
+        detail: e.to_string(),
+    })?;
+    let info = reader.info();
+    let width = info.width as u16;
+    let height = info.height as u16;
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let frame = reader.next_frame(&mut buf).map_err(|e| ImageError::Decode {
+        path: src.to_string(),
+        detail: e.to_string(),
+    })?;
+    let info = reader.info();
+
+    // Convert to BGRA8888 (the FB / texture format) regardless of
+    // the input PNG's color type. We use a small per-source-format
+    // expander rather than pulling in the heavier `image` crate.
+    let pixels = expand_to_bgra(
+        &buf[..frame.buffer_size()],
+        info.color_type,
+        info.bit_depth,
+        width,
+        height,
+    )
+    .map_err(|d| ImageError::Decode {
+        path: src.to_string(),
+        detail: d,
+    })?;
+
+    let texture = device
+        .upload_texture(&TextureSpec {
+            format: TextureFormat::Rgba8888,
+            width,
+            height,
+            stride: (width as u32) * 4,
+            data: &pixels,
+        })
+        .map_err(|e| ImageError::Device {
+            path: src.to_string(),
+            source: e,
+        })?;
+    tracing::info!(
+        "image '{}' loaded: {}x{}, tex_id={}",
+        src,
+        width,
+        height,
+        texture.id
+    );
+    Ok((texture, width, height))
+}
+
+/// Convert PNG-decoded bytes to in-memory BGRA8888 (the FB / texture
+/// format). Supports the most common 8-bit color types: RGB, RGBA,
+/// Grayscale, GrayscaleAlpha, and Indexed (palette) is rejected for
+/// now (PROTOCOL.md §6.2 doesn't expose paletted formats).
+fn expand_to_bgra(
+    src: &[u8],
+    color: png::ColorType,
+    depth: png::BitDepth,
+    width: u16,
+    height: u16,
+) -> Result<Vec<u8>, String> {
+    if depth != png::BitDepth::Eight {
+        return Err(format!("unsupported bit depth {depth:?}; only 8-bit supported"));
+    }
+    let n_pixels = (width as usize) * (height as usize);
+    let mut out = vec![0u8; n_pixels * 4];
+    match color {
+        png::ColorType::Rgba => {
+            // R G B A -> B G R A
+            for (i, chunk) in src.chunks_exact(4).enumerate() {
+                let off = i * 4;
+                out[off] = chunk[2];
+                out[off + 1] = chunk[1];
+                out[off + 2] = chunk[0];
+                out[off + 3] = chunk[3];
+            }
+        }
+        png::ColorType::Rgb => {
+            for (i, chunk) in src.chunks_exact(3).enumerate() {
+                let off = i * 4;
+                out[off] = chunk[2];
+                out[off + 1] = chunk[1];
+                out[off + 2] = chunk[0];
+                out[off + 3] = 0xFF;
+            }
+        }
+        png::ColorType::GrayscaleAlpha => {
+            for (i, chunk) in src.chunks_exact(2).enumerate() {
+                let off = i * 4;
+                let g = chunk[0];
+                out[off] = g;
+                out[off + 1] = g;
+                out[off + 2] = g;
+                out[off + 3] = chunk[1];
+            }
+        }
+        png::ColorType::Grayscale => {
+            for (i, &g) in src.iter().enumerate() {
+                let off = i * 4;
+                out[off] = g;
+                out[off + 1] = g;
+                out[off + 2] = g;
+                out[off + 3] = 0xFF;
+            }
+        }
+        png::ColorType::Indexed => {
+            return Err("indexed/paletted PNG not supported (use RGB/RGBA)".into());
+        }
+    }
+    Ok(out)
+}

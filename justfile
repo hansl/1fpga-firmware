@@ -137,6 +137,10 @@ deploy-menu-ui-bundle:
     npm run build
     scp js/frontend/dist/menu_ui.js root@{{mister_ip}}:/media/fat/menu_ui_app.js
 
+# Deploy a small test PNG to the device for menu-ui's <img> demo
+deploy-menu-ui-test-png:
+    scp docs/assets/osd/line_array.png root@{{mister_ip}}:/media/fat/menu_ui_test.png
+
 # Run the menu-ui launcher on the device, loading the deployed JS bundle
 run-menu-ui:
     ssh -t root@{{mister_ip}} '/media/fat/menu_ui --bundle /media/fat/menu_ui_app.js'

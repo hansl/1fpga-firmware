@@ -15,6 +15,7 @@ use taffy::TaffyTree;
 use taffy::prelude::*;
 
 use crate::font::FontRegistry;
+use crate::image::{CachedImage, ImageRegistry};
 use crate::style::{
     AlignItems as MAlignItems, Display as MDisplay, FlexDirection as MFlexDirection,
     FlexWrap as MFlexWrap, JustifyContent as MJustifyContent, Position as MPosition, Style,
@@ -31,11 +32,13 @@ pub struct ComputedLayout {
     pub h: f32,
 }
 
-/// Per-Taffy-node context so the measure function knows what to ask
-/// the font atlas for.
+/// Per-Taffy-node context so the measure function knows the leaf
+/// node's intrinsic size source (font atlas for text, decoded image
+/// for img). `None` for divs, which size from style + flex layout.
 #[derive(Debug, Clone)]
-struct NodeContext {
-    text: Option<TextContext>,
+enum NodeContext {
+    Text(TextContext),
+    Img(ImgContext),
 }
 
 #[derive(Debug, Clone)]
@@ -43,6 +46,11 @@ struct TextContext {
     content: String,
     font_name: String,
     px_size: u16,
+}
+
+#[derive(Debug, Clone)]
+struct ImgContext {
+    src: String,
 }
 
 /// Compute layouts for every node reachable from `root`. Sizes the
@@ -54,6 +62,7 @@ pub fn compute(
     fb_h: f32,
     text_styles: &HashMap<NodeId, ResolvedTextStyle>,
     fonts: &FontRegistry,
+    images: &ImageRegistry,
 ) -> HashMap<NodeId, ComputedLayout> {
     let mut taffy: TaffyTree<NodeContext> = TaffyTree::new();
     let mut node_map: HashMap<NodeId, taffy::NodeId> = HashMap::new();
@@ -65,7 +74,7 @@ pub fn compute(
             width: AvailableSpace::Definite(fb_w),
             height: AvailableSpace::Definite(fb_h),
         },
-        |_known, _avail, _node, ctx, _style| measure(ctx, fonts),
+        |_known, _avail, _node, ctx, _style| measure(ctx, fonts, images),
     );
 
     let mut layouts = HashMap::new();
@@ -73,26 +82,48 @@ pub fn compute(
     layouts
 }
 
-fn measure(ctx: Option<&mut NodeContext>, fonts: &FontRegistry) -> Size<f32> {
-    let Some(ctx) = ctx.and_then(|c| c.text.as_ref()) else {
+fn measure(
+    ctx: Option<&mut NodeContext>,
+    fonts: &FontRegistry,
+    images: &ImageRegistry,
+) -> Size<f32> {
+    let Some(ctx) = ctx else {
         return Size::ZERO;
     };
+    match ctx {
+        NodeContext::Text(t) => measure_text(t, fonts),
+        NodeContext::Img(i) => measure_img(i, images),
+    }
+}
+
+fn measure_text(ctx: &TextContext, fonts: &FontRegistry) -> Size<f32> {
     if let Some(cached) = fonts.get(&ctx.font_name, ctx.px_size) {
-        let w = cached.atlas.measure(&ctx.content) as f32;
-        let h = cached.atlas.line_height as f32;
         Size {
-            width: w,
-            height: h,
+            width: cached.atlas.measure(&ctx.content) as f32,
+            height: cached.atlas.line_height as f32,
         }
     } else {
         // Atlas wasn't pre-built — fall back to a heuristic so layout
-        // still gets some answer rather than 0×0. (Should never happen
-        // when prepare() ran first.)
+        // still gets some answer rather than 0×0.
         let est_w = (ctx.content.chars().count() as f32) * (ctx.px_size as f32 * 0.5);
         Size {
             width: est_w,
             height: ctx.px_size as f32,
         }
+    }
+}
+
+fn measure_img(ctx: &ImgContext, images: &ImageRegistry) -> Size<f32> {
+    if let Some(CachedImage::Loaded { width, height, .. }) = images.get(&ctx.src) {
+        Size {
+            width: *width as f32,
+            height: *height as f32,
+        }
+    } else {
+        // Not yet loaded (or load failed). Layout returns 0×0 so the
+        // image collapses; the prepare phase should have loaded it
+        // before the layout pass for the first frame.
+        Size::ZERO
     }
 }
 
@@ -122,20 +153,21 @@ fn build(
                 .expect("create div node")
         }
         NodeKind::Text { content } => {
-            let resolved = text_styles
-                .get(&id)
-                .cloned()
-                .unwrap_or_default();
-            let ctx = NodeContext {
-                text: Some(TextContext {
-                    content: content.clone(),
-                    font_name: resolved.font_name,
-                    px_size: resolved.px_size.round() as u16,
-                }),
-            };
+            let resolved = text_styles.get(&id).cloned().unwrap_or_default();
+            let ctx = NodeContext::Text(TextContext {
+                content: content.clone(),
+                font_name: resolved.font_name,
+                px_size: resolved.px_size.round() as u16,
+            });
             taffy
                 .new_leaf_with_context(style, ctx)
                 .expect("create text leaf")
+        }
+        NodeKind::Img { src } => {
+            let ctx = NodeContext::Img(ImgContext { src: src.clone() });
+            taffy
+                .new_leaf_with_context(style, ctx)
+                .expect("create img leaf")
         }
     };
     node_map.insert(id, tnode);
@@ -306,7 +338,8 @@ mod tests {
 
         let text_styles = HashMap::new();
         let fonts = FontRegistry::new();
-        let layouts = compute(&tree, root, 1000.0, 800.0, &text_styles, &fonts);
+        let images = ImageRegistry::new();
+        let layouts = compute(&tree, root, 1000.0, 800.0, &text_styles, &fonts, &images);
         let lay = layouts.get(&child).expect("child layout");
         assert!((lay.x - 450.0).abs() < 0.5, "x={}", lay.x);
         assert!((lay.y - 375.0).abs() < 0.5, "y={}", lay.y);
@@ -346,7 +379,8 @@ mod tests {
 
         let text_styles = HashMap::new();
         let fonts = FontRegistry::new();
-        let layouts = compute(&tree, root, 500.0, 500.0, &text_styles, &fonts);
+        let images = ImageRegistry::new();
+        let layouts = compute(&tree, root, 500.0, 500.0, &text_styles, &fonts, &images);
         assert_eq!(layouts[&a].y as i32, 0);
         assert_eq!(layouts[&b].y as i32, 100);
     }

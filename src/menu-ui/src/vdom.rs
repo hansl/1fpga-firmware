@@ -27,6 +27,10 @@ pub enum NodeKind {
     /// against the resolved font & size; paint emits one COPY_RECT
     /// per glyph.
     Text { content: String },
+    /// An image leaf. `src` is a filesystem path resolved by the
+    /// `ImageRegistry`. Intrinsic size comes from the decoded PNG
+    /// unless `style.width`/`height` overrides.
+    Img { src: String },
 }
 
 #[derive(Debug, Clone)]
@@ -188,6 +192,18 @@ impl Tree {
             && matches!(n.kind, NodeKind::Text { .. })
         {
             n.kind = NodeKind::Text { content };
+            self.dirty = true;
+        }
+    }
+
+    /// Replace the `src` path of an image node. No-op for non-image
+    /// nodes. Subsequent paint will look up the new src in the
+    /// ImageRegistry (which lazy-loads on first reference).
+    pub fn set_img_src(&mut self, id: NodeId, src: String) {
+        if let Some(n) = self.nodes.get_mut(id.0 as usize).and_then(|s| s.as_mut())
+            && matches!(n.kind, NodeKind::Img { .. })
+        {
+            n.kind = NodeKind::Img { src };
             self.dirty = true;
         }
     }

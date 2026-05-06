@@ -11,7 +11,7 @@ import type { ReactNode } from 'react';
 import ReactReconciler from 'react-reconciler';
 import { DefaultEventPriority } from 'react-reconciler/constants';
 
-type Type = 'div';
+type Type = 'div' | 'img';
 type Props = gui.Props;
 type NodeId = gui.NodeId;
 type TextInstance = NodeId;

@@ -1,8 +1,9 @@
 import type { CSSProperties } from 'react';
 
-// N4 demo: a flex column centered on the framebuffer with two text
-// labels at different sizes/colors. Validates per-glyph paint, color
-// tinting, and font-size atlas caching.
+// N5 demo: stacked column with two text labels and a PNG image.
+// The image lives at /media/fat/menu_ui_test.png — copy any PNG
+// there, or run `just deploy-menu-ui-test-png` to use the bundled
+// docs asset.
 
 const root: CSSProperties = {
   display: 'flex',
@@ -25,10 +26,9 @@ const subtitle: CSSProperties = {
   color: '#90a0c0',
 };
 
-const accent: CSSProperties = {
-  width: 120,
-  height: 4,
-  backgroundColor: '#ff4040',
+const image: CSSProperties = {
+  // Width / height come from the decoded PNG's intrinsic size when
+  // omitted; explicit values would override.
   marginTop: 24,
 };
 
@@ -36,8 +36,8 @@ export function App() {
   return (
     <div style={root}>
       <div style={title}>Hello, 1FPGA!</div>
-      <div style={subtitle}>menu-ui · N4 · text rendering</div>
-      <div style={accent} />
+      <div style={subtitle}>menu-ui · N5 · text + images</div>
+      <img src="/media/fat/menu_ui_test.png" style={image} />
     </div>
   );
 }

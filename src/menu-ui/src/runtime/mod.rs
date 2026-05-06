@@ -19,8 +19,9 @@ use menu_core_host::protocol::{BlendMode, Rect, Rgba};
 
 use crate::font::{FontError, FontRegistry};
 use crate::host::UiState;
+use crate::image::ImageRegistry;
 use crate::text::TextCache;
-use crate::vdom::{NodeId, Tree};
+use crate::vdom::{NodeId, NodeKind, Tree};
 
 /// Compile-time build identifier — package version. Logged at startup
 /// so a glance at the device output confirms which binary is running.
@@ -49,6 +50,32 @@ fn paint_canary<'a>(
     let x = fb.width.saturating_sub(SIZE + 8);
     let y = 8u16;
     frame.fill_rect_unclipped(Rect::new(x, y, SIZE, SIZE), color, BlendMode::Opaque)
+}
+
+/// Walk the tree under `root` and load every `<img src>` we haven't
+/// seen yet. Failed loads are recorded as `Failed` entries so we
+/// don't retry on every frame.
+fn prepare_images(
+    tree: &Tree,
+    root: NodeId,
+    images: &mut ImageRegistry,
+    device: &mut Device,
+) {
+    fn walk(tree: &Tree, id: NodeId, images: &mut ImageRegistry, device: &mut Device) {
+        let Some(node) = tree.get(id) else {
+            return;
+        };
+        if let NodeKind::Img { src } = &node.kind
+            && images.get(src).is_none()
+            && !src.is_empty()
+        {
+            let _ = images.get_or_load(device, src);
+        }
+        for &child in &node.children {
+            walk(tree, child, images, device);
+        }
+    }
+    walk(tree, root, images, device);
 }
 
 /// Verbose tree dump used for diagnostics. Only emits at DEBUG level
@@ -205,6 +232,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     let mut frame_idx: u32 = 0;
     let mut fonts = FontRegistry::new();
     let mut text_cache = TextCache::new();
+    let mut images = ImageRegistry::new();
     while running.load(Ordering::SeqCst) {
         // 1. Resolve text style inheritance once for the frame.
         let text_styles = ui_state.with_tree(|tree| crate::text::resolve(tree, root));
@@ -214,15 +242,20 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         //    before begin_frame.
         ui_state.with_tree(|tree| crate::text::prepare(tree, &text_styles, &mut fonts, &mut device))?;
 
-        // 3. Populate text cache: allocate render-target textures for
+        // 3. Prepare images: walk the tree, decode + upload any
+        //    `<img>` whose `src` we haven't seen yet. Failures are
+        //    cached so we don't retry every frame.
+        ui_state.with_tree(|tree| prepare_images(tree, root, &mut images, &mut device));
+
+        // 4. Populate text cache: allocate render-target textures for
         //    any (content, font, size, color) tuples we haven't seen
         //    yet. Returns the list of pendings to render this frame.
         let pendings = ui_state.with_tree(|tree| {
             text_cache.populate(tree, &text_styles, &fonts, &mut device)
         })?;
 
-        // 4. Compute layout. Taffy's measure function consults the
-        //    (now-built) font atlas for text nodes' intrinsic sizes.
+        // 5. Compute layout. Taffy's measure function consults the
+        //    font atlas / image registry for text and img leaves.
         let layouts = ui_state.with_tree(|tree| {
             crate::layout::compute(
                 tree,
@@ -231,16 +264,26 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                 fb.height as f32,
                 &text_styles,
                 &fonts,
+                &images,
             )
         });
 
-        // 5. Begin frame: render pending text into their RTs first
+        // 6. Begin frame: render pending text into their RTs first
         //    (target = RT, glyphs, target = framebuffer), then paint
-        //    the normal tree using the cached RTs.
+        //    the normal tree using the cached RTs and images.
         let frame = device.begin_frame();
         let frame = crate::paint::render_pending_text(frame, &pendings, &fonts)?;
         let frame = ui_state.with_tree(|tree| {
-            crate::paint::paint(tree, root, &fb, &layouts, &text_styles, &text_cache, frame)
+            crate::paint::paint(
+                tree,
+                root,
+                &fb,
+                &layouts,
+                &text_styles,
+                &text_cache,
+                &images,
+                frame,
+            )
         })?;
         let frame = paint_canary(frame, &fb, frame_idx)?;
         frame.present()?.submit()?.wait_presented(timeout)?;

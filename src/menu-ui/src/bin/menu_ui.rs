@@ -18,6 +18,7 @@ use boa_runtime as _;
 use ctrlc as _;
 use fontdue as _;
 use menu_core_host as _;
+use png as _;
 use taffy as _;
 use thiserror as _;
 use tracing::error;

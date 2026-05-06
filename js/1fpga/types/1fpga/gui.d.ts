@@ -70,15 +70,18 @@ declare module '1fpga:gui' {
     style?: Style;
     className?: string;
     children?: unknown;
+    /** Filesystem path for `<img>` instances (PNG, decoded once). */
+    src?: string;
   }
 
   /**
    * Allocate a new host node. `type` selects the renderer; the
-   * runtime currently ships `'div'`. Text content is created via
+   * runtime supports `'div'` (containers) and `'img'` (image leaves;
+   * pass the file path in `props.src`). Text content is created via
    * `createTextInstance` (handled by react-reconciler when it
    * encounters string children).
    */
-  export function createInstance(type: 'div', props?: Props): NodeId;
+  export function createInstance(type: 'div' | 'img', props?: Props): NodeId;
 
   /**
    * Allocate a new text leaf node. The text content uses the parent

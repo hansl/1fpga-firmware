@@ -17,6 +17,7 @@
 
 pub mod font;
 pub mod host;
+pub mod image;
 pub mod layout;
 pub mod paint;
 pub mod runtime;

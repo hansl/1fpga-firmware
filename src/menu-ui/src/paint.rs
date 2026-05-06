@@ -13,6 +13,7 @@ use menu_core_host::frame::{CopyOpts, Frame};
 use menu_core_host::protocol::{BlendMode, Filter, Rect, Rgba};
 
 use crate::font::FontRegistry;
+use crate::image::{CachedImage, ImageRegistry};
 use crate::layout::ComputedLayout;
 use crate::text::{CacheKey, PendingRender, ResolvedTextStyle, TextCache};
 use crate::vdom::{NodeId, NodeKind, Tree};
@@ -88,6 +89,7 @@ pub fn paint<'a>(
     layouts: &HashMap<NodeId, ComputedLayout>,
     text_styles: &HashMap<NodeId, ResolvedTextStyle>,
     text_cache: &TextCache,
+    images: &ImageRegistry,
     mut frame: Frame<'a>,
 ) -> Result<Frame<'a>, DeviceError> {
     // Background clear.
@@ -107,6 +109,7 @@ pub fn paint<'a>(
         layouts,
         text_styles,
         text_cache,
+        images,
         frame,
         /* skip_root_bg */ true,
     )?;
@@ -119,6 +122,7 @@ fn paint_subtree<'a>(
     layouts: &HashMap<NodeId, ComputedLayout>,
     text_styles: &HashMap<NodeId, ResolvedTextStyle>,
     text_cache: &TextCache,
+    images: &ImageRegistry,
     mut frame: Frame<'a>,
     skip_root_bg: bool,
 ) -> Result<Frame<'a>, DeviceError> {
@@ -152,12 +156,50 @@ fn paint_subtree<'a>(
         NodeKind::Text { content } => {
             frame = paint_text(content, id, lay, text_styles, text_cache, frame)?;
         }
+        NodeKind::Img { src } => {
+            frame = paint_img(src, lay, images, frame)?;
+        }
     }
 
     for &child in &node.children {
-        frame = paint_subtree(tree, child, layouts, text_styles, text_cache, frame, false)?;
+        frame = paint_subtree(tree, child, layouts, text_styles, text_cache, images, frame, false)?;
     }
     Ok(frame)
+}
+
+fn paint_img<'a>(
+    src: &str,
+    lay: &ComputedLayout,
+    images: &ImageRegistry,
+    frame: Frame<'a>,
+) -> Result<Frame<'a>, DeviceError> {
+    let cached = match images.get(src) {
+        Some(CachedImage::Loaded { texture, width, height }) => (*texture, *width, *height),
+        _ => return Ok(frame),
+    };
+    let (texture, src_w, src_h) = cached;
+    if src_w == 0 || src_h == 0 || lay.w < 0.5 || lay.h < 0.5 {
+        return Ok(frame);
+    }
+    let dst = Rect::new(
+        clamp_u16(lay.x),
+        clamp_u16(lay.y),
+        clamp_u16(lay.w),
+        clamp_u16(lay.h),
+    );
+    frame.copy_rect(
+        &texture,
+        Rect::new(0, 0, src_w, src_h),
+        dst,
+        CopyOpts {
+            // Use SrcAlpha so PNGs with transparency composite over
+            // whatever's behind them. Fully-opaque images degrade
+            // gracefully (alpha=255 → out = src).
+            blend: BlendMode::SrcAlpha,
+            filter: Filter::Nearest,
+            tint: None,
+        },
+    )
 }
 
 fn paint_text<'a>(

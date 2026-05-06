@@ -116,19 +116,37 @@ fn create_instance(_this: &JsValue, args: &[JsValue], context: &mut Context) -> 
         .get_or_undefined(0)
         .to_string(context)?
         .to_std_string_escaped();
+    let props = args.get_or_undefined(1);
+    let style = parse_style_arg(props, context)?;
     let kind = match kind_str.as_str() {
         "div" => NodeKind::Div,
+        "img" => {
+            let src = read_str_prop(props, "src", context)?.unwrap_or_default();
+            NodeKind::Img { src }
+        }
         other => {
             return Err(JsError::from_native(
                 JsNativeError::error().with_message(format!("unknown node type: {other}")),
             ));
         }
     };
-    let style = parse_style_arg(args.get_or_undefined(1), context)?;
     let state = ui_state(context)?;
     let id = state.with_tree_mut(|t| t.create(kind, style.clone()));
     tracing::debug!(?style, "gui.createInstance({kind_str}) -> {}", id.0);
     Ok(JsValue::from(id.0))
+}
+
+/// Read a top-level string-typed prop (e.g. `src` on `<img>`) from a
+/// `props` object. `None` if missing / undefined.
+fn read_str_prop(value: &JsValue, key: &str, context: &mut Context) -> JsResult<Option<String>> {
+    let Some(props) = value.as_object() else {
+        return Ok(None);
+    };
+    let v = props.get(JsString::from(key), context)?;
+    if v.is_undefined() || v.is_null() {
+        return Ok(None);
+    }
+    Ok(Some(v.to_string(context)?.to_std_string_escaped()))
 }
 
 fn create_text_instance(
@@ -194,14 +212,20 @@ fn remove_child(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
     Ok(JsValue::undefined())
 }
 
-/// Replace the entire props of a node. Currently equivalent to
-/// `setStyle` for the supported property surface; will diverge once
-/// non-style props (event handlers, refs) land.
+/// Replace the entire props of a node. Updates style + element-
+/// specific props (e.g. `<img src=...>`).
 fn commit_update(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let id = NodeId(args.get_or_undefined(0).to_u32(context)?);
-    let style = parse_style_arg(args.get_or_undefined(1), context)?;
+    let props = args.get_or_undefined(1);
+    let style = parse_style_arg(props, context)?;
+    let new_src = read_str_prop(props, "src", context)?;
     let state = ui_state(context)?;
-    state.with_tree_mut(|t| t.set_style(id, style));
+    state.with_tree_mut(|t| {
+        t.set_style(id, style);
+        if let Some(src) = new_src {
+            t.set_img_src(id, src);
+        }
+    });
     Ok(JsValue::undefined())
 }
 
