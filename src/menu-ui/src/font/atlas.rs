@@ -11,7 +11,7 @@
 //! row fills, we move down by the tallest glyph in that row + 1 px
 //! padding.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use fontdue::{Font, FontSettings};
 
@@ -44,7 +44,16 @@ pub struct FontAtlas {
     pub height: u16,
     pub line_height: u16,
     pub ascent: u16,
+    /// Map from character to its rasterised glyph entry. Codepoints
+    /// for which the font has no real glyph are NOT inserted here —
+    /// `glyph()` falls back to `'?'` for them.
     glyphs: HashMap<char, GlyphInfo>,
+    /// Every character that was *requested* during the build,
+    /// regardless of whether the font produced a real glyph for it.
+    /// Distinct from `glyphs.keys()` so the registry's rebuild check
+    /// (`has_glyph`) doesn't treat font-missing chars as "still
+    /// needed" and rebuild every frame.
+    requested: HashSet<char>,
 }
 
 impl FontAtlas {
@@ -54,11 +63,19 @@ impl FontAtlas {
         self.glyphs.get(&ch).or_else(|| self.glyphs.get(&'?'))
     }
 
-    /// Return `true` if the atlas has a real entry for `ch` (not the
-    /// `'?'` fallback). Used by the registry to decide whether to
-    /// rebuild the atlas with an expanded charset.
+    /// Returns `true` if `ch` was considered when this atlas was
+    /// built — whether or not the font produced a real glyph. The
+    /// registry uses this to decide if a rebuild is needed when new
+    /// text appears with a character not yet in the atlas.
     pub fn has_glyph(&self, ch: char) -> bool {
-        self.glyphs.contains_key(&ch)
+        self.requested.contains(&ch)
+    }
+
+    /// Iterate every char this atlas was built with. The registry
+    /// uses this on a rebuild to preserve everything the prior atlas
+    /// covered.
+    pub fn requested_chars(&self) -> impl Iterator<Item = char> + '_ {
+        self.requested.iter().copied()
     }
 
     /// Total advance width of `text` if rendered with this atlas.
@@ -103,8 +120,13 @@ pub fn build_atlas(
     let mut row_x: u32 = 0;
     let mut row_h: u32 = 0;
     let mut glyphs = HashMap::new();
+    let mut requested = HashSet::new();
 
     for ch in charset.chars() {
+        // Track every requested char so the registry's rebuild check
+        // doesn't treat font-missing chars as "still needed".
+        requested.insert(ch);
+
         // Skip codepoints the font doesn't have a real glyph for.
         // fontdue returns the `.notdef` (empty box) glyph for missing
         // chars, which we'd otherwise insert into the atlas as if it
@@ -169,6 +191,7 @@ pub fn build_atlas(
         line_height,
         ascent,
         glyphs,
+        requested,
     })
 }
 

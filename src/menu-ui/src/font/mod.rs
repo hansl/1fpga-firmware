@@ -109,20 +109,11 @@ impl FontRegistry {
         };
 
         if needs_build {
-            // When rebuilding, preserve any chars the existing atlas
-            // already had so previously-cached PendingRenders don't
+            // When rebuilding, preserve every char the existing atlas
+            // covered so previously-cached PendingRenders don't
             // suddenly miss glyphs they expected.
             if let Some(prev) = self.atlases.get(&key) {
-                // Copy the existing glyphs' chars into `chars` —
-                // FontAtlas exposes them via `glyph()` lookups; here
-                // we iterate the printable ASCII range as a cheap
-                // approximation. (Full enumeration via iter_glyphs
-                // would be cleaner; left as a future polish.)
-                for ch in '\u{0020}'..='\u{007E}' {
-                    if prev.atlas.has_glyph(ch) {
-                        chars.insert(ch);
-                    }
-                }
+                chars.extend(prev.atlas.requested_chars());
             }
             let bytes = self
                 .fonts
