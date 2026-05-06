@@ -387,6 +387,14 @@ wire [15:0] blit_clip_x, blit_clip_y, blit_clip_w, blit_clip_h;
 wire        blit_ignore_clip;
 wire        blit_done;
 
+// Active render target — driven by ring_fetcher, fed into blit_engine.
+// Defaults to the framebuffer geometry; SET_RENDER_TARGET (PROTOCOL.md
+// §5.6) re-points it at a texture's pixel data.
+wire [31:0] target_base;
+wire [31:0] target_pitch;
+wire [15:0] target_width;
+wire [15:0] target_height;
+
 ring_fetcher u_ring_fetcher (
     .clk             (clk_sys),
     .rst_n           (fetcher_rst_n),
@@ -404,6 +412,15 @@ ring_fetcher u_ring_fetcher (
     .present_pulse_o (fetcher_present_pulse),
 
     .tex_table_addr_i (reg_tex_table_addr),
+    .fb_base_i       (blit_fb_base),
+    .fb_stride_i     ({18'd0, reg_fb_stride}),
+    .fb_width_i      ({4'd0,  reg_fb_width}),
+    .fb_height_i     ({4'd0,  reg_fb_height}),
+
+    .target_base_o   (target_base),
+    .target_pitch_o  (target_pitch),
+    .target_width_o  (target_width),
+    .target_height_o (target_height),
 
     .blit_start_o    (blit_start),
     .blit_mode_o     (blit_mode),
@@ -500,8 +517,8 @@ blit_engine u_blit_engine (
     .tint_en_i     (blit_tint_en),
     .tint_color_i  (blit_tint_color),
 
-    .fb_width_i    (reg_fb_width),
-    .fb_height_i   (reg_fb_height),
+    .target_width_i  (target_width),
+    .target_height_i (target_height),
     .clip_en_i     (blit_clip_en),
     .clip_x_i      (blit_clip_x),
     .clip_y_i      (blit_clip_y),
@@ -509,8 +526,8 @@ blit_engine u_blit_engine (
     .clip_h_i      (blit_clip_h),
     .ignore_clip_i (blit_ignore_clip),
 
-    .fb_base_i  (blit_fb_base),
-    .fb_stride_i(reg_fb_stride),
+    .target_base_i  (target_base),
+    .target_pitch_i (target_pitch),
 
     .busy_o     (blit_busy),
     .done_o     (blit_done),

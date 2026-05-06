@@ -6,18 +6,21 @@
 //  RING_HEAD as we go.
 //
 //  Supported opcodes:
-//    NOP       (0x00) — advance HEAD by 4 + length_w*4
-//    PRESENT   (0x01) — pulse fb_swapper, advance HEAD
-//    FENCE     (0x02) — fetch 1 arg word, write to FENCE_VALUE
-//    FILL_RECT (0x10) — fetch 3 arg words, dispatch blit (FILL mode)
-//    COPY_RECT (0x11) — fetch 5 arg words + 4 descriptor words at
-//                       TEX_TABLE_ADDR + tex_id * 32, dispatch blit
-//                       (COPY mode). M2c3.1 supports the simplest
-//                       sub-form only: 1:1 scale, RGBA8888, opaque
-//                       blend, no tint. Tint flag is ignored if set.
+//    NOP             (0x00) — advance HEAD by 4 + length_w*4
+//    PRESENT         (0x01) — pulse fb_swapper, advance HEAD
+//    FENCE           (0x02) — fetch 1 arg word, write to FENCE_VALUE
+//    SET_CLIP        (0x03) — fetch 2 arg words, latch user clip
+//    CLEAR_CLIP      (0x04) — disable user clip
+//    SET_RENDER_TGT  (0x05) — fetch 1 arg word (tex_id). 0xFFFF = FB;
+//                             else fetch descriptor and latch
+//                             active target (PROTOCOL.md §5.6).
+//    FILL_RECT       (0x10) — fetch 3 arg words, dispatch blit (FILL)
+//    COPY_RECT       (0x11) — fetch 5 arg words + 4 descriptor words,
+//                             dispatch blit (COPY mode).
 //
-//  SET_CLIP / CLEAR_CLIP and unrecognised opcodes trip
-//  ERR_UNKNOWN_OPCODE and halt; M2c2+ adds them.
+//  Active render target: defaults to the framebuffer. SET_RENDER_TGT
+//  re-points the blit engine's destination at a texture's pixel data.
+//  Selection persists across commands until another SET_RENDER_TGT.
 //
 //  Address mapping for DDRAM_*:
 //    DDRAM_ADDR = byte_addr >> 3  (29-bit word-address, 8-byte beats)
@@ -36,6 +39,11 @@ module ring_fetcher (
     input  logic [31:0] ring_size_i,
     input  logic [31:0] ring_tail_i,
     input  logic [31:0] tex_table_addr_i,
+    // Default render target = framebuffer geometry sourced from regs.
+    input  logic [31:0] fb_base_i,
+    input  logic [31:0] fb_stride_i,
+    input  logic [15:0] fb_width_i,
+    input  logic [15:0] fb_height_i,
     output logic [31:0] ring_head_o,
     output logic [31:0] fence_value_o,
     output logic [31:0] error_info_o,
@@ -44,6 +52,13 @@ module ring_fetcher (
 
     // Triple-buffer dispatch.
     output logic        present_pulse_o,
+
+    // Active render target (combined: framebuffer when no RTT active,
+    // texture's data_addr / pitch / dims after SET_RENDER_TARGET).
+    output logic [31:0] target_base_o,
+    output logic [31:0] target_pitch_o,
+    output logic [15:0] target_width_o,
+    output logic [15:0] target_height_o,
 
     // Blit engine dispatch.
     output logic        blit_start_o,
@@ -85,8 +100,12 @@ module ring_fetcher (
     localparam logic [7:0] OP_FENCE      = 8'h02;
     localparam logic [7:0] OP_SET_CLIP   = 8'h03;
     localparam logic [7:0] OP_CLEAR_CLIP = 8'h04;
+    localparam logic [7:0] OP_SET_TARGET = 8'h05;
     localparam logic [7:0] OP_FILL_RECT  = 8'h10;
     localparam logic [7:0] OP_COPY_RECT  = 8'h11;
+
+    // SET_RENDER_TARGET: tex_id == 0xFFFF means "framebuffer".
+    localparam logic [15:0] TARGET_FB     = 16'hFFFF;
 
     // ---- Error codes (PROTOCOL.md §8.1) ------------------------------
     localparam logic [7:0] ERR_UNKNOWN_OPCODE = 8'h01;
@@ -126,6 +145,16 @@ module ring_fetcher (
     // Persistent user clip state, updated on SET_CLIP / CLEAR_CLIP.
     logic        clip_en_q;
     logic [15:0] clip_x_q, clip_y_q, clip_w_q, clip_h_q;
+
+    // Active render target (PROTOCOL.md §5.6). Default = FB.
+    // When target_is_fb_q is high, the target_*_o outputs come from
+    // the FB geometry inputs. Otherwise they come from the latched
+    // texture-descriptor fields.
+    logic        target_is_fb_q;
+    logic [31:0] target_base_q;
+    logic [31:0] target_pitch_q;
+    logic [15:0] target_width_q;
+    logic [15:0] target_height_q;
 
     wire [31:0] head_mask = ring_size_i - 32'd1;
 
@@ -182,6 +211,12 @@ module ring_fetcher (
     assign blit_clip_h_o     = clip_h_q;
     assign blit_ignore_clip_o = (pending_opcode == OP_FILL_RECT) & header_q[2];
 
+    // Active target mux.
+    assign target_base_o   = target_is_fb_q ? fb_base_i   : target_base_q;
+    assign target_pitch_o  = target_is_fb_q ? fb_stride_i : target_pitch_q;
+    assign target_width_o  = target_is_fb_q ? fb_width_i  : target_width_q;
+    assign target_height_o = target_is_fb_q ? fb_height_i : target_height_q;
+
     // Texture descriptor base = tex_table_addr + tex_id * 32.
     wire [31:0] desc_base = tex_table_addr_i + (arg_q[0] <<< 5);
 
@@ -207,6 +242,11 @@ module ring_fetcher (
             clip_y_q       <= 16'd0;
             clip_w_q       <= 16'd0;
             clip_h_q       <= 16'd0;
+            target_is_fb_q   <= 1'b1;
+            target_base_q    <= 32'd0;
+            target_pitch_q   <= 32'd0;
+            target_width_q   <= 16'd0;
+            target_height_q  <= 16'd0;
             ddram_addr_o     <= 29'd0;
             ddram_burstcnt_o <= 8'd0;
             ddram_be_o       <= 8'd0;
@@ -259,6 +299,11 @@ module ring_fetcher (
                             fetch_addr <= fetch_addr + 32'd4;
                             state      <= S_FETCH_ARG;
                         end
+                        OP_SET_TARGET: begin
+                            arg_total  <= 3'd1;
+                            fetch_addr <= fetch_addr + 32'd4;
+                            state      <= S_FETCH_ARG;
+                        end
                         OP_FILL_RECT: begin
                             arg_total  <= 3'd3;
                             fetch_addr <= fetch_addr + 32'd4;
@@ -287,21 +332,29 @@ module ring_fetcher (
                 end
 
                 S_WAIT_ARG: if (ddram_dout_valid_i) begin
-                    arg_q[arg_idx] <= pick_word(ddram_dout_i, fetch_addr[2]);
+                    automatic logic [31:0] arg_word;
+                    arg_word = pick_word(ddram_dout_i, fetch_addr[2]);
+                    arg_q[arg_idx] <= arg_word;
                     if (arg_idx + 3'd1 == arg_total) begin
-                        // All args fetched. COPY_RECT also needs the
-                        // texture descriptor; everything else dispatches
+                        // All args fetched. COPY_RECT and the
+                        // texture-id form of SET_RENDER_TARGET also
+                        // need the descriptor; FB-sentinel
+                        // SET_RENDER_TARGET, FILL_RECT, etc. dispatch
                         // straight to retire / blit.
                         unique case (pending_opcode)
                             OP_FILL_RECT: state <= S_BLIT_DISPATCH;
                             OP_COPY_RECT: begin
                                 // desc_base uses arg_q[0] = tex_id.
-                                // arg_q[0] was just written this cycle
-                                // (non-blocking) so its new value isn't
-                                // visible until next cycle; transition
-                                // to S_FETCH_DESC and let it pick up
-                                // the address combinationally.
                                 state <= S_FETCH_DESC;
+                            end
+                            OP_SET_TARGET: begin
+                                // Just-fetched arg word holds tex_id
+                                // in the low 16 bits.
+                                if (arg_word[15:0] == TARGET_FB) begin
+                                    state <= S_RETIRE;
+                                end else begin
+                                    state <= S_FETCH_DESC;
+                                end
                             end
                             default: state <= S_RETIRE;
                         endcase
@@ -326,7 +379,12 @@ module ring_fetcher (
                 S_WAIT_DESC: if (ddram_dout_valid_i) begin
                     desc_q[desc_idx] <= pick_word(ddram_dout_i, fetch_addr[2]);
                     if (desc_idx == 2'd3) begin
-                        state <= S_BLIT_DISPATCH;
+                        // COPY_RECT continues into the blit pipeline;
+                        // SET_RENDER_TARGET just retires (descriptor
+                        // is latched in S_RETIRE).
+                        state <= (pending_opcode == OP_SET_TARGET)
+                                 ? S_RETIRE
+                                 : S_BLIT_DISPATCH;
                     end else begin
                         desc_idx <= desc_idx + 2'd1;
                         state    <= S_FETCH_DESC;
@@ -349,6 +407,23 @@ module ring_fetcher (
                             clip_en_q <= 1'b1;
                         end
                         OP_CLEAR_CLIP: clip_en_q <= 1'b0;
+                        OP_SET_TARGET: begin
+                            // arg[0][15:0] = tex_id; FB sentinel resets
+                            // to the framebuffer geometry. Otherwise
+                            // latch fields read from the descriptor:
+                            //   desc[0] = data_addr
+                            //   desc[1] = pitch_bytes
+                            //   desc[2] = (height << 16) | width  (LE)
+                            if (arg_q[0][15:0] == TARGET_FB) begin
+                                target_is_fb_q <= 1'b1;
+                            end else begin
+                                target_is_fb_q  <= 1'b0;
+                                target_base_q   <= desc_q[0];
+                                target_pitch_q  <= desc_q[1];
+                                target_width_q  <= desc_q[2][15:0];
+                                target_height_q <= desc_q[2][31:16];
+                            end
+                        end
                         default:  ;
                     endcase
 

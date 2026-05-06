@@ -52,11 +52,16 @@ module blit_engine (
 
     // Clipping (PROTOCOL.md §5.5). The blit engine intersects the
     // requested dst rect with `effective_clip`:
-    //   effective_clip = ignore_clip_i ? fb_bounds
-    //                                  : user_clip ∩ fb_bounds
+    //   effective_clip = ignore_clip_i ? target_bounds
+    //                                  : user_clip ∩ target_bounds
     // and adjusts src coordinates by the same offset (for COPY 1:1).
-    input  logic [11:0] fb_width_i,
-    input  logic [11:0] fb_height_i,
+    //
+    // The "target" is the active render destination — the framebuffer
+    // by default, or a texture's pixel data after SET_RENDER_TARGET
+    // (PROTOCOL.md §5.6). The ring fetcher tracks this state and
+    // drives the target_* inputs accordingly.
+    input  logic [15:0] target_width_i,
+    input  logic [15:0] target_height_i,
     input  logic        clip_en_i,
     input  logic [15:0] clip_x_i,
     input  logic [15:0] clip_y_i,
@@ -64,9 +69,9 @@ module blit_engine (
     input  logic [15:0] clip_h_i,
     input  logic        ignore_clip_i,
 
-    // Framebuffer geometry.
-    input  logic [31:0] fb_base_i,
-    input  logic [13:0] fb_stride_i,
+    // Active render target geometry (FB by default, texture after RTT).
+    input  logic [31:0] target_base_i,
+    input  logic [31:0] target_pitch_i,
 
     output logic        busy_o,
     output logic        done_o,
@@ -328,8 +333,8 @@ module blit_engine (
                     automatic logic [15:0] eff_w, eff_h;
                     automatic logic [15:0] sox, soy;
 
-                    fbw = {4'd0, fb_width_i};
-                    fbh = {4'd0, fb_height_i};
+                    fbw = target_width_i;
+                    fbh = target_height_i;
 
                     // Effective clip = (ignore_clip ? FB-only :
                     //                   user_clip ∩ FB).
@@ -382,8 +387,8 @@ module blit_engine (
                     if (cur_y_off == dst_h_q) begin
                         state <= S_DONE;
                     end else begin
-                        dst_row_byte_addr <= fb_base_i
-                            + ({16'd0, (dst_y_q + cur_y_off)} * {18'd0, fb_stride_i})
+                        dst_row_byte_addr <= target_base_i
+                            + ({16'd0, (dst_y_q + cur_y_off)} * target_pitch_i)
                             + ({16'd0, dst_x_q} <<< 2);
                         // src x byte multiplier depends on format.
                         src_row_byte_addr <= src_addr_q
