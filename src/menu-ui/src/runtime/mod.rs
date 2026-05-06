@@ -13,10 +13,41 @@ use tracing::{debug, error, info};
 
 use menu_core_host::device::{Device, DeviceConfig, FramebufferConfig};
 use menu_core_host::error::DeviceError;
+use menu_core_host::frame::Frame;
 use menu_core_host::mem;
+use menu_core_host::protocol::{BlendMode, Rect, Rgba};
 
 use crate::host::UiState;
 use crate::vdom::{NodeId, Tree};
+
+/// Compile-time build identifier — package version. Logged at startup
+/// so a glance at the device output confirms which binary is running.
+/// (Git hash via build.rs is a future improvement.)
+pub const BUILD_ID: &str = env!("CARGO_PKG_VERSION");
+
+/// "Build canary" — paints a small color-cycling square in the
+/// top-right corner of every frame so a glance at the screen confirms
+/// the loop is alive AND the binary is fresh. Cycles through 6 colors
+/// every 6 frames (≈100 ms at 60 fps).
+fn paint_canary<'a>(
+    frame: Frame<'a>,
+    fb: &FramebufferConfig,
+    frame_idx: u32,
+) -> Result<Frame<'a>, DeviceError> {
+    const SIZE: u16 = 24;
+    const PALETTE: [Rgba; 6] = [
+        Rgba::new(0xFF, 0x40, 0x40, 0xFF), // red
+        Rgba::new(0xFF, 0xC0, 0x40, 0xFF), // amber
+        Rgba::new(0xFF, 0xFF, 0x40, 0xFF), // yellow
+        Rgba::new(0x40, 0xFF, 0x40, 0xFF), // green
+        Rgba::new(0x40, 0xC0, 0xFF, 0xFF), // sky
+        Rgba::new(0xC0, 0x40, 0xFF, 0xFF), // violet
+    ];
+    let color = PALETTE[(frame_idx as usize) % PALETTE.len()];
+    let x = fb.width.saturating_sub(SIZE + 8);
+    let y = 8u16;
+    frame.fill_rect_unclipped(Rect::new(x, y, SIZE, SIZE), color, BlendMode::Opaque)
+}
 
 /// Verbose tree dump used for diagnostics. Only emits at DEBUG level
 /// so production logs stay quiet.
@@ -94,8 +125,8 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     device.configure_framebuffer(fb)?;
     device.start()?;
     info!(
-        "menu-ui: device open, framebuffer {}×{}",
-        info.width, info.height
+        "menu-ui {}: device open, framebuffer {}×{}",
+        BUILD_ID, info.width, info.height
     );
 
     // 2. Load the JS bundle.
@@ -166,6 +197,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     }
 
     let timeout = Duration::from_millis(500);
+    let mut frame_idx: u32 = 0;
     while running.load(Ordering::SeqCst) {
         // Compute layout against the current tree + framebuffer
         // viewport. Today this rebuilds the Taffy tree from scratch
@@ -179,8 +211,10 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         let frame = ui_state.with_tree(|tree| {
             crate::paint::paint(tree, root, &fb, &layouts, frame)
         })?;
+        let frame = paint_canary(frame, &fb, frame_idx)?;
         frame.present()?.submit()?.wait_presented(timeout)?;
         ui_state.with_tree_mut(|t| t.clear_dirty());
+        frame_idx = frame_idx.wrapping_add(1);
     }
 
     info!("menu-ui: stopping engine");
