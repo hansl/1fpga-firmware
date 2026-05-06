@@ -345,7 +345,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     };
 
     // 3. Build the Boa context and evaluate the bundle.
-    let (mut context, _loader) = boa::build_context()?;
+    let (mut context, executor, _loader) = boa::build_context()?;
     let ui_state = UiState::default();
     let input_state = InputState::new();
     let fps_counter = fps::FpsCounter::new();
@@ -406,11 +406,15 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     let router = IntentRouter::new();
     let mut event_buf: Vec<RawInputEvent> = Vec::new();
     while running.load(Ordering::SeqCst) {
-        // 0a. Drain the JS job queue. React's scheduler enqueues
-        //     setTimeout(fn, 0) jobs to flush queued state updates;
-        //     they only run when we explicitly ask for them.
-        if let Err(e) = context.run_jobs() {
-            tracing::warn!("run_jobs error: {e}");
+        // 0a. Drive the JS job queue forward by one tick. We can't
+        //     use `context.run_jobs()` here — it blocks until every
+        //     queued job (including future-scheduled timeouts) is
+        //     drained, so a recurring `setInterval` would deadlock
+        //     the loop. `boa::tick_jobs` polls the executor's
+        //     `run_jobs_async` future a bounded number of times
+        //     instead; see its doc comment for the rationale.
+        if let Err(e) = boa::tick_jobs(&executor, &mut context) {
+            tracing::warn!("tick_jobs error: {e}");
         }
 
         // 0b. Pump input. Drain pending evdev events, translate to
@@ -421,10 +425,10 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
             dispatch_input(&input_state, &router, &ev, &mut context)?;
         }
 
-        // 0c. Run jobs again — handlers above may have called
+        // 0c. Tick jobs again — handlers above may have called
         //     setTimeout (directly or via React's setState scheduler).
-        if let Err(e) = context.run_jobs() {
-            tracing::warn!("run_jobs error: {e}");
+        if let Err(e) = boa::tick_jobs(&executor, &mut context) {
+            tracing::warn!("tick_jobs error: {e}");
         }
 
         // 1. Resolve text style inheritance once for the frame.

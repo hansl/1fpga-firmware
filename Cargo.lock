@@ -3429,6 +3429,7 @@ dependencies = [
  "ctrlc",
  "evdev",
  "fontdue",
+ "futures-lite",
  "menu-core-host",
  "png 0.17.16",
  "taffy",

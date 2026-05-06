@@ -6,8 +6,10 @@
 //! module registered as a synthetic module so JS code can
 //! `import * as gui from '1fpga:gui'`.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
+use boa_engine::job::{JobExecutor, SimpleJobExecutor};
 use boa_engine::module::MapModuleLoader;
 use boa_engine::{Context, JsResult, JsString};
 use boa_gc::{Finalize, Trace};
@@ -18,26 +20,65 @@ use tracing::{debug, error, info, warn};
 /// Build a fresh Boa context with the runtime extensions and our
 /// `1fpga:gui` host module registered.
 ///
-/// Registers `setTimeout` / `clearTimeout` globals via
-/// `boa_runtime::interval`. They queue `TimeoutJob`s on the context's
-/// job queue; the runtime drains them via `context.run_jobs()` (called
-/// inside `await_blocking` and at safe points in the frame loop).
-/// React's scheduler relies on `setTimeout` to flush queued work.
-///
-/// `setInterval` is intentionally NOT registered. Boa's
-/// `SimpleJobExecutor::run_jobs` blocks until every queued job
-/// (including future-scheduled timeouts) drains — a recurring
-/// interval keeps the queue non-empty forever and `run_jobs` never
-/// returns. Code that needs periodic ticks should hook into the
-/// frame loop instead (e.g. via the `requestAnimationFrame` API
-/// landing in N7).
-pub fn build_context() -> JsResult<(Context, Rc<MapModuleLoader>)> {
+/// Returns the executor too so the caller can drive it tick-style
+/// (see [`tick_jobs`]) instead of via the blocking `Context::run_jobs`,
+/// which spins forever once `setInterval` is in play.
+pub fn build_context() -> JsResult<(Context, Rc<SimpleJobExecutor>, Rc<MapModuleLoader>)> {
     let loader = Rc::new(MapModuleLoader::new());
-    let mut context = Context::builder().module_loader(loader.clone()).build()?;
+    let executor = Rc::new(SimpleJobExecutor::new());
+    let mut context = Context::builder()
+        .module_loader(loader.clone())
+        .job_executor(executor.clone())
+        .build()?;
     boa_runtime::register(ConsoleExtension(TracingLogger), None, &mut context)?;
     boa_runtime::interval::register(&mut context)?;
     crate::host::register(&loader, &mut context)?;
-    Ok((context, loader))
+    Ok((context, executor, loader))
+}
+
+/// Drive `SimpleJobExecutor::run_jobs_async` for a bounded number of
+/// iterations, abandoning the future if it doesn't terminate.
+///
+/// Boa's `Context::run_jobs` (and the executor's `run_jobs` / blocking
+/// `block_on(run_jobs_async)`) loops until *every* queued job —
+/// including future-scheduled timeouts — drains. A recurring
+/// `setInterval` keeps the queue non-empty forever, so the blocking
+/// call never returns and the frame loop hangs.
+///
+/// `run_jobs_async`'s body is, however, a forward-progressing state
+/// machine: each iteration drains async jobs into a `FutureGroup`,
+/// runs every past-due timeout, drains promise + generic queues, polls
+/// one async future, then `yield_now().await`s. By driving the future
+/// via `poll_once` we get exactly one iteration of work per poll, then
+/// control returns to us — no blocking on future timeouts.
+///
+/// We poll up to `MAX_ITERATIONS` times per call to let chained
+/// promise resolutions settle (React's commit cycle typically needs
+/// 2-3 iterations to quiesce).
+///
+/// Tradeoff: in-flight async jobs (NativeAsyncJob) live in the
+/// executor's local `FutureGroup`, which is dropped when we abandon
+/// the future. Multi-poll async jobs would be orphaned. In menu-ui
+/// the only async work is module loading at startup (synthetic
+/// modules, single-poll), driven via `await_blocking` before any
+/// recurring timer is registered, so this is safe.
+pub fn tick_jobs(executor: &Rc<SimpleJobExecutor>, context: &mut Context) -> JsResult<()> {
+    use futures_lite::future;
+
+    const MAX_ITERATIONS: u32 = 16;
+
+    let cell = RefCell::new(context);
+    let exec = executor.clone();
+    future::block_on(async move {
+        let mut fut = Box::pin(exec.run_jobs_async(&cell));
+        for _ in 0..MAX_ITERATIONS {
+            match future::poll_once(fut.as_mut()).await {
+                Some(result) => return result,
+                None => continue,
+            }
+        }
+        Ok(())
+    })
 }
 
 /// Bridges `console.*` calls from JS to the host's `tracing`
