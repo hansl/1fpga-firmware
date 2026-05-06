@@ -66,6 +66,10 @@ pub fn register(loader: &MapModuleLoader, context: &mut Context) -> JsResult<()>
             NativeFunction::from_fn_ptr(create_instance),
         ),
         (
+            js_string!("createTextInstance"),
+            NativeFunction::from_fn_ptr(create_text_instance),
+        ),
+        (
             js_string!("appendChild"),
             NativeFunction::from_fn_ptr(append_child),
         ),
@@ -80,6 +84,10 @@ pub fn register(loader: &MapModuleLoader, context: &mut Context) -> JsResult<()>
         (
             js_string!("commitUpdate"),
             NativeFunction::from_fn_ptr(commit_update),
+        ),
+        (
+            js_string!("commitTextUpdate"),
+            NativeFunction::from_fn_ptr(commit_text_update),
         ),
         (
             js_string!("setStyle"),
@@ -118,9 +126,39 @@ fn create_instance(_this: &JsValue, args: &[JsValue], context: &mut Context) -> 
     };
     let style = parse_style_arg(args.get_or_undefined(1), context)?;
     let state = ui_state(context)?;
-    let id = state.with_tree_mut(|t| t.create(kind, style));
+    let id = state.with_tree_mut(|t| t.create(kind, style.clone()));
     tracing::debug!(?style, "gui.createInstance({kind_str}) -> {}", id.0);
     Ok(JsValue::from(id.0))
+}
+
+fn create_text_instance(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let text = args
+        .get_or_undefined(0)
+        .to_string(context)?
+        .to_std_string_escaped();
+    let state = ui_state(context)?;
+    let id = state.with_tree_mut(|t| t.create(NodeKind::Text { content: text.clone() }, Style::default()));
+    tracing::debug!("gui.createTextInstance({text:?}) -> {}", id.0);
+    Ok(JsValue::from(id.0))
+}
+
+fn commit_text_update(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = NodeId(args.get_or_undefined(0).to_u32(context)?);
+    let text = args
+        .get_or_undefined(1)
+        .to_string(context)?
+        .to_std_string_escaped();
+    let state = ui_state(context)?;
+    state.with_tree_mut(|t| t.set_text(id, text));
+    Ok(JsValue::undefined())
 }
 
 fn append_child(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -257,7 +295,17 @@ fn parse_style_value(value: &JsValue, context: &mut Context) -> JsResult<Style> 
     if !bg.is_undefined() {
         out.background_color = parse_color(&bg.to_string(context)?.to_std_string_escaped());
     }
+    let color = o.get(js_string!("color"), context)?;
+    if !color.is_undefined() {
+        out.color = parse_color(&color.to_string(context)?.to_std_string_escaped());
+    }
     out.opacity = read_f32(&o, "opacity", context)?;
+
+    let ff = o.get(js_string!("fontFamily"), context)?;
+    if !ff.is_undefined() {
+        out.font_family = Some(ff.to_string(context)?.to_std_string_escaped());
+    }
+    out.font_size = read_f32(&o, "fontSize", context)?;
 
     Ok(out)
 }

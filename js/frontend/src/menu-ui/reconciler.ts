@@ -14,6 +14,7 @@ import { DefaultEventPriority } from 'react-reconciler/constants';
 type Type = 'div';
 type Props = gui.Props;
 type NodeId = gui.NodeId;
+type TextInstance = NodeId;
 type Container = NodeId;
 
 // `null` rather than a sentinel because we don't track host context.
@@ -28,7 +29,7 @@ const reconciler = ReactReconciler<
   Props,
   Container,
   /* Instance        */ NodeId,
-  /* TextInstance    */ never,
+  /* TextInstance    */ TextInstance,
   /* SuspenseInst    */ never,
   /* HydratableInst  */ never,
   /* FormInstance    */ never,
@@ -49,10 +50,8 @@ const reconciler = ReactReconciler<
   createInstance(type, props) {
     return gui.createInstance(type, props);
   },
-  createTextInstance() {
-    // N4 adds real text rendering. Until then, ignore string children
-    // by returning a sentinel that's never used in the host tree.
-    throw new Error('text nodes are not supported yet (lands in N4)');
+  createTextInstance(text) {
+    return gui.createTextInstance(text);
   },
   appendInitialChild(parent, child) {
     gui.appendChild(parent, child);
@@ -85,6 +84,9 @@ const reconciler = ReactReconciler<
   },
   commitUpdate(instance, _type, _prevProps, nextProps) {
     gui.commitUpdate(instance, nextProps);
+  },
+  commitTextUpdate(textInstance, _oldText, newText) {
+    gui.commitTextUpdate(textInstance, newText);
   },
   clearContainer() {
     // N1 doesn't need container clearing — root nodes persist across

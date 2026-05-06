@@ -72,7 +72,10 @@ pub enum Overflow {
 /// All style properties accepted by `1fpga:gui`. Every field is
 /// `Option` so we can detect "set" vs "inherited / default" cleanly
 /// when copying into Taffy.
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
+///
+/// Not `Copy` because `font_family` is a `String`. Cloning is cheap
+/// on the hot paths (inline-string copy is small).
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Style {
     // ---- Layout ------------------------------------------------------
     pub display: Option<Display>,
@@ -114,7 +117,19 @@ pub struct Style {
     pub background_color: Option<Rgba>,
     pub opacity: Option<f32>,
     pub overflow: Option<Overflow>,
+
+    // ---- Text --------------------------------------------------------
+    pub color: Option<Rgba>,
+    /// Font family — looked up in `FontRegistry`. `None` means use
+    /// the registry's default font.
+    pub font_family: Option<FontFamily>,
+    pub font_size: Option<f32>,
 }
+
+/// Identifier for a registered font — kept as a small `String` since
+/// it's compared by name on lookup. `Box<str>` would save a few bytes
+/// but `String` makes parser ergonomics simpler.
+pub type FontFamily = String;
 
 /// Parse a CSS-style color string. Supports `#rgb`, `#rrggbb`,
 /// `#rrggbbaa`. Returns `None` if `s` is not recognised.

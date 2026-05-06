@@ -1,28 +1,43 @@
 import type { CSSProperties } from 'react';
 
-// N3 demo: a flexbox-centered red box. The root is a flex container
-// sized to the framebuffer; the child has a fixed size and centers via
-// `justifyContent` / `alignItems` instead of hardcoded `top`/`left`.
+// N4 demo: a flex column centered on the framebuffer with two text
+// labels at different sizes/colors. Validates per-glyph paint, color
+// tinting, and font-size atlas caching.
 
 const root: CSSProperties = {
   display: 'flex',
   width: 1920,
   height: 1080,
+  flexDirection: 'column',
   justifyContent: 'center',
   alignItems: 'center',
-  backgroundColor: '#202040',
+  backgroundColor: '#101028',
+  gap: 16,
 };
 
-const box: CSSProperties = {
-  width: 400,
-  height: 400,
+const title: CSSProperties = {
+  fontSize: 96,
+  color: '#ffffff',
+};
+
+const subtitle: CSSProperties = {
+  fontSize: 36,
+  color: '#90a0c0',
+};
+
+const accent: CSSProperties = {
+  width: 120,
+  height: 4,
   backgroundColor: '#ff4040',
+  marginTop: 24,
 };
 
 export function App() {
   return (
     <div style={root}>
-      <div style={box} />
+      <div style={title}>Hello, 1FPGA!</div>
+      <div style={subtitle}>menu-ui · N4 · text rendering</div>
+      <div style={accent} />
     </div>
   );
 }

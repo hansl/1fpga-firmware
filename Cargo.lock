@@ -3415,6 +3415,7 @@ dependencies = [
  "clap-verbosity-flag",
  "core_affinity",
  "ctrlc",
+ "fontdue",
  "menu-core-host",
  "taffy",
  "thiserror 2.0.18",

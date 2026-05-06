@@ -20,9 +20,13 @@ impl NodeId {
     pub const NONE: NodeId = NodeId(0);
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NodeKind {
     Div,
+    /// A text node: leaf, no children. Layout measures its content
+    /// against the resolved font & size; paint emits one COPY_RECT
+    /// per glyph.
+    Text { content: String },
 }
 
 #[derive(Debug, Clone)]
@@ -174,6 +178,16 @@ impl Tree {
     pub fn set_style(&mut self, id: NodeId, style: Style) {
         if let Some(n) = self.nodes.get_mut(id.0 as usize).and_then(|s| s.as_mut()) {
             n.style = style;
+            self.dirty = true;
+        }
+    }
+
+    /// Replace the content of a text node. No-op for non-text nodes.
+    pub fn set_text(&mut self, id: NodeId, content: String) {
+        if let Some(n) = self.nodes.get_mut(id.0 as usize).and_then(|s| s.as_mut())
+            && matches!(n.kind, NodeKind::Text { .. })
+        {
+            n.kind = NodeKind::Text { content };
             self.dirty = true;
         }
     }

@@ -16,6 +16,7 @@ use boa_gc as _;
 use boa_macros as _;
 use boa_runtime as _;
 use ctrlc as _;
+use fontdue as _;
 use menu_core_host as _;
 use taffy as _;
 use thiserror as _;

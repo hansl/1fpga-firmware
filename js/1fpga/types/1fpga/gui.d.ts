@@ -57,6 +57,11 @@ declare module '1fpga:gui' {
     backgroundColor?: string;
     opacity?: number;
     overflow?: 'visible' | 'hidden';
+
+    // ---- Text --------------------------------------------------------
+    color?: string;
+    fontFamily?: string;
+    fontSize?: number;
   }
 
   /** Props bag accepted by `createInstance` / `commitUpdate`. Mirrors
@@ -68,10 +73,21 @@ declare module '1fpga:gui' {
   }
 
   /**
-   * Allocate a new host node. `type` selects the renderer; N3 ships
-   * `'div'` only.
+   * Allocate a new host node. `type` selects the renderer; the
+   * runtime currently ships `'div'`. Text content is created via
+   * `createTextInstance` (handled by react-reconciler when it
+   * encounters string children).
    */
   export function createInstance(type: 'div', props?: Props): NodeId;
+
+  /**
+   * Allocate a new text leaf node. The text content uses the parent
+   * `<div>`'s resolved `color` / `fontFamily` / `fontSize` style.
+   */
+  export function createTextInstance(text: string): NodeId;
+
+  /** Replace the text content of an existing text node. */
+  export function commitTextUpdate(node: NodeId, text: string): void;
 
   /** Append `child` to the end of `parent`'s children list. */
   export function appendChild(parent: NodeId, child: NodeId): void;

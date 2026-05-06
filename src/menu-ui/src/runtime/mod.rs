@@ -17,6 +17,7 @@ use menu_core_host::frame::Frame;
 use menu_core_host::mem;
 use menu_core_host::protocol::{BlendMode, Rect, Rgba};
 
+use crate::font::{FontError, FontRegistry};
 use crate::host::UiState;
 use crate::vdom::{NodeId, Tree};
 
@@ -86,6 +87,9 @@ pub struct RunConfig {
 pub enum RuntimeError {
     #[error("device error: {0}")]
     Device(#[from] DeviceError),
+
+    #[error("font error: {0}")]
+    Font(#[from] FontError),
 
     #[error("io error reading bundle: {0}")]
     Io(#[from] std::io::Error),
@@ -198,18 +202,33 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
 
     let timeout = Duration::from_millis(500);
     let mut frame_idx: u32 = 0;
+    let mut fonts = FontRegistry::new();
     while running.load(Ordering::SeqCst) {
-        // Compute layout against the current tree + framebuffer
-        // viewport. Today this rebuilds the Taffy tree from scratch
-        // every frame; cheap for menu-sized trees, swap to incremental
-        // sync if a future profile shows it as the bottleneck.
+        // 1. Resolve text style inheritance once for the frame.
+        let text_styles = ui_state.with_tree(|tree| crate::text::resolve(tree, root));
+
+        // 2. Prepare: ensure every (font, size) used by text nodes
+        //    has a built+uploaded atlas. Mutates Device, must run
+        //    before begin_frame.
+        ui_state.with_tree(|tree| crate::text::prepare(tree, &text_styles, &mut fonts, &mut device))?;
+
+        // 3. Compute layout. Taffy's measure function consults the
+        //    (now-built) font atlas for text nodes' intrinsic sizes.
         let layouts = ui_state.with_tree(|tree| {
-            crate::layout::compute(tree, root, fb.width as f32, fb.height as f32)
+            crate::layout::compute(
+                tree,
+                root,
+                fb.width as f32,
+                fb.height as f32,
+                &text_styles,
+                &fonts,
+            )
         });
 
+        // 4. Paint.
         let frame = device.begin_frame();
         let frame = ui_state.with_tree(|tree| {
-            crate::paint::paint(tree, root, &fb, &layouts, frame)
+            crate::paint::paint(tree, root, &fb, &layouts, &text_styles, &fonts, frame)
         })?;
         let frame = paint_canary(frame, &fb, frame_idx)?;
         frame.present()?.submit()?.wait_presented(timeout)?;
