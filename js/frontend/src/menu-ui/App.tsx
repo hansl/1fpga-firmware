@@ -45,10 +45,18 @@ export function App() {
   const [count, setCount] = useState(0);
   const [direction, setDirection] = useState<string>('—');
 
+  console.log('App rendering, count=', count, 'direction=', direction);
+
   useIntent(
     'confirm',
     useCallback((e) => {
-      if (e.kind === 'pressed') setCount((c) => c + 1);
+      console.log('confirm handler fired, kind=', e.kind);
+      if (e.kind === 'pressed') {
+        setCount((c) => {
+          console.log('setCount running, prev=', c);
+          return c + 1;
+        });
+      }
     }, []),
   );
   useIntent(
