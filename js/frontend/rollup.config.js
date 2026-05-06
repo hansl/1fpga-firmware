@@ -129,8 +129,14 @@ export default [
       sourcemap: !production,
       inlineDynamicImports: true,
     },
-    plugins: commonPlugins(),
+    // Skip terser for menu-ui during N2 bring-up so JS error stacks
+    // remain readable on device. Re-enable once stable.
+    plugins: commonPluginsUnminified(),
     external: [/^1fpga:/],
     onLog,
   },
 ];
+
+function commonPluginsUnminified() {
+  return commonPlugins().filter((p) => p && p.name !== 'terser');
+}
