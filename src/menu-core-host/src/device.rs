@@ -26,6 +26,20 @@ use crate::texture::{TextureHandle, TextureSpec};
 /// Default LW_H2F register block physical address (PROTOCOL.md §3).
 pub const REGS_PHYS_ADDR: u32 = 0xFF21_0000;
 
+/// Alignment in bytes used for both the base address and the row stride
+/// of texture allocations. 64 = 16 RGBA pixels = the largest burst the
+/// FPGA blit engine emits, so every aligned-row pixel-zero qualifies for
+/// the maximum-throughput burst tier.
+const TEX_BURST_ALIGN: u32 = 64;
+
+/// Round `x` up to the next multiple of `align`. `align` must be a
+/// power of two.
+#[inline]
+fn align_up(x: u32, align: u32) -> u32 {
+    debug_assert!(align.is_power_of_two());
+    (x + align - 1) & !(align - 1)
+}
+
 /// Configuration knobs for [`Device::open_with`]. Defaults match the
 /// production layout used by the firmware.
 #[derive(Debug, Clone, Copy)]
@@ -270,12 +284,14 @@ impl Device {
             });
         }
 
-        // Allocate from the pool. 16-byte alignment matches the
-        // descriptor's alignment guarantee and the FPGA's burst-friendly
-        // requirement (PROTOCOL.md §6.4 — 4-byte minimum, larger is fine).
+        // Allocate with TEX_BURST_ALIGN. Caller-supplied `spec.stride`
+        // is honoured as-is — uploaded textures (fonts, PNGs) own their
+        // pixel layout. Higher-burst eligibility on the source side
+        // depends on the user picking a stride that's a TEX_BURST_ALIGN
+        // multiple; otherwise the dispatch falls back to smaller bursts.
         let phys = self
             .tex_alloc
-            .alloc(needed_bytes as u32, 16)
+            .alloc(needed_bytes as u32, TEX_BURST_ALIGN)
             .map_err(|e| match e {
                 AllocError::OutOfMemory {
                     requested,
@@ -284,7 +300,7 @@ impl Device {
                     needed: requested,
                     free: remaining,
                 },
-                AllocError::BadAlignment(_) => unreachable!("16 is power of two"),
+                AllocError::BadAlignment(_) => unreachable!("64 is power of two"),
             })?;
 
         // Copy pixel data.
@@ -385,11 +401,17 @@ impl Device {
             });
         }
 
-        let stride: u32 = (width as u32) * 4;
+        // Round the row stride up to TEX_BURST_ALIGN bytes so every row
+        // starts on a 64-byte (= 16 RGBA pixel) boundary. The blit
+        // engine's burst-COPY path picks the largest aligned burst at
+        // each cur_x — with both base and pitch 64-aligned, the start
+        // of every row qualifies for the maximum (16-px) tier.
+        let row_bytes: u32 = (width as u32) * 4;
+        let stride: u32 = align_up(row_bytes, TEX_BURST_ALIGN);
         let needed_bytes: u32 = stride.saturating_mul(height as u32);
         let phys = self
             .tex_alloc
-            .alloc(needed_bytes, 16)
+            .alloc(needed_bytes, TEX_BURST_ALIGN)
             .map_err(|e| match e {
                 AllocError::OutOfMemory {
                     requested,
@@ -398,7 +420,7 @@ impl Device {
                     needed: requested,
                     free: remaining,
                 },
-                AllocError::BadAlignment(_) => unreachable!("16 is power of two"),
+                AllocError::BadAlignment(_) => unreachable!("64 is power of two"),
             })?;
 
         // Write the descriptor (data isn't initialized — the FPGA only
