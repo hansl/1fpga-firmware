@@ -15,24 +15,25 @@ use boa_runtime::extensions::ConsoleExtension;
 use boa_runtime::{ConsoleState, Logger};
 use tracing::{debug, error, info, warn};
 
-use crate::runtime::executor::FrameJobExecutor;
-
 /// Build a fresh Boa context with the runtime extensions and our
 /// `1fpga:gui` host module registered.
 ///
-/// Registers `setTimeout` / `setInterval` / `clearTimeout` /
-/// `clearInterval` globals via `boa_runtime::interval`. Those queue
-/// `TimeoutJob`s on the context's job queue; the runtime drains them
-/// once per frame via `context.run_jobs()`. React's internal scheduler
-/// relies on `setTimeout` to flush queued state updates — without a
-/// real timer it queues work that never runs.
+/// Registers `setTimeout` / `clearTimeout` globals via
+/// `boa_runtime::interval`. They queue `TimeoutJob`s on the context's
+/// job queue; the runtime drains them via `context.run_jobs()` (called
+/// inside `await_blocking` and at safe points in the frame loop).
+/// React's scheduler relies on `setTimeout` to flush queued work.
+///
+/// `setInterval` is intentionally NOT registered. Boa's
+/// `SimpleJobExecutor::run_jobs` blocks until every queued job
+/// (including future-scheduled timeouts) drains — a recurring
+/// interval keeps the queue non-empty forever and `run_jobs` never
+/// returns. Code that needs periodic ticks should hook into the
+/// frame loop instead (e.g. via the `requestAnimationFrame` API
+/// landing in N7).
 pub fn build_context() -> JsResult<(Context, Rc<MapModuleLoader>)> {
     let loader = Rc::new(MapModuleLoader::new());
-    let executor = FrameJobExecutor::new();
-    let mut context = Context::builder()
-        .module_loader(loader.clone())
-        .job_executor(executor)
-        .build()?;
+    let mut context = Context::builder().module_loader(loader.clone()).build()?;
     boa_runtime::register(ConsoleExtension(TracingLogger), None, &mut context)?;
     boa_runtime::interval::register(&mut context)?;
     crate::host::register(&loader, &mut context)?;
