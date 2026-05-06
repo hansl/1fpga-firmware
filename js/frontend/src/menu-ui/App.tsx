@@ -17,8 +17,7 @@ const root: CSSProperties = {
   flexDirection: 'column',
   justifyContent: 'center',
   alignItems: 'center',
-  // backgroundColor removed temporarily to confirm the FPGA fence
-  // bottleneck is the 1080p full-screen fill. Restore once we know.
+  backgroundColor: '#101028',
   gap: 16,
 };
 
