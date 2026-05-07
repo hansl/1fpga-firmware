@@ -7,27 +7,31 @@
 // because their `inclk[3]` input must come from a PLL output, not a
 // raw input pin (Cyclone V routing constraint, error 15836).
 //
-// At M1 we don't need a different system frequency yet, so this is a
-// 50 MHz → 50 MHz pass-through PLL. When the blit engine and command
-// fetcher land, change `output_clock_frequency0` (and add additional
-// outputs as needed) without touching the rest of the project.
+// Outputs:
+//   outclk_0 — 50 MHz system clock for the blit engine, ring fetcher,
+//              register file, etc. Equal to refclk (CLK_50M).
+//   outclk_1 — 148.5 MHz video clock used by the compositor scanout
+//              (see rtl/compositor/compositor.sv) for 1080p60 output.
+//              Generated via fractional VCO since 148.5 / 50 = 2.97
+//              isn't an integer multiplier.
 
 module pll(
 	input  refclk,
 	input  rst,
 	output outclk_0,
+	output outclk_1,
 	output locked
 );
 
 altera_pll #(
-	.fractional_vco_multiplier("false"),
+	.fractional_vco_multiplier("true"),
 	.reference_clock_frequency  ("50.0 MHz"),
 	.operation_mode             ("normal"),
-	.number_of_clocks           (1),
+	.number_of_clocks           (2),
 	.output_clock_frequency0    ("50.000000 MHz"),
 	.phase_shift0               ("0 ps"),
 	.duty_cycle0                (50),
-	.output_clock_frequency1    ("0 MHz"),
+	.output_clock_frequency1    ("148.500000 MHz"),
 	.phase_shift1               ("0 ps"),
 	.duty_cycle1                (50),
 	.output_clock_frequency2    ("0 MHz"),
@@ -56,7 +60,7 @@ altera_pll #(
 ) altera_pll_i (
 	.rst       (rst),
 	.refclk    (refclk),
-	.outclk    (outclk_0),
+	.outclk    ({outclk_1, outclk_0}),
 	.locked    (locked),
 	.fboutclk  (),
 	.fbclk     (1'b0)

@@ -166,20 +166,40 @@ assign {SDRAM_DQ, SDRAM_A, SDRAM_BA, SDRAM_CLK, SDRAM_CKE, SDRAM_DQML, SDRAM_DQM
 // DDRAM_* is driven by the M2b ring fetcher (see instantiation below).
 assign DDRAM_CLK = clk_sys;
 
-// Analog-side video: driven to zero because MISTER_FB supplies HDMI pixels.
+// Analog-side video.
+//
+// Default mode (no MENU_CORE_COMPOSITOR define): MISTER_FB drives HDMI,
+// VGA_* is held at zero, the framebuffer at FB_BASE is what shows up on
+// screen. This is the production path the menu-ui demo runs on today.
+//
+// Compositor mode (MENU_CORE_COMPOSITOR defined): the in-tree
+// `compositor` module (rtl/compositor/compositor.sv) drives VGA_*,
+// FB_EN is forced low, and HDMI scanout flows through our per-scanline
+// pixel generator instead of the framework's framebuffer reader. Phase
+// 1 outputs a fixed test pattern; subsequent phases consume the layer
+// table at LAYER_TABLE_OFFSET to actually render the host's scene.
+`ifndef MENU_CORE_COMPOSITOR
 assign VGA_R        = '0;
 assign VGA_G        = '0;
 assign VGA_B        = '0;
 assign VGA_HS       = 1'b0;
 assign VGA_VS       = 1'b0;
 assign VGA_DE       = 1'b0;
+`endif
 assign VGA_F1       = 1'b0;
 assign VGA_SL       = 2'b00;
 assign VGA_SCALER   = 1'b0;
-assign VGA_DISABLE  = 1'b1;  // disable analog output entirely
+`ifdef MENU_CORE_COMPOSITOR
+assign VGA_DISABLE  = 1'b0;  // analog output is the active path
+assign VIDEO_ARX    = 13'd16;
+assign VIDEO_ARY    = 13'd9;
+assign CE_PIXEL     = 1'b1;
+`else
+assign VGA_DISABLE  = 1'b1;  // MISTER_FB handles output
 assign VIDEO_ARX    = 13'd0;
 assign VIDEO_ARY    = 13'd0;
 assign CE_PIXEL     = 1'b0;
+`endif
 assign HDMI_FREEZE    = 1'b0;
 assign HDMI_BLACKOUT  = 1'b0;
 assign HDMI_BOB_DEINT = 1'b0;
@@ -206,16 +226,41 @@ assign BUTTONS   = 2'b00;
 ////////////////////////////////////////////////////////////////////////////
 
 wire clk_sys;
+wire clk_video;
 wire pll_locked;
 
 pll pll_inst (
 	.refclk   (CLK_50M),
 	.rst      (1'b0),
 	.outclk_0 (clk_sys),
+	.outclk_1 (clk_video),
 	.locked   (pll_locked)
 );
 
-assign CLK_VIDEO = clk_sys;
+assign CLK_VIDEO = clk_video;
+
+`ifdef MENU_CORE_COMPOSITOR
+////////////////////////////////////////////////////////////////////////////
+// Compositor scanout (Phase 1 — test pattern).
+//
+// Drives VGA_R/G/B/HS/VS/DE at the 1080p60 video clock instead of the
+// framework's MISTER_FB scanout. Phase 1 outputs a fixed colour-bar
+// pattern with a 1-pixel white border so we can confirm timing,
+// clocking, and HDMI sink negotiation. Subsequent phases swap the
+// pattern source for a layer-table walk that reads LAYER_TABLE_OFFSET.
+////////////////////////////////////////////////////////////////////////////
+
+compositor u_compositor (
+	.clk    (clk_video),
+	.rst_n  (pll_locked),
+	.vga_r  (VGA_R),
+	.vga_g  (VGA_G),
+	.vga_b  (VGA_B),
+	.vga_hs (VGA_HS),
+	.vga_vs (VGA_VS),
+	.vga_de (VGA_DE)
+);
+`endif
 
 ////////////////////////////////////////////////////////////////////////////
 // HPS I/O.
@@ -572,6 +617,18 @@ wire _unused_kick = reg_ring_kick;
 ////////////////////////////////////////////////////////////////////////////
 
 `ifdef MISTER_FB
+`ifdef MENU_CORE_COMPOSITOR
+// Compositor mode: MISTER_FB is disabled so VGA_* drives HDMI directly.
+// Other FB_* outputs hold sentinel zero values so the framework
+// doesn't latch stale framebuffer geometry.
+assign FB_EN          = 1'b0;
+assign FB_FORMAT      = 5'b00000;
+assign FB_WIDTH       = 12'd0;
+assign FB_HEIGHT      = 12'd0;
+assign FB_BASE        = 32'd0;
+assign FB_STRIDE      = 14'd0;
+assign FB_FORCE_BLANK = 1'b1;
+`else
 assign FB_EN          = 1'b1;
 assign FB_FORMAT      = 5'b10110;        // BGR, 32bpp
 assign FB_WIDTH       = reg_fb_width;
@@ -579,6 +636,7 @@ assign FB_HEIGHT      = reg_fb_height;
 assign FB_BASE        = scanout_fb_base;
 assign FB_STRIDE      = reg_fb_stride;
 assign FB_FORCE_BLANK = 1'b0;
+`endif
 `endif
 
 ////////////////////////////////////////////////////////////////////////////

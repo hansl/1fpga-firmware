@@ -4,3 +4,4 @@ set_global_assignment -name QIP_FILE rtl/regs.qip
 set_global_assignment -name QIP_FILE rtl/ring/ring.qip
 set_global_assignment -name QIP_FILE rtl/blit/blit.qip
 set_global_assignment -name QIP_FILE rtl/fb/fb.qip
+set_global_assignment -name QIP_FILE rtl/compositor/compositor.qip
