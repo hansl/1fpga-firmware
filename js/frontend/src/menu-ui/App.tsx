@@ -77,10 +77,18 @@ export function App() {
   }, []);
 
   // The swatch's animated background. Index walks ACCENT_COLORS as
-  // count changes; useSpring interpolates the colour smoothly.
+  // count changes; useSpring interpolates the colour smoothly. Slow
+  // tension/friction so the tween spans roughly 700ms — at our ~17fps
+  // paint rate that's ~12 frames, which reads as a smooth fade rather
+  // than a single discrete jump.
   const swatchSpring = useSpring({
-    backgroundColor: ACCENT_COLORS[((count % ACCENT_COLORS.length) + ACCENT_COLORS.length) % ACCENT_COLORS.length],
-    config: { tension: 180, friction: 24 },
+    from: { backgroundColor: ACCENT_COLORS[0] },
+    backgroundColor:
+      ACCENT_COLORS[
+        ((count % ACCENT_COLORS.length) + ACCENT_COLORS.length) %
+          ACCENT_COLORS.length
+      ],
+    config: { tension: 80, friction: 30 },
   });
 
   useIntent(

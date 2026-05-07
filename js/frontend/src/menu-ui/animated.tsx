@@ -18,7 +18,7 @@
  */
 
 import { createHost } from '@react-spring/animated';
-import { Globals } from '@react-spring/shared';
+import { Globals, colors, createStringInterpolator } from '@react-spring/shared';
 import * as gui from '1fpga:gui';
 
 // react-spring resolves to a numeric handle for animation frames; our
@@ -35,6 +35,12 @@ import * as gui from '1fpga:gui';
 Globals.assign({
   requestAnimationFrame: gui.requestAnimationFrame,
   now: () => Date.now(),
+  // String/color interpolation. @react-spring/web normally wires this
+  // up; we pull from @react-spring/shared directly. Without it, spring
+  // values that are strings (e.g. '#ff5060') don't tween — they snap
+  // to the end value on the first tick.
+  createStringInterpolator,
+  colors,
 });
 
 const host = createHost(['div', 'img'], {
