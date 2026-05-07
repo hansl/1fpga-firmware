@@ -220,4 +220,17 @@ declare module '1fpga:gui' {
    * already fired or the handle was never registered.
    */
   export function cancelAnimationFrame(id: number): void;
+
+  /**
+   * Pre-build font atlases at one or more sizes covering every
+   * character in `chars`. Queue from app init; the runtime drains
+   * the requests once between bundle eval and the first frame, so
+   * subsequent text renders never trigger a synchronous atlas
+   * rebuild. `sizes` may be a single number or an array.
+   */
+  export function warmupGlyphs(
+    family: string,
+    sizes: number | number[],
+    chars: string,
+  ): void;
 }

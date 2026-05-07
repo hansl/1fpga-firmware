@@ -265,6 +265,7 @@ fn dump_tree(tree: &Tree, id: NodeId, depth: usize) {
 mod boa;
 pub mod fps;
 pub mod raf;
+pub mod warmup;
 
 /// Configuration for [`run`].
 #[derive(Debug, Default, Clone)]
@@ -351,10 +352,12 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     let input_state = InputState::new();
     let fps_counter = fps::FpsCounter::new();
     let raf_state = raf::RafState::new();
+    let warmup_queue = warmup::WarmupQueue::new();
     context.insert_data(ui_state.clone());
     context.insert_data(input_state.clone());
     context.insert_data(fps_counter.clone());
     context.insert_data(raf_state.clone());
+    context.insert_data(warmup_queue.clone());
 
     let module = {
         let source = Source::from_bytes(&bundle);
@@ -404,6 +407,29 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     let mut frame_idx: u32 = 0;
     let mut fonts = FontRegistry::new();
     let mut text_cache = TextCache::new();
+
+    // Drain any `gui.warmupGlyphs` requests the bundle's main()
+    // queued. Done here, before the frame loop, so the first
+    // user-visible frame already has populated atlases — no atlas
+    // rebuilds during navigation. Failures are logged but
+    // non-fatal; the missing chars will rebuild lazily later.
+    {
+        let requests = warmup_queue.drain();
+        if !requests.is_empty() {
+            info!("warming up {} font atlas request(s)", requests.len());
+        }
+        for req in requests {
+            match fonts.ensure(&mut device, &req.family, req.px_size, &req.chars) {
+                Ok(_) => {}
+                Err(e) => tracing::warn!(
+                    "atlas warmup failed for {}@{}: {}",
+                    req.family,
+                    req.px_size,
+                    e
+                ),
+            }
+        }
+    }
     let mut images = ImageRegistry::new();
     let mut pump = Pump::open_all();
     let router = IntentRouter::new();

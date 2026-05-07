@@ -22,6 +22,7 @@ use crate::input::events::InputSource;
 use crate::input::state::{InputState, ListenerId, ListenerKind, ListenerScope};
 use crate::runtime::fps::FpsCounter;
 use crate::runtime::raf::RafState;
+use crate::runtime::warmup::WarmupQueue;
 use crate::style::{
     Style, parse_align_items, parse_color, parse_display, parse_flex_direction, parse_flex_wrap,
     parse_justify_content, parse_overflow, parse_position,
@@ -141,6 +142,10 @@ pub fn register(loader: &MapModuleLoader, context: &mut Context) -> JsResult<()>
         (
             js_string!("cancelAnimationFrame"),
             NativeFunction::from_fn_ptr(cancel_animation_frame),
+        ),
+        (
+            js_string!("warmupGlyphs"),
+            NativeFunction::from_fn_ptr(warmup_glyphs),
         ),
         (
             js_string!("run"),
@@ -466,6 +471,58 @@ fn cancel_animation_frame(
     let id = args.get_or_undefined(0).to_u32(context)?;
     let state = raf_state(context)?;
     state.cancel(id);
+    Ok(JsValue::undefined())
+}
+
+/// `gui.warmupGlyphs(family, sizes, chars)` — queue a request to
+/// pre-build font atlases at one or more sizes covering every char
+/// in `chars`. The runtime drains the queue between bundle eval and
+/// the first frame so user-visible text never triggers a synchronous
+/// atlas rebuild. `sizes` may be a single number or an array.
+fn warmup_glyphs(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let family = args
+        .get_or_undefined(0)
+        .to_string(context)?
+        .to_std_string_escaped();
+    let sizes_arg = args.get_or_undefined(1);
+    let chars_arg = args.get_or_undefined(2).to_string(context)?;
+    let chars: std::collections::HashSet<char> =
+        chars_arg.to_std_string_escaped().chars().collect();
+    let queue = context
+        .get_data::<WarmupQueue>()
+        .cloned()
+        .ok_or_else(|| {
+            JsNativeError::error()
+                .with_message("WarmupQueue missing from context")
+        })?;
+
+    // Accept either a single number or an array of numbers.
+    let mut push_size = |raw: &JsValue, ctx: &mut Context| -> JsResult<()> {
+        let n = raw.to_u32(ctx)?;
+        // Reject silly values; u16 is the atlas's px-size type.
+        if n == 0 || n > u16::MAX as u32 {
+            return Ok(());
+        }
+        queue.push(family.clone(), n as u16, chars.clone());
+        Ok(())
+    };
+    if let Some(arr) = sizes_arg.as_object()
+        && arr.is_array()
+    {
+        let len = arr
+            .get(js_string!("length"), context)?
+            .to_u32(context)?;
+        for i in 0..len {
+            let v = arr.get(i, context)?;
+            push_size(&v, context)?;
+        }
+    } else {
+        push_size(sizes_arg, context)?;
+    }
     Ok(JsValue::undefined())
 }
 
