@@ -126,6 +126,14 @@ pub struct Device {
     // that only need solid-color drawing.
     tex_pool_map: Option<DevMemMap>,
     tex_table_map: Option<DevMemMap>,
+    /// Mapping covering both layer tables (A and B). The compositor
+    /// scanout (Phase 2+) reads whichever is active per the
+    /// `LAYER_ACTIVE` register; in Phase 0 this just provides write
+    /// targets for the host.
+    layer_table_map: Option<DevMemMap>,
+    /// Which layer table the host is currently writing to (0 = A,
+    /// 1 = B). Toggled by [`Self::commit_layers`].
+    layer_back_idx: u8,
     tex_alloc: BumpAllocator,
     next_tex_id: u16,
     tex_table_capacity: u16,
@@ -191,6 +199,8 @@ impl Device {
             started: false,
             tex_pool_map: None,
             tex_table_map: None,
+            layer_table_map: None,
+            layer_back_idx: 1, // active starts at A (0); host writes B first.
             tex_alloc: BumpAllocator::new(tex_pool_phys, mem::TEX_POOL_SIZE as u32),
             next_tex_id: 0,
             tex_table_capacity: mem::DEFAULT_TEX_TABLE_COUNT as u16,
@@ -364,6 +374,110 @@ impl Device {
             self.tex_table_capacity as u32,
         );
         Ok(())
+    }
+
+    fn init_layer_storage(&mut self) -> Result<(), DeviceError> {
+        if self.layer_table_map.is_some() {
+            return Ok(());
+        }
+        let phys = self.cfg.base_phys_addr + mem::LAYER_TABLE_OFFSET as u32;
+        let map = DevMemMap::create(phys, mem::LAYER_REGION_SIZE)?;
+        self.layer_table_map = Some(map);
+        // Zero-initialise both tables so any future scanout sees only
+        // disabled (flags == 0) descriptors until the host populates
+        // real layers.
+        let zero = [0u8; mem::LAYER_DESCRIPTOR_SIZE];
+        let map = self
+            .layer_table_map
+            .as_mut()
+            .expect("just inserted");
+        // SAFETY: map covers `LAYER_REGION_SIZE` bytes; we zero each
+        // 32-byte descriptor in both tables in turn.
+        unsafe {
+            let base = map.as_mut_ptr();
+            for i in 0..(2 * mem::LAYERS_PER_TABLE as usize) {
+                let dst = base.add(i * mem::LAYER_DESCRIPTOR_SIZE);
+                volatile_copy_to_devmem(dst, &zero);
+            }
+        }
+        Ok(())
+    }
+
+    /// Write `desc` into the **back** layer table at `slot`. Has no
+    /// visible effect until [`Self::commit_layers`] makes the back
+    /// table active. Returns `Err` if `slot >= LAYERS_PER_TABLE`.
+    pub fn set_layer(
+        &mut self,
+        slot: u32,
+        desc: &protocol::LayerDescriptor,
+    ) -> Result<(), DeviceError> {
+        if slot >= mem::LAYERS_PER_TABLE {
+            return Err(DeviceError::LayerSlotOutOfRange {
+                slot,
+                capacity: mem::LAYERS_PER_TABLE,
+            });
+        }
+        if self.layer_table_map.is_none() {
+            self.init_layer_storage()?;
+        }
+        let back_offset = if self.layer_back_idx == 0 {
+            0
+        } else {
+            mem::LAYER_TABLE_SIZE
+        };
+        let entry_offset =
+            back_offset + (slot as usize) * mem::LAYER_DESCRIPTOR_SIZE;
+        // SAFETY: layer_table is repr(C), 32 bytes, no padding holes
+        // in the public layout (asserted at compile time).
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                (desc as *const protocol::LayerDescriptor) as *const u8,
+                mem::LAYER_DESCRIPTOR_SIZE,
+            )
+        };
+        let map = self
+            .layer_table_map
+            .as_mut()
+            .expect("init_layer_storage just ran");
+        // SAFETY: layer_table_map covers LAYER_REGION_SIZE bytes;
+        // entry_offset+32 stays within (slot < LAYERS_PER_TABLE,
+        // table_size = LAYERS_PER_TABLE * 32, two tables fit inside
+        // LAYER_REGION_SIZE).
+        unsafe {
+            let dst = map.as_mut_ptr().add(entry_offset);
+            volatile_copy_to_devmem(dst, bytes);
+        }
+        Ok(())
+    }
+
+    /// Disable the layer at `slot` in the back table — equivalent to
+    /// `set_layer` with a zeroed descriptor. The compositor will skip
+    /// the slot once the change is committed.
+    pub fn clear_layer(&mut self, slot: u32) -> Result<(), DeviceError> {
+        let zero = protocol::LayerDescriptor::default();
+        self.set_layer(slot, &zero)
+    }
+
+    /// Promote the back layer table to active, atomically swapping
+    /// what the compositor reads. The next scanline observes the
+    /// just-committed layout.
+    ///
+    /// Phase 0 stub: writes to a register the FPGA compositor will
+    /// read (registers::LAYER_ACTIVE landing in Phase 1+). For now
+    /// this just toggles the host's back-buffer index so subsequent
+    /// `set_layer` calls land in the freshly-vacated table.
+    pub fn commit_layers(&mut self) {
+        // TODO(phase 1): write registers::LAYER_ACTIVE to flip the
+        // FPGA-visible active-table index.
+        self.layer_back_idx ^= 1;
+    }
+
+    /// Diagnostic: which layer table the host will write to next
+    /// (0 = A, 1 = B). The other one is the active (compositor-read)
+    /// table.
+    #[inline]
+    pub fn layer_back_idx(&self) -> u8 {
+        self.layer_back_idx
     }
 
     /// Reset the texture pool: drop all uploaded handles, return the

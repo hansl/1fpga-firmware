@@ -20,6 +20,13 @@ pub const FB1_OFFSET: usize = 0x0080_0000;
 pub const FB2_OFFSET: usize = 0x0100_0000;
 pub const RING_OFFSET: usize = 0x0180_0000;
 pub const TEX_TABLE_OFFSET: usize = 0x0190_0000;
+/// Layer descriptor table — the compositor scanout's source of truth.
+/// Two back-to-back tables of 8 KB each (256 layers × 32 B); the
+/// active table is selected via the `LAYER_ACTIVE` register, letting
+/// the host build a new frame's layout in the inactive table and
+/// swap atomically so scanout never observes a partial update.
+/// Sits in the gap between TEX_TABLE_OFFSET and TEX_POOL_OFFSET.
+pub const LAYER_TABLE_OFFSET: usize = 0x01B0_0000;
 pub const TEX_POOL_OFFSET: usize = 0x0200_0000;
 
 // --- Sizes of each sub-region ----------------------------------------
@@ -43,6 +50,27 @@ pub const DEFAULT_TEX_TABLE_COUNT: u32 = 65_535;
 
 /// Size of the texture data pool (224 MB).
 pub const TEX_POOL_SIZE: usize = 224 * 1024 * 1024;
+
+/// Number of layer descriptor slots per layer table. 256 is enough
+/// for a complex menu UI (background + cards + text + transition
+/// overlays + reserve) and fits comfortably in BRAM on the FPGA
+/// side once the compositor reads them.
+pub const LAYERS_PER_TABLE: u32 = 256;
+
+/// Bytes per layer descriptor (matches PROTOCOL.md §7.1).
+pub const LAYER_DESCRIPTOR_SIZE: usize = 32;
+
+/// Size of one layer table in bytes (256 × 32 = 8 KB).
+pub const LAYER_TABLE_SIZE: usize =
+    (LAYERS_PER_TABLE as usize) * LAYER_DESCRIPTOR_SIZE;
+
+/// Size of the layer-table region: two back-to-back tables for
+/// double-buffered atomic commit (16 KB total).
+pub const LAYER_REGION_SIZE: usize = 2 * LAYER_TABLE_SIZE;
+
+/// Offset of the second (back) layer table within the region.
+/// Tables A/B alternate as the active descriptor source.
+pub const LAYER_TABLE_B_OFFSET: usize = LAYER_TABLE_OFFSET + LAYER_TABLE_SIZE;
 
 /// Convenience: physical address of a sub-region given the carve-out
 /// base and offset.
@@ -86,6 +114,7 @@ mod tests {
             (FB2_OFFSET, FB_SLOT_SIZE),
             (RING_OFFSET, RING_SIZE),
             (TEX_TABLE_OFFSET, TEX_TABLE_SIZE),
+            (LAYER_TABLE_OFFSET, LAYER_REGION_SIZE),
             (TEX_POOL_OFFSET, TEX_POOL_SIZE),
         ];
         for (i, (a_start, a_size)) in regions.iter().enumerate() {
@@ -108,6 +137,20 @@ mod tests {
     #[test]
     fn tex_table_accommodates_default_count() {
         assert!(TEX_TABLE_SIZE >= (DEFAULT_TEX_TABLE_COUNT as usize) * 32);
+    }
+
+    #[test]
+    fn layer_table_dimensions() {
+        assert_eq!(
+            LAYER_TABLE_SIZE,
+            LAYERS_PER_TABLE as usize * LAYER_DESCRIPTOR_SIZE
+        );
+        // Both tables must fit in the 5 MB gap between TEX_TABLE end
+        // and TEX_POOL start.
+        let gap = TEX_POOL_OFFSET - (TEX_TABLE_OFFSET + TEX_TABLE_SIZE);
+        assert!(LAYER_REGION_SIZE <= gap);
+        // B table immediately follows A.
+        assert_eq!(LAYER_TABLE_B_OFFSET, LAYER_TABLE_OFFSET + LAYER_TABLE_SIZE);
     }
 
     #[test]

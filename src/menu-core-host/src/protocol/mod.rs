@@ -5,10 +5,12 @@
 
 pub mod commands;
 pub mod descriptors;
+pub mod layer;
 pub mod registers;
 
 pub use commands::{BlendMode, Command, EncodeError, Filter, Rect, Rgba};
 pub use descriptors::{TextureDescriptor, TextureFormat};
+pub use layer::{LAYER_TEX_SOLID, LayerBlend, LayerDescriptor};
 
 /// Magic value (high 16 bits of the `ID` register).
 ///

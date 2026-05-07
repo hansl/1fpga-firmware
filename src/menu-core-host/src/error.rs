@@ -69,6 +69,10 @@ pub enum DeviceError {
     #[error("texture descriptor table full ({capacity} entries)")]
     DescriptorTableFull { capacity: u32 },
 
+    /// Host tried to write a layer slot beyond the table's capacity.
+    #[error("layer slot {slot} is out of range (capacity {capacity})")]
+    LayerSlotOutOfRange { slot: u32, capacity: u32 },
+
     /// `VIDEO_INFO` reports zeros — HDMI mode hasn't latched. Usually
     /// means the user needs to boot with a valid `MiSTer.ini`
     /// `video_mode=` entry first.
