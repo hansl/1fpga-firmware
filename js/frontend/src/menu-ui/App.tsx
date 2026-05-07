@@ -1,8 +1,7 @@
-import { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useState } from 'react';
 import type { CSSProperties } from 'react';
 import * as gui from '1fpga:gui';
 
-import { animated, useSpring } from './animated';
 import { useIntent } from './hooks';
 
 // N9 demo — a horizontal "core picker": a row of cards with a focus
@@ -100,54 +99,36 @@ const fpsStyle: CSSProperties = {
   color: '#60ff60',
 };
 
-// memo() so a focus change only re-renders the two cards whose
-// `focused` flipped — the other three keep their existing useSpring
-// instance and skip both render and reconciler work for the frame.
-// Without this, every parent state change re-renders all 5 cards;
-// at 30+ navigations the React commit cost piled up linearly inside
-// dispatch_input and pushed the frame loop into the tens-of-ms range.
+// memo() — focus change only re-renders the two cards whose
+// `focused` flipped. Earlier revision used react-spring here; that
+// added ~30-45ms of React commit cost per nav (hooks + observer
+// setup) which dominated the frame budget when the user mashed
+// arrows. Static style toggle now: visual transition is barely
+// perceptible at our ~17fps paint rate anyway, so removing the
+// tween costs nothing visible and recovers the frame.
 const Card = memo(function Card({
   item,
   focused,
-  pulse,
+  flashing,
 }: {
   item: Item;
   focused: boolean;
-  pulse: number; // bumps when this card is "confirmed" — drives the flash spring.
+  flashing: boolean;
 }) {
-  // Background tween between the dim idle colour and the item's
-  // accent colour as focus enters/leaves. `pulse` momentarily blends
-  // toward white when the user confirms the focused card, then the
-  // spring relaxes back to the focused/unfocused base.
-  const styles = useSpring({
-    backgroundColor: pulse > 0 ? '#ffffff' : focused ? item.accent : '#1a1a2a',
-    config: pulse > 0
-      ? { tension: 320, friction: 18 } // snappy flash to white
-      : { tension: 220, friction: 26 }, // smoother return / focus shift
-  });
+  const bg = flashing ? '#ffffff' : focused ? item.accent : '#1a1a2a';
   return (
-    <animated.div style={{ ...cardBase, ...styles }}>
+    <div style={{ ...cardBase, backgroundColor: bg }}>
       <div style={cardLabelStyle}>{item.name}</div>
-    </animated.div>
+    </div>
   );
 });
 
 export function App() {
   const [focus, setFocus] = useState(0);
-  // `pulses[i]` increments each time card i is confirmed; the Card
-  // component reads this to fire its flash spring.
-  const [pulses, setPulses] = useState<number[]>(() => ITEMS.map(() => 0));
+  // -1 = nothing flashing. Set to focused index on confirm,
+  // back to -1 after one paint via setTimeout(0).
+  const [flashIdx, setFlashIdx] = useState(-1);
   const [fps, setFps] = useState(0);
-
-  // Mirror `focus` into a ref so the `confirm` callback below can
-  // read the latest value WITHOUT having `focus` as a useCallback
-  // dependency. With the dep, every focus change rebuilt the
-  // confirm closure, which made useIntent unsubscribe/resubscribe
-  // — listener IDs grew unbounded (3, 4, 5, …) and each resubscribe
-  // churned Boa GC roots, slowly inflating the per-frame budget
-  // until input dispatch ran tens of ms.
-  const focusRef = useRef(focus);
-  focusRef.current = focus;
 
   useEffect(() => {
     const id = setInterval(() => setFps(gui.fps()), 250);
@@ -174,22 +155,15 @@ export function App() {
     'confirm',
     useCallback((e) => {
       if (e.kind !== 'pressed') return;
-      const f = focusRef.current;
-      setPulses((ps) => {
-        const next = ps.slice();
-        next[f] = (next[f] + 1) % 1_000_000;
-        return next;
+      // Flash the currently-focused card white for ~120ms, then
+      // restore. setFocus uses functional update so we read the
+      // latest value without depending on it (avoids useCallback
+      // dep churn that resubscribes the listener every focus change).
+      setFocus((f) => {
+        setFlashIdx(f);
+        setTimeout(() => setFlashIdx(-1), 120);
+        return f;
       });
-      // Auto-relax the pulse — the spring's first tick will see the
-      // bumped value (pulse > 0), the next tick we set it back to 0
-      // and the spring tweens back to the resting colour.
-      setTimeout(() => {
-        setPulses((ps) => {
-          const next = ps.slice();
-          next[f] = 0;
-          return next;
-        });
-      }, 80);
     }, []),
   );
 
@@ -206,7 +180,7 @@ export function App() {
             key={item.name}
             item={item}
             focused={i === focus}
-            pulse={pulses[i]}
+            flashing={i === flashIdx}
           />
         ))}
       </div>
