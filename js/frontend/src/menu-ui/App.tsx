@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import * as gui from '1fpga:gui';
 
@@ -100,7 +100,13 @@ const fpsStyle: CSSProperties = {
   color: '#60ff60',
 };
 
-function Card({
+// memo() so a focus change only re-renders the two cards whose
+// `focused` flipped — the other three keep their existing useSpring
+// instance and skip both render and reconciler work for the frame.
+// Without this, every parent state change re-renders all 5 cards;
+// at 30+ navigations the React commit cost piled up linearly inside
+// dispatch_input and pushed the frame loop into the tens-of-ms range.
+const Card = memo(function Card({
   item,
   focused,
   pulse,
@@ -124,7 +130,7 @@ function Card({
       <div style={cardLabelStyle}>{item.name}</div>
     </animated.div>
   );
-}
+});
 
 export function App() {
   const [focus, setFocus] = useState(0);
@@ -132,6 +138,16 @@ export function App() {
   // component reads this to fire its flash spring.
   const [pulses, setPulses] = useState<number[]>(() => ITEMS.map(() => 0));
   const [fps, setFps] = useState(0);
+
+  // Mirror `focus` into a ref so the `confirm` callback below can
+  // read the latest value WITHOUT having `focus` as a useCallback
+  // dependency. With the dep, every focus change rebuilt the
+  // confirm closure, which made useIntent unsubscribe/resubscribe
+  // — listener IDs grew unbounded (3, 4, 5, …) and each resubscribe
+  // churned Boa GC roots, slowly inflating the per-frame budget
+  // until input dispatch ran tens of ms.
+  const focusRef = useRef(focus);
+  focusRef.current = focus;
 
   useEffect(() => {
     const id = setInterval(() => setFps(gui.fps()), 250);
@@ -158,9 +174,10 @@ export function App() {
     'confirm',
     useCallback((e) => {
       if (e.kind !== 'pressed') return;
+      const f = focusRef.current;
       setPulses((ps) => {
         const next = ps.slice();
-        next[focus] = (next[focus] + 1) % 1_000_000;
+        next[f] = (next[f] + 1) % 1_000_000;
         return next;
       });
       // Auto-relax the pulse — the spring's first tick will see the
@@ -169,11 +186,11 @@ export function App() {
       setTimeout(() => {
         setPulses((ps) => {
           const next = ps.slice();
-          next[focus] = 0;
+          next[f] = 0;
           return next;
         });
       }, 80);
-    }, [focus]),
+    }, []),
   );
 
   return (
