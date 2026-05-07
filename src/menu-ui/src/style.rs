@@ -177,10 +177,26 @@ impl Style {
 pub type FontFamily = String;
 
 /// Parse a CSS-style color string. Supports `#rgb`, `#rrggbb`,
-/// `#rrggbbaa`. Returns `None` if `s` is not recognised.
+/// `#rrggbbaa`, plus the `rgb(R, G, B)` / `rgba(R, G, B, A)` forms
+/// (the latter is what react-spring's string interpolator emits when
+/// tweening between hex/named colours). Returns `None` if `s` is not
+/// recognised.
 pub fn parse_color(s: &str) -> Option<Rgba> {
-    let s = s.strip_prefix('#')?;
-    let bytes = s.as_bytes();
+    let s = s.trim();
+    if let Some(hex) = s.strip_prefix('#') {
+        return parse_hex_color(hex);
+    }
+    if let Some(args) = s.strip_prefix("rgba(").and_then(|x| x.strip_suffix(')')) {
+        return parse_rgb_args(args, /* with_alpha */ true);
+    }
+    if let Some(args) = s.strip_prefix("rgb(").and_then(|x| x.strip_suffix(')')) {
+        return parse_rgb_args(args, /* with_alpha */ false);
+    }
+    None
+}
+
+fn parse_hex_color(hex: &str) -> Option<Rgba> {
+    let bytes = hex.as_bytes();
     let to_hex = |c: u8| -> Option<u8> {
         match c {
             b'0'..=b'9' => Some(c - b'0'),
@@ -211,6 +227,31 @@ pub fn parse_color(s: &str) -> Option<Rgba> {
         }
         _ => None,
     }
+}
+
+/// Parse a comma-separated `R, G, B[, A]` argument list. RGB values
+/// are 0-255 integers (CSS allows percentages too; we don't yet).
+/// Alpha is 0..1 floating point per CSS — we round*255 to map to our
+/// 8-bit channel.
+fn parse_rgb_args(args: &str, with_alpha: bool) -> Option<Rgba> {
+    let mut parts = args.split(',').map(|p| p.trim());
+    let r: u32 = parts.next()?.parse().ok()?;
+    let g: u32 = parts.next()?.parse().ok()?;
+    let b: u32 = parts.next()?.parse().ok()?;
+    let a: u8 = if with_alpha {
+        let a_str = parts.next()?;
+        let af: f32 = a_str.parse().ok()?;
+        (af.clamp(0.0, 1.0) * 255.0).round() as u8
+    } else {
+        0xFF
+    };
+    if parts.next().is_some() {
+        return None; // extra args
+    }
+    if r > 255 || g > 255 || b > 255 {
+        return None;
+    }
+    Some(Rgba::new(r as u8, g as u8, b as u8, a))
 }
 
 /// Parse a `display` keyword.
@@ -310,6 +351,47 @@ mod tests {
         assert_eq!(parse_color("#xyz"), None);
         assert_eq!(parse_color(""), None);
         assert_eq!(parse_color("#1234"), None);
+    }
+
+    #[test]
+    fn parse_rgb_function() {
+        assert_eq!(
+            parse_color("rgb(18, 52, 86)"),
+            Some(Rgba::new(0x12, 0x34, 0x56, 0xFF))
+        );
+        // Whitespace tolerance — spring's interpolator emits with one
+        // space after each comma, but we also strip leading/trailing.
+        assert_eq!(
+            parse_color("  rgb(255,0,0)  "),
+            Some(Rgba::new(0xFF, 0, 0, 0xFF))
+        );
+    }
+
+    #[test]
+    fn parse_rgba_function() {
+        // react-spring's stringInterpolation outputs this exact shape:
+        // "rgba(R, G, B, A)" with float alpha.
+        assert_eq!(
+            parse_color("rgba(255, 80, 96, 1)"),
+            Some(Rgba::new(0xFF, 0x50, 0x60, 0xFF))
+        );
+        assert_eq!(
+            parse_color("rgba(0, 0, 0, 0.5)"),
+            Some(Rgba::new(0, 0, 0, 0x80)) // 0.5 * 255 ≈ 128
+        );
+        assert_eq!(
+            parse_color("rgba(0, 0, 0, 0)"),
+            Some(Rgba::new(0, 0, 0, 0))
+        );
+    }
+
+    #[test]
+    fn parse_rgb_rejects_bad_input() {
+        assert_eq!(parse_color("rgb(256, 0, 0)"), None); // out of range
+        assert_eq!(parse_color("rgb(0, 0)"), None); // too few args
+        assert_eq!(parse_color("rgb(0, 0, 0, 0)"), None); // too many for rgb
+        assert_eq!(parse_color("rgba(0, 0, 0)"), None); // too few for rgba
+        assert_eq!(parse_color("rgb(a, b, c)"), None); // not numbers
     }
 
     #[test]
