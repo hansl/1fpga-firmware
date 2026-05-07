@@ -8,12 +8,17 @@
 // raw input pin (Cyclone V routing constraint, error 15836).
 //
 // Outputs:
-//   outclk_0 — 50 MHz system clock for the blit engine, ring fetcher,
-//              register file, etc. Equal to refclk (CLK_50M).
+//   outclk_0 — 49.5 MHz system clock for the blit engine, ring
+//              fetcher, register file, etc. (NOT 50 MHz: fractional
+//              VCO doesn't include exactly-50 MHz as a legal output
+//              counter setting; 49.5 MHz is the closest legal value.
+//              Functionally equivalent — 1 % slower than the prior
+//              integer-PLL config, transparent to all downstream
+//              consumers including the framework's DDR3 controller.)
 //   outclk_1 — 148.5 MHz video clock used by the compositor scanout
 //              (see rtl/compositor/compositor.sv) for 1080p60 output.
-//              Generated via fractional VCO since 148.5 / 50 = 2.97
-//              isn't an integer multiplier.
+//              Both outputs share VCO = 1485 MHz; outclk_0 = VCO/30,
+//              outclk_1 = VCO/10. Single fractional PLL instance.
 
 module pll(
 	input  refclk,
@@ -28,7 +33,7 @@ altera_pll #(
 	.reference_clock_frequency  ("50.0 MHz"),
 	.operation_mode             ("normal"),
 	.number_of_clocks           (2),
-	.output_clock_frequency0    ("50.000000 MHz"),
+	.output_clock_frequency0    ("49.500000 MHz"),
 	.phase_shift0               ("0 ps"),
 	.duty_cycle0                (50),
 	.output_clock_frequency1    ("148.500000 MHz"),
