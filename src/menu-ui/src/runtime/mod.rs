@@ -264,6 +264,7 @@ fn dump_tree(tree: &Tree, id: NodeId, depth: usize) {
 
 mod boa;
 pub mod fps;
+pub mod raf;
 
 /// Configuration for [`run`].
 #[derive(Debug, Default, Clone)]
@@ -349,9 +350,11 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     let ui_state = UiState::default();
     let input_state = InputState::new();
     let fps_counter = fps::FpsCounter::new();
+    let raf_state = raf::RafState::new();
     context.insert_data(ui_state.clone());
     context.insert_data(input_state.clone());
     context.insert_data(fps_counter.clone());
+    context.insert_data(raf_state.clone());
 
     let module = {
         let source = Source::from_bytes(&bundle);
@@ -405,6 +408,11 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     let mut pump = Pump::open_all();
     let router = IntentRouter::new();
     let mut event_buf: Vec<RawInputEvent> = Vec::new();
+    // Reference epoch for `requestAnimationFrame` timestamps. The
+    // first callback sees a small positive number (ms since just
+    // before the loop started) — matches the browser DOMHighResTimeStamp
+    // shape close enough for our use cases.
+    let raf_epoch = std::time::Instant::now();
     // Per-stage timing accumulators. Every TIMING_LOG_PERIOD frames
     // we log the average per-stage cost. Tells us where the frame
     // budget actually goes (so we can tell tick_jobs from layout
@@ -449,6 +457,27 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         //     setTimeout (directly or via React's setState scheduler).
         if let Err(e) = boa::tick_jobs(&executor, &mut context) {
             tracing::warn!("tick_jobs error: {e}");
+        }
+
+        // 0d. Drain the requestAnimationFrame queue. Each callback
+        //     receives ms-since-runtime-start, matching the browser's
+        //     DOMHighResTimeStamp contract. Re-registrations from
+        //     inside callbacks land in the next frame's queue (drain
+        //     snapshots before iterating).
+        let raf_callbacks = raf_state.drain();
+        if !raf_callbacks.is_empty() {
+            let now_ms = raf_epoch.elapsed().as_secs_f64() * 1000.0;
+            let arg = JsValue::from(now_ms);
+            for cb in raf_callbacks {
+                if let Err(e) = cb.call(&JsValue::undefined(), &[arg.clone()], &mut context) {
+                    tracing::warn!("requestAnimationFrame callback threw: {e}");
+                }
+            }
+            // RAF callbacks routinely call setState / updateStyle and
+            // may have queued more work; pump it before paint.
+            if let Err(e) = boa::tick_jobs(&executor, &mut context) {
+                tracing::warn!("tick_jobs error: {e}");
+            }
         }
 
         let t2 = Instant::now();

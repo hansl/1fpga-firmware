@@ -21,6 +21,7 @@ use boa_macros::{Finalize, JsData, Trace};
 use crate::input::events::InputSource;
 use crate::input::state::{InputState, ListenerId, ListenerKind, ListenerScope};
 use crate::runtime::fps::FpsCounter;
+use crate::runtime::raf::RafState;
 use crate::style::{
     Style, parse_align_items, parse_color, parse_display, parse_flex_direction, parse_flex_wrap,
     parse_justify_content, parse_overflow, parse_position,
@@ -128,6 +129,14 @@ pub fn register(loader: &MapModuleLoader, context: &mut Context) -> JsResult<()>
         (
             js_string!("fps"),
             NativeFunction::from_fn_ptr(fps_host),
+        ),
+        (
+            js_string!("requestAnimationFrame"),
+            NativeFunction::from_fn_ptr(request_animation_frame),
+        ),
+        (
+            js_string!("cancelAnimationFrame"),
+            NativeFunction::from_fn_ptr(cancel_animation_frame),
         ),
         (
             js_string!("run"),
@@ -392,6 +401,50 @@ fn fps_host(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResu
         .map(|c| c.current())
         .unwrap_or(0.0);
     Ok(JsValue::from(fps))
+}
+
+fn raf_state(context: &mut Context) -> JsResult<RafState> {
+    context
+        .get_data::<RafState>()
+        .cloned()
+        .ok_or_else(|| {
+            JsNativeError::error()
+                .with_message("RafState missing from context")
+                .into()
+        })
+}
+
+fn request_animation_frame(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let cb_obj = args
+        .get_or_undefined(0)
+        .as_object()
+        .ok_or_else(|| {
+            JsNativeError::typ()
+                .with_message("requestAnimationFrame: argument must be a function")
+        })?
+        .clone();
+    let func = JsFunction::from_object(cb_obj).ok_or_else(|| {
+        JsNativeError::typ()
+            .with_message("requestAnimationFrame: callback is not a function")
+    })?;
+    let state = raf_state(context)?;
+    let id = state.request(func);
+    Ok(JsValue::from(id))
+}
+
+fn cancel_animation_frame(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = args.get_or_undefined(0).to_u32(context)?;
+    let state = raf_state(context)?;
+    state.cancel(id);
+    Ok(JsValue::undefined())
 }
 
 /// Parse the optional `opts` object passed to `add*Listener`. Default

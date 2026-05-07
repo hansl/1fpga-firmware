@@ -192,4 +192,23 @@ declare module '1fpga:gui' {
    * Returns 0 until the first window completes (first frame).
    */
   export function fps(): number;
+
+  /**
+   * Schedule `cb` for invocation on the next frame. The callback fires
+   * once and receives the current high-resolution timestamp (ms since
+   * runtime start), matching the browser `DOMHighResTimeStamp` shape.
+   *
+   * To keep animating, the callback re-schedules itself by calling
+   * `requestAnimationFrame` again from inside its body. Cancellations
+   * land in the same queue with [`cancelAnimationFrame`].
+   *
+   * Returns a non-zero handle suitable for `cancelAnimationFrame`.
+   */
+  export function requestAnimationFrame(cb: (now: number) => void): number;
+
+  /**
+   * Cancel a previously-scheduled callback. No-op if the callback has
+   * already fired or the handle was never registered.
+   */
+  export function cancelAnimationFrame(id: number): void;
 }

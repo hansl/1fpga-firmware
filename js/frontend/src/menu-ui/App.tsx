@@ -1,14 +1,15 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import * as gui from '1fpga:gui';
 
-import { useIntent } from './hooks';
+import { useAnimationFrame, useIntent } from './hooks';
 
-// N6 demo: input handling.
-//   Enter / Space  → confirm (counter ++)
-//   Escape / Back  → back (counter --)
-//   Arrow keys     → navigate (last direction shown)
-// Plus the existing image + text from N4/N5.
+// N7 demo: requestAnimationFrame.
+//   - The "pulse" box at top-right cycles its background color via
+//     gui.setStyle on every frame. The hook uses RAF directly and
+//     never touches React state, so per-frame updates don't trigger
+//     reconciler work.
+//   Existing N6 input bindings continue to work unchanged.
 
 const root: CSSProperties = {
   display: 'flex',
@@ -50,6 +51,29 @@ const fpsStyle: CSSProperties = {
   color: '#60ff60',
 };
 
+const pulseStyle: CSSProperties = {
+  position: 'absolute',
+  top: 12,
+  right: 12,
+  width: 80,
+  height: 32,
+  backgroundColor: '#202040',
+};
+
+// HSL→RGB without bringing in a library. h is 0..1, s/l are 0..1.
+function hslHex(h: number, s: number, l: number): string {
+  const a = s * Math.min(l, 1 - l);
+  const f = (n: number): number => {
+    const k = (n + h * 12) % 12;
+    return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
+  };
+  const toHex = (x: number): string =>
+    Math.round(Math.max(0, Math.min(1, x)) * 255)
+      .toString(16)
+      .padStart(2, '0');
+  return `#${toHex(f(0))}${toHex(f(8))}${toHex(f(4))}`;
+}
+
 export function App() {
   const [count, setCount] = useState(0);
   const [direction, setDirection] = useState<string>('-');
@@ -59,6 +83,16 @@ export function App() {
     const id = setInterval(() => setFps(gui.fps()), 250);
     return () => clearInterval(id);
   }, []);
+
+  // RAF-driven pulse: cycle the pulse box's background through the
+  // hue wheel without going through React. Period = 4 seconds.
+  const pulseRef = useRef<gui.NodeId | null>(null);
+  useAnimationFrame((now) => {
+    const id = pulseRef.current;
+    if (id == null) return;
+    const hue = ((now / 4000) % 1 + 1) % 1;
+    gui.setStyle(id, { backgroundColor: hslHex(hue, 0.7, 0.5) });
+  });
 
   useIntent(
     'confirm',
@@ -108,7 +142,15 @@ export function App() {
   return (
     <div style={root}>
       <div style={fpsStyle}>{`${fps.toFixed(1)} fps`}</div>
-      <div style={title}>menu-ui · N6</div>
+      <div
+        style={pulseStyle}
+        ref={(node) => {
+          // Our reconciler returns the host NodeId (a number), not a
+          // real HTMLDivElement; cast through unknown to keep TS happy.
+          pulseRef.current = node as unknown as gui.NodeId | null;
+        }}
+      />
+      <div style={title}>menu-ui · N7</div>
       <div style={subtitle}>input router · live</div>
       <div style={stats}>{statsLine}</div>
       <div style={hint}>{hintLine}</div>
