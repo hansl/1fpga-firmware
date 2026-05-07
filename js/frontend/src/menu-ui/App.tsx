@@ -5,70 +5,132 @@ import * as gui from '1fpga:gui';
 import { animated, useSpring } from './animated';
 import { useIntent } from './hooks';
 
-// N8 demo: react-spring shim.
-//   - The "swatch" box at top-right is an `animated.div`; pressing
-//     Enter/Space cycles its background color via useSpring. The
-//     spring's frame loop runs on our gui.requestAnimationFrame; per-
-//     tick value application skips React entirely and lands in
-//     gui.setStyle (see animated.tsx).
-//   Existing N6 input bindings continue to work unchanged.
+// N9 demo — a horizontal "core picker": a row of cards with a focus
+// highlight that animates between cards via react-spring as the user
+// presses ← / →. Pressing Enter pulses the focused card. Bottom line
+// echoes the focused card's name. Top-left corner shows the live
+// frame rate (diagnostic).
+
+interface Item {
+  name: string;
+  accent: string;
+}
+
+const ITEMS: Item[] = [
+  { name: 'NES', accent: '#d04040' },
+  { name: 'SNES', accent: '#6070ff' },
+  { name: 'Genesis', accent: '#3a3a3a' },
+  { name: 'Game Boy', accent: '#80a040' },
+  { name: 'Atari', accent: '#d09040' },
+];
 
 const root: CSSProperties = {
   display: 'flex',
+  flexDirection: 'column',
   width: 1920,
   height: 1080,
-  flexDirection: 'column',
-  justifyContent: 'center',
+  justifyContent: 'space-between',
   alignItems: 'center',
-  backgroundColor: '#101028',
+  paddingTop: 80,
+  paddingBottom: 80,
+  backgroundColor: '#0a0a14',
+};
+
+const headerWrap: CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'center',
   gap: 16,
 };
 
-const title: CSSProperties = {
-  fontSize: 96,
+const titleStyle: CSSProperties = {
+  fontSize: 72,
   color: '#ffffff',
 };
 
-const subtitle: CSSProperties = {
-  fontSize: 36,
-  color: '#90a0c0',
+const subtitleStyle: CSSProperties = {
+  fontSize: 28,
+  color: '#80909a',
 };
 
-const stats: CSSProperties = {
+const listStyle: CSSProperties = {
+  display: 'flex',
+  flexDirection: 'row',
+  alignItems: 'center',
+  gap: 32,
+};
+
+const cardBase: CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  width: 240,
+  height: 240,
+  alignItems: 'center',
+  justifyContent: 'flex-end',
+  paddingBottom: 24,
+};
+
+const cardLabelStyle: CSSProperties = {
+  fontSize: 32,
+  color: '#ffffff',
+};
+
+const footerWrap: CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'center',
+  gap: 12,
+};
+
+const selectedNameStyle: CSSProperties = {
   fontSize: 48,
   color: '#ffd060',
 };
 
-const hint: CSSProperties = {
-  fontSize: 28,
-  color: '#80909a',
-  marginTop: 24,
+const hintStyle: CSSProperties = {
+  fontSize: 24,
+  color: '#506070',
 };
 
 const fpsStyle: CSSProperties = {
   position: 'absolute',
   top: 12,
   left: 12,
-  fontSize: 24,
+  fontSize: 20,
   color: '#60ff60',
 };
 
-const swatchStyle: CSSProperties = {
-  position: 'absolute',
-  top: 12,
-  right: 12,
-  width: 80,
-  height: 32,
-  backgroundColor: '#202040',
-};
-
-// Cycle through accent colors on each confirm press; useSpring picks
-// up the change and tweens the background.
-const ACCENT_COLORS = ['#202040', '#ff5060', '#60ffa0', '#5080ff', '#ffd060'];
+function Card({
+  item,
+  focused,
+  pulse,
+}: {
+  item: Item;
+  focused: boolean;
+  pulse: number; // bumps when this card is "confirmed" — drives the flash spring.
+}) {
+  // Background tween between the dim idle colour and the item's
+  // accent colour as focus enters/leaves. `pulse` momentarily blends
+  // toward white when the user confirms the focused card, then the
+  // spring relaxes back to the focused/unfocused base.
+  const styles = useSpring({
+    backgroundColor: pulse > 0 ? '#ffffff' : focused ? item.accent : '#1a1a2a',
+    config: pulse > 0
+      ? { tension: 320, friction: 18 } // snappy flash to white
+      : { tension: 220, friction: 26 }, // smoother return / focus shift
+  });
+  return (
+    <animated.div style={{ ...cardBase, ...styles }}>
+      <div style={cardLabelStyle}>{item.name}</div>
+    </animated.div>
+  );
+}
 
 export function App() {
-  const [count, setCount] = useState(0);
-  const [direction, setDirection] = useState<string>('-');
+  const [focus, setFocus] = useState(0);
+  // `pulses[i]` increments each time card i is confirmed; the Card
+  // component reads this to fire its flash spring.
+  const [pulses, setPulses] = useState<number[]>(() => ITEMS.map(() => 0));
   const [fps, setFps] = useState(0);
 
   useEffect(() => {
@@ -76,74 +138,65 @@ export function App() {
     return () => clearInterval(id);
   }, []);
 
-  // The swatch's animated background. Index walks ACCENT_COLORS as
-  // count changes; useSpring interpolates the colour smoothly. Slow
-  // tension/friction so the tween spans roughly 700ms — at our ~17fps
-  // paint rate that's ~12 frames, which reads as a smooth fade rather
-  // than a single discrete jump.
-  const swatchSpring = useSpring({
-    from: { backgroundColor: ACCENT_COLORS[0] },
-    backgroundColor:
-      ACCENT_COLORS[
-        ((count % ACCENT_COLORS.length) + ACCENT_COLORS.length) %
-          ACCENT_COLORS.length
-      ],
-    config: { tension: 80, friction: 30 },
-  });
-
-  useIntent(
-    'confirm',
-    useCallback((e) => {
-      if (e.kind === 'pressed') setCount((c) => c + 1);
-    }, []),
-  );
-  useIntent(
-    'back',
-    useCallback((e) => {
-      if (e.kind === 'pressed') setCount((c) => c - 1);
-    }, []),
-  );
-  useIntent(
-    'navigate_up',
-    useCallback((e) => {
-      if (e.kind === 'pressed' || e.kind === 'repeat') setDirection('up');
-    }, []),
-  );
-  useIntent(
-    'navigate_down',
-    useCallback((e) => {
-      if (e.kind === 'pressed' || e.kind === 'repeat') setDirection('down');
-    }, []),
-  );
   useIntent(
     'navigate_left',
     useCallback((e) => {
-      if (e.kind === 'pressed' || e.kind === 'repeat') setDirection('left');
+      if (e.kind === 'pressed' || e.kind === 'repeat') {
+        setFocus((f) => Math.max(0, f - 1));
+      }
     }, []),
   );
   useIntent(
     'navigate_right',
     useCallback((e) => {
-      if (e.kind === 'pressed' || e.kind === 'repeat') setDirection('right');
+      if (e.kind === 'pressed' || e.kind === 'repeat') {
+        setFocus((f) => Math.min(ITEMS.length - 1, f + 1));
+      }
     }, []),
   );
-
-  // Note: JSX text interpolation produces multiple text nodes, and
-  // our layout doesn't yet flow text inline (each text node is a
-  // block-level child). Compose with a template literal so the
-  // entire line is one text node.
-  const statsLine = `count: ${count}   ·   nav: ${direction}`;
-  const hintLine =
-    'Enter/Space → +1   ·   Esc/Backspace → -1   ·   Arrows → navigate';
+  useIntent(
+    'confirm',
+    useCallback((e) => {
+      if (e.kind !== 'pressed') return;
+      setPulses((ps) => {
+        const next = ps.slice();
+        next[focus] = (next[focus] + 1) % 1_000_000;
+        return next;
+      });
+      // Auto-relax the pulse — the spring's first tick will see the
+      // bumped value (pulse > 0), the next tick we set it back to 0
+      // and the spring tweens back to the resting colour.
+      setTimeout(() => {
+        setPulses((ps) => {
+          const next = ps.slice();
+          next[focus] = 0;
+          return next;
+        });
+      }, 80);
+    }, [focus]),
+  );
 
   return (
     <div style={root}>
       <div style={fpsStyle}>{`${fps.toFixed(1)} fps`}</div>
-      <animated.div style={{ ...swatchStyle, ...swatchSpring }} />
-      <div style={title}>menu-ui · N8</div>
-      <div style={subtitle}>input router · live</div>
-      <div style={stats}>{statsLine}</div>
-      <div style={hint}>{hintLine}</div>
+      <div style={headerWrap}>
+        <div style={titleStyle}>menu-ui · N9 demo</div>
+        <div style={subtitleStyle}>core picker</div>
+      </div>
+      <div style={listStyle}>
+        {ITEMS.map((item, i) => (
+          <Card
+            key={item.name}
+            item={item}
+            focused={i === focus}
+            pulse={pulses[i]}
+          />
+        ))}
+      </div>
+      <div style={footerWrap}>
+        <div style={selectedNameStyle}>{ITEMS[focus].name}</div>
+        <div style={hintStyle}>{'← / → navigate   ·   Enter confirm'}</div>
+      </div>
     </div>
   );
 }
