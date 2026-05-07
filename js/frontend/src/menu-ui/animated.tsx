@@ -40,14 +40,21 @@ Globals.assign({
 const host = createHost(['div', 'img'], {
   /**
    * Apply the latest props (with animated values resolved) to a host
-   * node. Returning a truthy value tells react-spring it doesn't need
-   * to also poke the DOM; we always claim true since there's no DOM.
+   * node. react-spring delivers only the *animated* keys here — every
+   * other prop on `<animated.div style={...}>` is left to the host's
+   * normal create/commit path. We therefore use `gui.updateStyle`
+   * (merge into existing) rather than `gui.setStyle` (replace), so
+   * the node's static layout stays intact while colours, opacities,
+   * etc., tween from frame to frame.
+   *
+   * Returning truthy tells react-spring it doesn't need to fall back
+   * to DOM mutation — there's no DOM.
    */
   applyAnimatedValues(node: unknown, props: Record<string, unknown>) {
     if (typeof node !== 'number') return true;
     const style = props.style;
     if (style && typeof style === 'object') {
-      gui.setStyle(node as gui.NodeId, style as gui.Style);
+      gui.updateStyle(node as gui.NodeId, style as Partial<gui.Style>);
     }
     return true;
   },

@@ -126,6 +126,51 @@ pub struct Style {
     pub font_size: Option<f32>,
 }
 
+impl Style {
+    /// Overlay every `Some` field of `patch` onto `self`, leaving
+    /// `None` fields of `patch` untouched. Used by the
+    /// `gui.updateStyle` fast-path so animated tweens (which only
+    /// deliver the keys they animate) don't clobber the rest of a
+    /// node's style.
+    pub fn merge_from(&mut self, patch: &Style) {
+        if patch.display.is_some()         { self.display = patch.display; }
+        if patch.position.is_some()        { self.position = patch.position; }
+        if patch.flex_direction.is_some()  { self.flex_direction = patch.flex_direction; }
+        if patch.flex_wrap.is_some()       { self.flex_wrap = patch.flex_wrap; }
+        if patch.justify_content.is_some() { self.justify_content = patch.justify_content; }
+        if patch.align_items.is_some()     { self.align_items = patch.align_items; }
+        if patch.align_self.is_some()      { self.align_self = patch.align_self; }
+        if patch.flex_grow.is_some()       { self.flex_grow = patch.flex_grow; }
+        if patch.flex_shrink.is_some()     { self.flex_shrink = patch.flex_shrink; }
+        if patch.flex_basis.is_some()      { self.flex_basis = patch.flex_basis; }
+        if patch.gap.is_some()             { self.gap = patch.gap; }
+        if patch.top.is_some()             { self.top = patch.top; }
+        if patch.right.is_some()           { self.right = patch.right; }
+        if patch.bottom.is_some()          { self.bottom = patch.bottom; }
+        if patch.left.is_some()            { self.left = patch.left; }
+        if patch.width.is_some()           { self.width = patch.width; }
+        if patch.height.is_some()          { self.height = patch.height; }
+        if patch.min_width.is_some()       { self.min_width = patch.min_width; }
+        if patch.max_width.is_some()       { self.max_width = patch.max_width; }
+        if patch.min_height.is_some()      { self.min_height = patch.min_height; }
+        if patch.max_height.is_some()      { self.max_height = patch.max_height; }
+        if patch.padding_top.is_some()     { self.padding_top = patch.padding_top; }
+        if patch.padding_right.is_some()   { self.padding_right = patch.padding_right; }
+        if patch.padding_bottom.is_some()  { self.padding_bottom = patch.padding_bottom; }
+        if patch.padding_left.is_some()    { self.padding_left = patch.padding_left; }
+        if patch.margin_top.is_some()      { self.margin_top = patch.margin_top; }
+        if patch.margin_right.is_some()    { self.margin_right = patch.margin_right; }
+        if patch.margin_bottom.is_some()   { self.margin_bottom = patch.margin_bottom; }
+        if patch.margin_left.is_some()     { self.margin_left = patch.margin_left; }
+        if patch.background_color.is_some(){ self.background_color = patch.background_color; }
+        if patch.opacity.is_some()         { self.opacity = patch.opacity; }
+        if patch.overflow.is_some()        { self.overflow = patch.overflow; }
+        if patch.color.is_some()           { self.color = patch.color; }
+        if patch.font_family.is_some()     { self.font_family = patch.font_family.clone(); }
+        if patch.font_size.is_some()       { self.font_size = patch.font_size; }
+    }
+}
+
 /// Identifier for a registered font — kept as a small `String` since
 /// it's compared by name on lookup. `Box<str>` would save a few bytes
 /// but `String` makes parser ergonomics simpler.

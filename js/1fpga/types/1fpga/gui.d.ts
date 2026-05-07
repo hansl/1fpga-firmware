@@ -118,6 +118,15 @@ declare module '1fpga:gui' {
   export function setStyle(node: NodeId, style: Style): void;
 
   /**
+   * Merge a partial style onto the node's existing style. Unlike
+   * `setStyle` (which replaces the whole style), `updateStyle` only
+   * overwrites the keys present in `patch`. Designed for animation
+   * fast-paths — tweens deliver one key at a time without clobbering
+   * the rest of the node's layout.
+   */
+  export function updateStyle(node: NodeId, patch: Partial<Style>): void;
+
+  /**
    * Mark `root` as the live UI root. After the JS `main()` returns,
    * the runtime starts driving a frame loop with this root.
    */

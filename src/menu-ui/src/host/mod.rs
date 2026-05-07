@@ -99,6 +99,10 @@ pub fn register(loader: &MapModuleLoader, context: &mut Context) -> JsResult<()>
             NativeFunction::from_fn_ptr(set_style),
         ),
         (
+            js_string!("updateStyle"),
+            NativeFunction::from_fn_ptr(update_style),
+        ),
+        (
             js_string!("addIntentListener"),
             NativeFunction::from_fn_ptr(add_intent_listener),
         ),
@@ -282,6 +286,24 @@ fn set_style(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResu
     let style = parse_style_value(args.get_or_undefined(1), context)?;
     let state = ui_state(context)?;
     state.with_tree_mut(|t| t.set_style(id, style));
+    Ok(JsValue::undefined())
+}
+
+/// Merge a partial style onto the node's existing style (only `Some`
+/// fields of the patch overwrite). Used by the react-spring shim so
+/// per-frame animated tweens — which deliver only the animated keys —
+/// don't clobber position, dimensions, etc.
+fn update_style(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let id = NodeId(args.get_or_undefined(0).to_u32(context)?);
+    let patch = parse_style_value(args.get_or_undefined(1), context)?;
+    let state = ui_state(context)?;
+    state.with_tree_mut(|t| {
+        if let Some(node) = t.get(id) {
+            let mut merged = node.style.clone();
+            merged.merge_from(&patch);
+            t.set_style(id, merged);
+        }
+    });
     Ok(JsValue::undefined())
 }
 
