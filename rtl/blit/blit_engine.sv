@@ -122,6 +122,7 @@ module blit_engine (
         S_WAIT_SRC_BURST,
         S_FETCH_DST_BURST, // burst dst read for RMW
         S_WAIT_DST_BURST,
+        S_ISSUE_PREFETCH,  // 1-cycle: drive RD=1 for next-burst src prefetch
         S_BLEND_BURST,     // sequential blend: 1 pixel/cycle, in-place into src_buf
         S_WRITE_BURST,     // burst dst write
         S_DONE
@@ -170,6 +171,37 @@ module blit_engine (
     // Per-burst beat / pixel cursors.
     logic [3:0]  copy_beat_idx_q;
     logic [4:0]  copy_pixel_idx_q;
+
+    // ---- Src prefetch (outstanding-read pipelining) -------------------
+    //
+    // For the common case of contiguous 16-pixel bursts in the middle
+    // of a row (RGBA, both src and dst 64-byte aligned), we hide the
+    // bus-read latency of the *next* burst's src behind the current
+    // burst's blend + write phases. The read is issued from
+    // S_ISSUE_PREFETCH after current's dst capture (or after src in
+    // fast-path frames that skip dst), and beats land into prefetch_buf
+    // throughout S_BLEND_BURST and S_WRITE_BURST as ddram_dout_valid
+    // pulses arrive. By the time we transition to S_NEXT_PIXEL the
+    // prefetch is typically complete; the dispatch in S_NEXT_PIXEL
+    // checks prefetch_ready_q and, if the next burst's parameters
+    // match, copies prefetch_buf into src_buf in one cycle and skips
+    // straight past S_FETCH_SRC_BURST / S_WAIT_SRC_BURST.
+    //
+    // Only the 16-pixel (8-beat) tier participates: the smaller tiers
+    // are too narrow to be worth the bookkeeping, and prefetch is
+    // suppressed for the last burst of a row (no next-burst to pair
+    // with) and for non-RGBA / misaligned cases.
+    logic [31:0] prefetch_buf [0:BURST_PIXELS_MAX-1];
+    logic [7:0]  prefetch_alpha_or_q;
+    logic [7:0]  prefetch_alpha_and_q;
+    logic        prefetch_active_q;     // dout_valid pulses we observe go into prefetch_buf
+    logic        prefetch_ready_q;      // all 8 beats captured; dispatch may consume
+    logic [3:0]  prefetch_beat_idx_q;   // 0..7
+    // Cached byte address the prefetch was issued for. The dispatch
+    // in S_NEXT_PIXEL verifies this matches src_pixel_byte_addr before
+    // adopting prefetch_buf — guards against any dispatch edge case
+    // (row transition, alignment changes) that would invalidate it.
+    logic [31:0] prefetch_src_addr_q;
 
     assign busy_o = (state != S_IDLE) & (state != S_DONE);
 
@@ -310,6 +342,14 @@ module blit_engine (
                 };
                 ddram_we_o       = 1'b1;
             end
+            S_ISSUE_PREFETCH: begin
+                // Issue the next-burst src read. Fixed 8-beat burst:
+                // prefetch only ever runs for the 16-pixel tier.
+                ddram_addr_o     = prefetch_src_addr_q[31:3];
+                ddram_burstcnt_o = 8'd8;
+                ddram_be_o       = 8'hFF;
+                ddram_rd_o       = 1'b1;
+            end
             S_FILL_BURST: begin
                 // 2 pixels per beat, full byteenable, color replicated.
                 // Avalon-MM burst: address + burstcnt are looked at on
@@ -386,17 +426,80 @@ module blit_engine (
             burst_len_q       <= '0;
             burst_done_q      <= '0;
             for (i = 0; i < BURST_PIXELS_MAX; i = i + 1) begin
-                src_buf[i] <= '0;
-                dst_buf[i] <= '0;
+                src_buf[i]      <= '0;
+                dst_buf[i]      <= '0;
+                prefetch_buf[i] <= '0;
             end
-            alpha_or_q        <= '0;
-            alpha_and_q       <= '0;
-            copy_burst_len_q  <= 4'd0;
-            copy_beat_idx_q   <= 4'd0;
-            copy_pixel_idx_q  <= 5'd0;
-            done_o            <= 1'b0;
+            alpha_or_q           <= '0;
+            alpha_and_q          <= '0;
+            copy_burst_len_q     <= 4'd0;
+            copy_beat_idx_q      <= 4'd0;
+            copy_pixel_idx_q     <= 5'd0;
+            prefetch_alpha_or_q  <= 8'd0;
+            prefetch_alpha_and_q <= 8'hFF;
+            prefetch_active_q    <= 1'b0;
+            prefetch_ready_q     <= 1'b0;
+            prefetch_beat_idx_q  <= 4'd0;
+            prefetch_src_addr_q  <= 32'd0;
+            done_o               <= 1'b0;
         end else begin
             done_o <= 1'b0;
+
+            // ---- Prefetch capture (concurrent with main FSM) ----
+            // Once a prefetch read is in flight (prefetch_active_q high
+            // after S_ISSUE_PREFETCH retires), every dout_valid pulse
+            // is for prefetch — current-burst reads have all completed
+            // by then because we only issue prefetch *after* the main
+            // FSM finishes capturing src/dst for the burst we're about
+            // to write. We rely on the slave returning beats in issue
+            // order, so this happens to also work in fast-path frames
+            // where we skipped dst.
+            if (prefetch_active_q & ddram_dout_valid_i) begin
+                automatic logic [31:0] p_lo;
+                automatic logic [31:0] p_hi;
+                automatic logic [31:0] tinted_lo;
+                automatic logic [31:0] tinted_hi;
+                automatic logic [4:0]  p_lo_idx;
+                automatic logic [4:0]  p_hi_idx;
+                automatic logic [7:0]  al;
+                automatic logic [7:0]  ah;
+                automatic logic        prefetch_last;
+                p_lo = ddram_dout_i[31:0];
+                p_hi = ddram_dout_i[63:32];
+                if (tint_en_q) begin
+                    tinted_lo = pack_pixel(
+                        mul8(ch_r(p_lo), ch_r(tint_color_q)),
+                        mul8(ch_g(p_lo), ch_g(tint_color_q)),
+                        mul8(ch_b(p_lo), ch_b(tint_color_q)),
+                        mul8(ch_a(p_lo), ch_a(tint_color_q))
+                    );
+                    tinted_hi = pack_pixel(
+                        mul8(ch_r(p_hi), ch_r(tint_color_q)),
+                        mul8(ch_g(p_hi), ch_g(tint_color_q)),
+                        mul8(ch_b(p_hi), ch_b(tint_color_q)),
+                        mul8(ch_a(p_hi), ch_a(tint_color_q))
+                    );
+                end else begin
+                    tinted_lo = p_lo;
+                    tinted_hi = p_hi;
+                end
+                p_lo_idx = {prefetch_beat_idx_q, 1'b0};
+                p_hi_idx = {prefetch_beat_idx_q, 1'b1};
+                prefetch_buf[p_lo_idx] <= tinted_lo;
+                prefetch_buf[p_hi_idx] <= tinted_hi;
+                al = ch_a(tinted_lo);
+                ah = ch_a(tinted_hi);
+                prefetch_alpha_or_q  <= prefetch_alpha_or_q  | al | ah;
+                prefetch_alpha_and_q <= prefetch_alpha_and_q & al & ah;
+                prefetch_last = (prefetch_beat_idx_q + 4'd1 == 4'd8);
+                if (prefetch_last) begin
+                    prefetch_active_q   <= 1'b0;
+                    prefetch_ready_q    <= 1'b1;
+                    prefetch_beat_idx_q <= 4'd0;
+                end else begin
+                    prefetch_beat_idx_q <= prefetch_beat_idx_q + 4'd1;
+                end
+            end
 
             unique case (state)
                 S_IDLE: if (start_i) begin
@@ -481,6 +584,11 @@ module blit_engine (
                 S_NEXT_PIXEL: begin
                     if (cur_x == dst_w_q) begin
                         cur_y_off <= cur_y_off + 16'd1;
+                        // Row's last burst can't match the prefetch
+                        // (it'd be for a same-row position past dst_w);
+                        // the address-match check would handle this
+                        // anyway, but clearing makes the intent explicit.
+                        prefetch_ready_q <= 1'b0;
                         state     <= S_ROW_INIT;
                     end else if (mode_q == MODE_COPY) begin
                         // Burst-COPY dispatch: pick the largest aligned
@@ -490,15 +598,69 @@ module blit_engine (
                         // accept the burst. Falls back through smaller
                         // bursts down to the per-pixel path. A8 sources
                         // bypass burst entirely (different addressing).
+                        //
+                        // For 16-px bursts we also check whether a
+                        // src prefetch (issued during the previous
+                        // burst's dst-wait) has landed and matches the
+                        // address we'd otherwise fetch. If so, copy
+                        // prefetch_buf into src_buf in one cycle and
+                        // jump straight to the alpha-summary decision
+                        // — saving the L1 cycles a fresh fetch would
+                        // pay.
                         automatic logic [15:0] remaining_copy;
                         automatic logic [5:0]  src_lo;
                         automatic logic [5:0]  dst_lo;
                         automatic logic        rgba;
+                        automatic logic        prefetch_hit;
                         remaining_copy = dst_w_q - cur_x;
                         src_lo = src_pixel_byte_addr[5:0];
                         dst_lo = dst_pixel_byte_addr[5:0];
                         rgba = (format_q == FMT_RGBA);
+                        prefetch_hit = prefetch_ready_q
+                                     & (prefetch_src_addr_q == src_pixel_byte_addr);
                         if (rgba && (remaining_copy >= 16'd16)
+                            && (src_lo == 6'd0) && (dst_lo == 6'd0)
+                            && prefetch_hit) begin
+                            // Use prefetch_buf as src_buf. Replicates
+                            // the alpha-summary branch from
+                            // S_WAIT_SRC_BURST's last-beat handler.
+                            // Manual unroll keeps Quartus 17 happy
+                            // about loop-variable scoping inside an
+                            // always_ff branch.
+                            src_buf[0]  <= prefetch_buf[0];
+                            src_buf[1]  <= prefetch_buf[1];
+                            src_buf[2]  <= prefetch_buf[2];
+                            src_buf[3]  <= prefetch_buf[3];
+                            src_buf[4]  <= prefetch_buf[4];
+                            src_buf[5]  <= prefetch_buf[5];
+                            src_buf[6]  <= prefetch_buf[6];
+                            src_buf[7]  <= prefetch_buf[7];
+                            src_buf[8]  <= prefetch_buf[8];
+                            src_buf[9]  <= prefetch_buf[9];
+                            src_buf[10] <= prefetch_buf[10];
+                            src_buf[11] <= prefetch_buf[11];
+                            src_buf[12] <= prefetch_buf[12];
+                            src_buf[13] <= prefetch_buf[13];
+                            src_buf[14] <= prefetch_buf[14];
+                            src_buf[15] <= prefetch_buf[15];
+                            alpha_or_q       <= prefetch_alpha_or_q;
+                            alpha_and_q      <= prefetch_alpha_and_q;
+                            prefetch_ready_q <= 1'b0;
+                            copy_burst_len_q <= 4'd8;
+                            copy_beat_idx_q  <= 4'd0;
+                            copy_pixel_idx_q <= 5'd0;
+                            if ((blend_q == BLEND_OPAQUE)
+                                || ((blend_q == BLEND_SRCALPHA)
+                                    && (prefetch_alpha_and_q == 8'hFF))) begin
+                                state <= S_WRITE_BURST;
+                            end else if ((blend_q == BLEND_SRCALPHA)
+                                         && (prefetch_alpha_or_q == 8'h00)) begin
+                                cur_x <= cur_x + 16'd16;
+                                state <= S_NEXT_PIXEL;
+                            end else begin
+                                state <= S_FETCH_DST_BURST;
+                            end
+                        end else if (rgba && (remaining_copy >= 16'd16)
                             && (src_lo == 6'd0) && (dst_lo == 6'd0)) begin
                             // 16 px / 8 beats / 64-byte aligned.
                             copy_burst_len_q <= 4'd8;
@@ -753,6 +915,8 @@ module blit_engine (
                     automatic logic [4:0] pix_lo_idx;
                     automatic logic [4:0] pix_hi_idx;
                     automatic logic       is_last_beat;
+                    automatic logic [15:0] remaining_after;
+                    automatic logic        prefetch_eligible;
                     pix_lo_idx = {copy_beat_idx_q, 1'b0};
                     pix_hi_idx = {copy_beat_idx_q, 1'b1};
                     dst_buf[pix_lo_idx] <= ddram_dout_i[31:0];
@@ -762,10 +926,41 @@ module blit_engine (
                     if (is_last_beat) begin
                         copy_beat_idx_q  <= 4'd0;
                         copy_pixel_idx_q <= 5'd0;
-                        state            <= S_BLEND_BURST;
+                        // Eligible for src prefetch iff this is a 16-px
+                        // burst and there's at least one more 16-px
+                        // worth of pixels left in the row. Same-row
+                        // address arithmetic is trivial (next burst is
+                        // at the same y, just +64 bytes), so we can
+                        // compute the prefetch address from the
+                        // current src_pixel_byte_addr below.
+                        remaining_after = dst_w_q - cur_x - 16'd16;
+                        prefetch_eligible = (copy_burst_len_q == 4'd8)
+                                          & (format_q == FMT_RGBA)
+                                          & (remaining_after >= 16'd16)
+                                          & ~prefetch_active_q
+                                          & ~prefetch_ready_q;
+                        if (prefetch_eligible) begin
+                            prefetch_src_addr_q  <= src_pixel_byte_addr + 32'd64;
+                            prefetch_alpha_or_q  <= 8'd0;
+                            prefetch_alpha_and_q <= 8'hFF;
+                            state                <= S_ISSUE_PREFETCH;
+                        end else begin
+                            state <= S_BLEND_BURST;
+                        end
                     end else begin
                         copy_beat_idx_q <= copy_beat_idx_q + 4'd1;
                     end
+                end
+
+                S_ISSUE_PREFETCH: if (~ddram_busy_i) begin
+                    // Slave latched the read request — mark prefetch
+                    // active so the universal capture path (above the
+                    // unique case) routes incoming dout_valid pulses
+                    // into prefetch_buf. Then proceed with the blend
+                    // we postponed for one cycle.
+                    prefetch_active_q   <= 1'b1;
+                    prefetch_beat_idx_q <= 4'd0;
+                    state               <= S_BLEND_BURST;
                 end
 
                 S_BLEND_BURST: begin
@@ -804,7 +999,17 @@ module blit_engine (
 
                 S_DONE: begin
                     done_o <= 1'b1;
-                    state  <= S_IDLE;
+                    // Drop any leftover prefetch state — the next blit
+                    // could have a completely different (src, tint,
+                    // format) so the buffered pixels and alpha summary
+                    // are no longer valid. The address-match check in
+                    // S_NEXT_PIXEL would already catch this, but
+                    // clearing keeps the bus quiescent if a stray beat
+                    // were still in flight.
+                    prefetch_active_q   <= 1'b0;
+                    prefetch_ready_q    <= 1'b0;
+                    prefetch_beat_idx_q <= 4'd0;
+                    state               <= S_IDLE;
                 end
             endcase
         end
