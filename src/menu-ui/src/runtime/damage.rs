@@ -85,6 +85,28 @@ impl PaintedScene {
     }
 }
 
+/// One-shot hash of everything that determines whether the framebuffer
+/// would render identical pixels for the current tree+layout vs. a
+/// prior state. Used by the runtime for the "scene unchanged → skip
+/// submit" fast path; comparing two `u64`s is much cheaper than
+/// diffing two scene Vecs and avoids the rendering-correctness pitfalls
+/// of partial / damage-rect repaints.
+pub fn scene_hash(
+    tree: &Tree,
+    root: NodeId,
+    layouts: &HashMap<NodeId, ComputedLayout>,
+    text_styles: &HashMap<NodeId, ResolvedTextStyle>,
+) -> u64 {
+    let scene = compute_scene(tree, root, layouts, text_styles);
+    let mut h = DefaultHasher::new();
+    for item in &scene.items {
+        item.node_id.0.hash(&mut h);
+        item.bbox.hash(&mut h);
+        item.content_hash.hash(&mut h);
+    }
+    h.finish()
+}
+
 /// Walk the tree and build a [`PaintedScene`] reflecting what would
 /// be drawn for the current state.
 pub fn compute_scene(

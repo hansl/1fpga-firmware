@@ -34,19 +34,6 @@ use boa_engine::{JsObject, JsValue};
 /// (Git hash via build.rs is a future improvement.)
 pub const BUILD_ID: &str = env!("CARGO_PKG_VERSION");
 
-/// Bounding rect of the canary square (matches `paint_canary`'s
-/// placement). Returned as a damage::PixelRect so it composes with
-/// the tree-derived damage list.
-fn canary_bbox(fb: &FramebufferConfig) -> damage::PixelRect {
-    const SIZE: u16 = 24;
-    damage::PixelRect {
-        x: fb.width.saturating_sub(SIZE + 8),
-        y: 8,
-        w: SIZE,
-        h: SIZE,
-    }
-}
-
 /// "Build canary" — paints a small color-cycling square in the
 /// top-right corner of every frame so a glance at the screen confirms
 /// the loop is alive AND the binary is fresh. Cycles through 6 colors
@@ -454,17 +441,12 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     // shape close enough for our use cases.
     let raf_epoch = std::time::Instant::now();
 
-    // Per-FB scene snapshot for damage tracking. Slots 0/1/2
-    // correspond to the FPGA fb_swapper's three buffers; on each
-    // present we update the slot for whichever buffer was just
-    // rendered. Initial scenes are empty so the first 3 frames
-    // produce full-screen damage and converge all FBs to the
-    // current scene.
-    let mut painted_per_fb: [damage::PaintedScene; 3] = [
-        damage::PaintedScene::empty(),
-        damage::PaintedScene::empty(),
-        damage::PaintedScene::empty(),
-    ];
+    // Per-FB content hash. Tracks "what's currently painted on each
+    // of the three FB slots" as a single u64 hash of the scene.
+    // None = never painted (forces a full paint when first targeted).
+    // We pick the matching slot via the FPGA's render_idx, compute
+    // the current scene hash, and skip submit when they match.
+    let mut scene_hash_per_fb: [Option<u64>; 3] = [None, None, None];
     // Per-stage timing accumulators. Every TIMING_LOG_PERIOD frames
     // we log the average per-stage cost. Tells us where the frame
     // budget actually goes (so we can tell tick_jobs from layout
@@ -576,56 +558,34 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
 
         let t6 = Instant::now();
 
-        // 6. Damage detection. Compute a fresh PaintedScene from the
-        //    current tree+layout, diff it against what was last
-        //    painted on the *current* render FB (the FPGA reports
-        //    which one via fb_state.render), and produce a damage
-        //    union rect. Empty damage → skip submit + present
-        //    entirely; the scene on screen is already correct.
-        let render_idx = device.fb_state().render as usize;
-        let current_scene = ui_state.with_tree(|tree| {
-            damage::compute_scene(tree, root, &layouts, &text_styles)
+        // 6. Skip submit when nothing has changed since the last
+        //    paint. We diff a hash of the current scene against
+        //    what we last painted on EACH FB; if all three have
+        //    the current scene, the displayed pixels are already
+        //    correct and we can skip the whole paint+present
+        //    pipeline. fb_swapper holds the displayed buffer
+        //    steady when we don't issue a PRESENT.
+        let render_idx = (device.fb_state().render as usize).min(2);
+        let current_hash = ui_state.with_tree(|tree| {
+            damage::scene_hash(tree, root, &layouts, &text_styles)
         });
-        let damage_rects = damage::compute_damage(
-            &painted_per_fb[render_idx.min(2)],
-            &current_scene,
-        );
-        // Force a full repaint on the canary's slot so the colour-
-        // cycling indicator stays alive. The bbox covers a fixed
-        // top-right corner; including it as a synthetic always-dirty
-        // rect is cheap.
-        let canary_rect = canary_bbox(&fb);
-        let damage_with_canary: Vec<damage::PixelRect> = if damage_rects.is_empty() {
-            // Scene unchanged: the only thing we *might* still want to
-            // refresh is the canary. But repainting just the canary
-            // every frame costs ~50ms (it'd block on fence). For idle
-            // frames let the canary go stale rather than burn the
-            // budget; it'll resync on the next real damage event.
-            Vec::new()
-        } else {
-            let mut v = damage_rects.clone();
-            v.push(canary_rect);
-            v
-        };
-
-        let bounding = damage::union_rects(&damage_with_canary);
-
-        if bounding.is_none() {
-            // Nothing changed. Sleep one vsync window so the loop
-            // doesn't spin on the host CPU. Skip submit so the FPGA's
-            // fb_swapper holds the current display buffer steady.
+        if scene_hash_per_fb[render_idx] == Some(current_hash) {
+            // This FB already has the desired content. Sleep ~one
+            // vsync to bound the loop and continue. Update fps
+            // counter on the loop tick (not paint tick) so the
+            // displayed value stays meaningful during idle periods.
+            fps_counter.record_frame();
             std::thread::sleep(Duration::from_millis(16));
             continue;
         }
-        let bounding_rect: Rect = bounding.unwrap().into();
 
         // 7. Begin frame: render pending text into their RTs first
         //    (target = RT, glyphs, target = framebuffer), then paint
-        //    the normal tree clipped to the damage rect.
+        //    the normal tree using the cached RTs and images.
         let frame = device.begin_frame();
         let frame = crate::paint::render_pending_text(frame, &pendings, &fonts)?;
         let frame = ui_state.with_tree(|tree| {
-            crate::paint::paint_damaged(
+            crate::paint::paint(
                 tree,
                 root,
                 &fb,
@@ -633,7 +593,6 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                 &text_styles,
                 &text_cache,
                 &images,
-                bounding_rect,
                 frame,
             )
         })?;
@@ -644,13 +603,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         let (_count, fence_dt, scanout_dt) =
             frame.present()?.submit()?.wait_presented_timed(timeout)?;
 
-        // Mark this FB as up-to-date with current_scene. Other FBs
-        // still hold whatever they last had — they'll converge over
-        // subsequent frames as fb_swapper rotates and we paint
-        // their damage diff.
-        if render_idx <= 2 {
-            painted_per_fb[render_idx] = current_scene;
-        }
+        scene_hash_per_fb[render_idx] = Some(current_hash);
         ui_state.with_tree_mut(|t| t.clear_dirty());
         fps_counter.record_frame();
 

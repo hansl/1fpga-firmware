@@ -81,47 +81,6 @@ pub fn render_pending_text<'a>(
     frame.set_target_framebuffer()
 }
 
-/// Walk the tree and paint a damage-rect subset into `frame`.
-///
-/// Sets a SetClip to `damage` at the start, fills the rect with the
-/// root background color (so anything that *was* inside it but is no
-/// longer drawn gets cleared), then walks the tree the same way as
-/// [`paint`]. The FPGA's blit engine respects the clip, so any
-/// commands emitted for nodes outside the damage area are discarded
-/// before they touch a pixel — tree-walk overhead is paid but no
-/// memory bandwidth is.
-pub fn paint_damaged<'a>(
-    tree: &Tree,
-    root: NodeId,
-    fb: &FramebufferConfig,
-    layouts: &HashMap<NodeId, ComputedLayout>,
-    text_styles: &HashMap<NodeId, ResolvedTextStyle>,
-    text_cache: &TextCache,
-    images: &ImageRegistry,
-    damage: Rect,
-    mut frame: Frame<'a>,
-) -> Result<Frame<'a>, DeviceError> {
-    let _ = fb; // Damage is supplied externally; fb dims unused here.
-    let root_bg = tree
-        .get(root)
-        .and_then(|n| n.style.background_color)
-        .unwrap_or(Rgba::BLACK);
-    frame = frame.set_clip(damage)?;
-    frame = frame.fill_rect(damage, root_bg, BlendMode::Opaque)?;
-    frame = paint_subtree(
-        tree,
-        root,
-        layouts,
-        text_styles,
-        text_cache,
-        images,
-        frame,
-        /* skip_root_bg */ true,
-    )?;
-    frame = frame.clear_clip()?;
-    Ok(frame)
-}
-
 /// Walk the tree and paint each node into `frame`.
 pub fn paint<'a>(
     tree: &Tree,
