@@ -179,8 +179,12 @@ assign DDRAM_CLK = clk_sys;
 // but is held idle — see the FB_EN block below.
 assign VGA_F1       = 1'b0;
 assign VGA_SL       = 2'b00;
-assign VGA_SCALER   = 1'b0;
-assign VGA_DISABLE  = 1'b0;  // analog output is the active path
+// ASCAL is the path from VGA_* to HDMI on DE10-Nano. Setting
+// VGA_SCALER=1 routes our compositor pixels through it; with =0 the
+// stream goes to the analog VGA output which the DE10-Nano doesn't
+// have, so HDMI shows black.
+assign VGA_SCALER   = 1'b1;
+assign VGA_DISABLE  = 1'b0;  // VGA_* path is active
 assign VIDEO_ARX    = 13'd16;
 assign VIDEO_ARY    = 13'd9;
 assign CE_PIXEL     = 1'b1;
@@ -624,6 +628,12 @@ wire breathe = act_cnt[26] ? (act_cnt[25:18] > act_cnt[7:0])
                            : (act_cnt[25:18] <= act_cnt[7:0]);
 wire fast_blink = act_cnt[22];
 
-assign LED_USER = reg_enable ? fast_blink : breathe;
+// Diagnostic: solid LED_USER means the video PLL is locked (so the
+// compositor is producing pixels). If the screen is black AND the
+// LED is the breathe/blink pattern, PLL never locked → check PLL
+// params. If LED is solid but screen still black, the timing is
+// reaching ASCAL but ASCAL/HDMI sink isn't accepting it.
+assign LED_USER = pll_locked ? 1'b1
+                             : (reg_enable ? fast_blink : breathe);
 
 endmodule
