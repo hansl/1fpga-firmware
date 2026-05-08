@@ -165,7 +165,9 @@ be written as zero for forward compatibility.
 | `0x5C` | —   | reserved             |                                                |
 | `0x60` | R/W | `TEX_TABLE_ADDR`     | Texture descriptor table physical address      |
 | `0x64` | R/W | `TEX_TABLE_COUNT`    | Number of valid entries in the table (default allocation 4096; see §2.3) |
-| `0x68` | —   | reserved             |                                                |
+| `0x68` | R/W | `LAYER_TABLE_BASE`   | Physical address of the 16 KB layer-table region (two 8 KB tables A/B; see §11) |
+| `0x6C` | R/W | `LAYER_COMMIT`       | Atomic frame swap: bit 31 = active table (0=A, 1=B); bits 8..0 = valid layer count (see §11) |
+| `0x70` | —   | reserved             |                                                |
 | `0x80` | R   | `PERF_CYCLES_BUSY`   | Cycles blit engine was busy (debug)            |
 | `0x84` | R   | `PERF_CMDS_EXEC`     | Commands executed (debug)                      |
 | `0x88` | R   | `PERF_BYTES_READ`    | Bytes read from DDR3 (debug, ÷64)              |
@@ -1022,6 +1024,52 @@ opcode, effectively providing a 2³²-wide future opcode space without
 altering the v0 header layout. Implementations MUST NOT repurpose
 `0xFF` for any other command while this protocol line is in effect. In
 v0, encountering `0xFF` MUST raise `ERR_BAD_OPCODE`.
+
+---
+
+## 11. Layer compositor (Phase 2+)
+
+The compositor scanout path renders the active framebuffer pixel-by-pixel
+from a host-managed table of layer descriptors instead of a pre-rendered
+buffer. It runs in parallel with the existing FB-scanout path and is
+selected by which control registers the host populates: programming
+`LAYER_TABLE_BASE` and committing through `LAYER_COMMIT` (§3.1) is
+sufficient to engage the compositor.
+
+### 11.1 Layer-table region
+
+The host reserves a 16 KB region in the DDR3 carve-out (default offset
+`0x01B0_0000`, see §2). The region holds two back-to-back tables:
+
+| Region   | Offset within region | Size  | Slots |
+|----------|---------------------|-------|-------|
+| Table A  | `+0x0000`           | 8 KB  | 256   |
+| Table B  | `+0x2000`           | 8 KB  | 256   |
+
+Each slot is a 32-byte layer descriptor (see `protocol::LayerDescriptor`
+in the host crate for the byte-level layout). Slot index encodes z-order:
+slot 0 paints first (back), slot 255 last (front).
+
+### 11.2 Atomic commit
+
+The compositor reads from whichever of A/B is currently active. The host
+prepares a frame by:
+
+1. Writing every changed slot in the **inactive** table.
+2. Writing `LAYER_COMMIT` with `bit 31` flipped and `bits 8..0` set to the
+   number of populated slots.
+
+`LAYER_COMMIT` is read by the FPGA atomically — the active-table flip
+and the valid-count update are observed simultaneously, so a scanline in
+flight cannot see a torn commit.
+
+### 11.3 Solid-colour layers (Phase 2a)
+
+A layer with `tex_id == 0xFFFF` is treated as solid: the compositor
+paints `color` (BGRA) over the layer's `dst` rectangle and never
+references a texture. Phase 2a supports only solid layers; textured
+layers (`tex_id < 0xFFFF`) are reserved for Phase 2b and ignored by the
+compositor until then.
 
 ---
 

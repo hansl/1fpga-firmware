@@ -31,6 +31,13 @@ pub const FB1_ADDR: usize = 0x54;
 pub const FB2_ADDR: usize = 0x58;
 pub const TEX_TABLE_ADDR: usize = 0x60;
 pub const TEX_TABLE_COUNT: usize = 0x64;
+/// Physical base of the 16 KB layer-table region (two back-to-back
+/// 8 KB tables; PROTOCOL.md §11.1). Programmed once at init.
+pub const LAYER_TABLE_BASE: usize = 0x68;
+/// Atomic frame swap (PROTOCOL.md §3.1, §11.2).
+/// Bit 31 = active table (0 = A, 1 = B). Bits 8..0 = valid layer
+/// count (0..256). All other bits reserved (write 0).
+pub const LAYER_COMMIT: usize = 0x6C;
 pub const PERF_CYCLES_BUSY: usize = 0x80;
 pub const PERF_CMDS_EXEC: usize = 0x84;
 pub const PERF_BYTES_READ: usize = 0x88;
@@ -162,5 +169,7 @@ mod tests {
         assert_eq!(FENCE_VALUE, 0x48);
         assert_eq!(FB0_ADDR, 0x50);
         assert_eq!(TEX_TABLE_ADDR, 0x60);
+        assert_eq!(LAYER_TABLE_BASE, 0x68);
+        assert_eq!(LAYER_COMMIT, 0x6C);
     }
 }

@@ -11,6 +11,7 @@
 //! discipline against the ring. Wrap it in a `Mutex` if you need to
 //! cross threads.
 
+use std::sync::atomic::{Ordering, fence};
 use std::time::{Duration, Instant};
 
 use crate::allocator::{AllocError, BumpAllocator};
@@ -134,6 +135,12 @@ pub struct Device {
     /// Which layer table the host is currently writing to (0 = A,
     /// 1 = B). Toggled by [`Self::commit_layers`].
     layer_back_idx: u8,
+    /// Highest-written-slot+1 in the current back table — what gets
+    /// shipped to the FPGA in `LAYER_COMMIT.count` on the next
+    /// commit. Reset to 0 after each commit (immediate-mode in
+    /// Phase 2a; retained-mode would require copying the active
+    /// table into the back).
+    back_valid_count: u16,
     tex_alloc: BumpAllocator,
     next_tex_id: u16,
     tex_table_capacity: u16,
@@ -201,6 +208,7 @@ impl Device {
             tex_table_map: None,
             layer_table_map: None,
             layer_back_idx: 1, // active starts at A (0); host writes B first.
+            back_valid_count: 0,
             tex_alloc: BumpAllocator::new(tex_pool_phys, mem::TEX_POOL_SIZE as u32),
             next_tex_id: 0,
             tex_table_capacity: mem::DEFAULT_TEX_TABLE_COUNT as u16,
@@ -400,6 +408,9 @@ impl Device {
                 volatile_copy_to_devmem(dst, &zero);
             }
         }
+        // Tell the FPGA where the region lives. LAYER_COMMIT stays at
+        // its reset value (active=A, count=0) until the first commit.
+        self.regs.write32(registers::LAYER_TABLE_BASE, phys);
         Ok(())
     }
 
@@ -447,6 +458,10 @@ impl Device {
             let dst = map.as_mut_ptr().add(entry_offset);
             volatile_copy_to_devmem(dst, bytes);
         }
+        let want_count = (slot as u16).saturating_add(1);
+        if want_count > self.back_valid_count {
+            self.back_valid_count = want_count;
+        }
         Ok(())
     }
 
@@ -462,14 +477,55 @@ impl Device {
     /// what the compositor reads. The next scanline observes the
     /// just-committed layout.
     ///
-    /// Phase 0 stub: writes to a register the FPGA compositor will
-    /// read (registers::LAYER_ACTIVE landing in Phase 1+). For now
-    /// this just toggles the host's back-buffer index so subsequent
-    /// `set_layer` calls land in the freshly-vacated table.
+    /// Writes [`registers::LAYER_COMMIT`] in a single 32-bit store
+    /// (bit 31 = active table, bits 8..0 = valid layer count). The
+    /// FPGA latches both fields on the same clock edge, so a scanline
+    /// in flight cannot observe a torn commit (PROTOCOL.md §11.2).
+    ///
+    /// Phase 2a is immediate-mode: after commit, the just-vacated
+    /// table is logically empty (`back_valid_count = 0`). The caller
+    /// must re-issue every layer it wants in the next frame.
     pub fn commit_layers(&mut self) {
-        // TODO(phase 1): write registers::LAYER_ACTIVE to flip the
-        // FPGA-visible active-table index.
+        // Pair with the volatile descriptor writes above: the DDR3
+        // stores must be globally visible before the FPGA observes
+        // the new LAYER_COMMIT and starts walking the freshly-active
+        // table. Same pattern Frame::submit uses around RING_TAIL.
+        fence(Ordering::Release);
+
+        // The table the host has been writing to is what the FPGA
+        // will now read. `layer_back_idx` will flip to point at the
+        // OTHER table for the next frame.
+        let new_active: u32 = self.layer_back_idx as u32;
+        let count: u32 = (self.back_valid_count as u32) & 0x1FF;
+        let commit: u32 = (new_active << 31) | count;
+        self.regs.write32(registers::LAYER_COMMIT, commit);
+
         self.layer_back_idx ^= 1;
+        self.back_valid_count = 0;
+
+        // Zero the freshly-vacated back table so the next frame
+        // starts from a known-clean slate. Without this the user
+        // would observe stale slots from N-2 frames ago bleeding
+        // through whenever they wrote a count higher than they did
+        // in the previous frame on the same buffer. 8 KB per frame
+        // at 30 fps is < 250 KB/s of CPU traffic — trivial.
+        if let Some(map) = self.layer_table_map.as_mut() {
+            let zero = [0u8; mem::LAYER_DESCRIPTOR_SIZE];
+            let back_offset = if self.layer_back_idx == 0 {
+                0
+            } else {
+                mem::LAYER_TABLE_SIZE
+            };
+            // SAFETY: map covers `LAYER_REGION_SIZE`; offsets stay
+            // within the table size for all 256 slots.
+            unsafe {
+                let base = map.as_mut_ptr().add(back_offset);
+                for i in 0..(mem::LAYERS_PER_TABLE as usize) {
+                    let dst = base.add(i * mem::LAYER_DESCRIPTOR_SIZE);
+                    volatile_copy_to_devmem(dst, &zero);
+                }
+            }
+        }
     }
 
     /// Diagnostic: which layer table the host will write to next
