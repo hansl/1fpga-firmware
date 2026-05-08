@@ -482,9 +482,17 @@ impl Device {
     /// FPGA latches both fields on the same clock edge, so a scanline
     /// in flight cannot observe a torn commit (PROTOCOL.md §11.2).
     ///
-    /// Phase 2a is immediate-mode: after commit, the just-vacated
-    /// table is logically empty (`back_valid_count = 0`). The caller
-    /// must re-issue every layer it wants in the next frame.
+    /// **Immediate-mode contract (Phase 2a)**: every frame, the
+    /// caller is expected to re-issue [`set_layer`] for every slot
+    /// `0..N` it wants active that frame, in increasing order, and
+    /// then call this. Slots `>= N` are gated out by the `count`
+    /// field of `LAYER_COMMIT` so their (stale) bytes are never
+    /// read. We deliberately do NOT zero the back table after
+    /// flipping — a host-driven memset would race with the FPGA's
+    /// in-flight DMA reads of the just-now-old-active table, since
+    /// the host has no signal that the DMA pass for the previous
+    /// frame has completed. Stale data in slots within `0..N` is
+    /// the caller's problem; just rewrite them.
     pub fn commit_layers(&mut self) {
         // Pair with the volatile descriptor writes above: the DDR3
         // stores must be globally visible before the FPGA observes
@@ -502,30 +510,6 @@ impl Device {
 
         self.layer_back_idx ^= 1;
         self.back_valid_count = 0;
-
-        // Zero the freshly-vacated back table so the next frame
-        // starts from a known-clean slate. Without this the user
-        // would observe stale slots from N-2 frames ago bleeding
-        // through whenever they wrote a count higher than they did
-        // in the previous frame on the same buffer. 8 KB per frame
-        // at 30 fps is < 250 KB/s of CPU traffic — trivial.
-        if let Some(map) = self.layer_table_map.as_mut() {
-            let zero = [0u8; mem::LAYER_DESCRIPTOR_SIZE];
-            let back_offset = if self.layer_back_idx == 0 {
-                0
-            } else {
-                mem::LAYER_TABLE_SIZE
-            };
-            // SAFETY: map covers `LAYER_REGION_SIZE`; offsets stay
-            // within the table size for all 256 slots.
-            unsafe {
-                let base = map.as_mut_ptr().add(back_offset);
-                for i in 0..(mem::LAYERS_PER_TABLE as usize) {
-                    let dst = base.add(i * mem::LAYER_DESCRIPTOR_SIZE);
-                    volatile_copy_to_devmem(dst, &zero);
-                }
-            }
-        }
     }
 
     /// Diagnostic: which layer table the host will write to next
@@ -534,6 +518,17 @@ impl Device {
     #[inline]
     pub fn layer_back_idx(&self) -> u8 {
         self.layer_back_idx
+    }
+
+    /// Diagnostic: free-running count of layer descriptors the on-FPGA
+    /// DMA has shipped into the cache (PROTOCOL.md §3.1 LAYER_DEBUG).
+    /// Should advance by `count` every frame once `commit_layers` has
+    /// been called and the compositor is running. A static value means
+    /// the DMA isn't ticking — most often because LAYER_COMMIT.count
+    /// is still 0 or because the FPGA is in error.
+    #[inline]
+    pub fn layer_dma_descriptors(&self) -> u32 {
+        self.regs.read32(registers::LAYER_DEBUG)
     }
 
     /// Reset the texture pool: drop all uploaded handles, return the

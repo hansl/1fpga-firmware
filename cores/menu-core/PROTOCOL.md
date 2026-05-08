@@ -167,7 +167,7 @@ be written as zero for forward compatibility.
 | `0x64` | R/W | `TEX_TABLE_COUNT`    | Number of valid entries in the table (default allocation 4096; see §2.3) |
 | `0x68` | R/W | `LAYER_TABLE_BASE`   | Physical address of the 16 KB layer-table region (two 8 KB tables A/B; see §11) |
 | `0x6C` | R/W | `LAYER_COMMIT`       | Atomic frame swap: bit 31 = active table (0=A, 1=B); bits 8..0 = valid layer count (see §11) |
-| `0x70` | —   | reserved             |                                                |
+| `0x70` | R   | `LAYER_DEBUG`        | Free-running 32-bit count of layer descriptors the FPGA DMA has shipped into its cache. Diagnostic. |
 | `0x80` | R   | `PERF_CYCLES_BUSY`   | Cycles blit engine was busy (debug)            |
 | `0x84` | R   | `PERF_CMDS_EXEC`     | Commands executed (debug)                      |
 | `0x88` | R   | `PERF_BYTES_READ`    | Bytes read from DDR3 (debug, ÷64)              |
@@ -1055,13 +1055,23 @@ slot 0 paints first (back), slot 255 last (front).
 The compositor reads from whichever of A/B is currently active. The host
 prepares a frame by:
 
-1. Writing every changed slot in the **inactive** table.
-2. Writing `LAYER_COMMIT` with `bit 31` flipped and `bits 8..0` set to the
-   number of populated slots.
+1. Writing slots `0..N` of the **inactive** table — see the immediate-mode
+   contract below.
+2. Writing `LAYER_COMMIT` with `bit 31` flipped to point at the
+   just-written table and `bits 8..0` set to `N`.
 
 `LAYER_COMMIT` is read by the FPGA atomically — the active-table flip
 and the valid-count update are observed simultaneously, so a scanline in
 flight cannot see a torn commit.
+
+**Immediate-mode contract (v0):** the host is responsible for fully
+populating slots `0..N` every frame. Slots `>= N` are gated out by the
+count field and are never read, so leftover bytes there are harmless.
+The host MUST NOT bulk-zero the inactive table from CPU code: there is
+no synchronisation against the FPGA's in-flight DMA reads of the
+just-now-old-active table, so a memset would race against the previous
+frame's pass. A future protocol revision may add an FPGA-driven
+clear-on-flip for retained-mode users.
 
 ### 11.3 Solid-colour layers (Phase 2a)
 

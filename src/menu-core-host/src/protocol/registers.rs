@@ -38,6 +38,11 @@ pub const LAYER_TABLE_BASE: usize = 0x68;
 /// Bit 31 = active table (0 = A, 1 = B). Bits 8..0 = valid layer
 /// count (0..256). All other bits reserved (write 0).
 pub const LAYER_COMMIT: usize = 0x6C;
+/// Read-only diagnostic. Free-running 32-bit count of layer
+/// descriptors the on-FPGA DMA has written into the layer cache —
+/// should advance by `count` every frame once the compositor is live.
+/// Pure observability; the renderer does not depend on it.
+pub const LAYER_DEBUG: usize = 0x70;
 pub const PERF_CYCLES_BUSY: usize = 0x80;
 pub const PERF_CMDS_EXEC: usize = 0x84;
 pub const PERF_BYTES_READ: usize = 0x88;
@@ -171,5 +176,6 @@ mod tests {
         assert_eq!(TEX_TABLE_ADDR, 0x60);
         assert_eq!(LAYER_TABLE_BASE, 0x68);
         assert_eq!(LAYER_COMMIT, 0x6C);
+        assert_eq!(LAYER_DEBUG, 0x70);
     }
 }
