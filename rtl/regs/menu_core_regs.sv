@@ -23,6 +23,12 @@
 //    - RING_TAIL     (0x3C) R/W; surfaced as `ring_tail_o`
 //    - RING_KICK     (0x40) write-only pulse → `ring_kick_o`
 //    - FENCE_VALUE   (0x48) read-only, fed by `fence_value_i`
+//    - LAYER_TABLE_BASE (0x68) R/W; physical address of the 16 KB
+//                              layer region (two back-to-back 8 KB
+//                              tables, A at +0 and B at +0x2000).
+//    - LAYER_COMMIT  (0x6C) R/W; bit 31 = active table (0 = A, 1 = B),
+//                              bits 8..0 = valid layer count (0..256).
+//                              Single-write atomic frame-swap.
 //    - all other slots in 0x00..0xFF: R/W scratch
 //
 //============================================================================
@@ -53,6 +59,17 @@ module menu_core_regs (
     output logic [11:0] fb_height_o,
     output logic [13:0] fb_stride_o,
     output logic [31:0] tex_table_addr_o,
+
+    // Layer-table sideband. The host writes LAYER_TABLE_BASE once at
+    // init to point at the 16 KB layer region (two back-to-back 8 KB
+    // tables, A at +0 and B at +0x2000). LAYER_COMMIT carries the
+    // active-table selector and the valid layer count and is written
+    // atomically each frame to swap which table the compositor reads.
+    //   bit 31    = active table index (0 = A, 1 = B)
+    //   bits 8..0 = valid layer count (0..256)
+    output logic [31:0] layer_table_base_o,
+    output logic        layer_active_o,
+    output logic [8:0]  layer_count_o,
 
     // Sideband in: FPGA-driven views.
     input  logic [31:0] ring_head_i,
@@ -88,7 +105,9 @@ module menu_core_regs (
     localparam logic [5:0] IDX_FB0_ADDR       = 6'h14;   // 0x50 / 4
     localparam logic [5:0] IDX_FB1_ADDR       = 6'h15;   // 0x54 / 4
     localparam logic [5:0] IDX_FB2_ADDR       = 6'h16;   // 0x58 / 4
-    localparam logic [5:0] IDX_TEX_TABLE_ADDR = 6'h18;   // 0x60 / 4
+    localparam logic [5:0] IDX_TEX_TABLE_ADDR  = 6'h18;   // 0x60 / 4
+    localparam logic [5:0] IDX_LAYER_TABLE_BASE = 6'h1A;  // 0x68 / 4
+    localparam logic [5:0] IDX_LAYER_COMMIT     = 6'h1B;  // 0x6C / 4
 
     // The LW_H2F window is 2 MiB (21-bit address). Our register block
     // sits at host physical 0xFF210000, which is offset 0x10000 within
@@ -198,6 +217,9 @@ module menu_core_regs (
     assign fb_height_o     = scratch[IDX_FB_HEIGHT][11:0];
     assign fb_stride_o     = scratch[IDX_FB_STRIDE][13:0];
     assign tex_table_addr_o = scratch[IDX_TEX_TABLE_ADDR];
+    assign layer_table_base_o = scratch[IDX_LAYER_TABLE_BASE];
+    assign layer_active_o     = scratch[IDX_LAYER_COMMIT][31];
+    assign layer_count_o      = scratch[IDX_LAYER_COMMIT][8:0];
 
     // Suppress unused-input warnings.
     wire _unused = &{1'b0, req_read, 1'b0};

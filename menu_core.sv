@@ -347,6 +347,9 @@ wire [11:0] reg_fb_width;
 wire [11:0] reg_fb_height;
 wire [13:0] reg_fb_stride;
 wire [31:0] reg_tex_table_addr;
+wire [31:0] reg_layer_table_base;
+wire        reg_layer_active;
+wire [8:0]  reg_layer_count;
 wire [31:0] fetcher_ring_head;
 wire [31:0] fetcher_fence_value;
 wire [31:0] fetcher_error_info;
@@ -401,6 +404,10 @@ menu_core_regs u_menu_core_regs (
     .fb_height_o    (reg_fb_height),
     .fb_stride_o    (reg_fb_stride),
     .tex_table_addr_o (reg_tex_table_addr),
+
+    .layer_table_base_o (reg_layer_table_base),
+    .layer_active_o     (reg_layer_active),
+    .layer_count_o      (reg_layer_count),
 
     .ring_head_i    (fetcher_ring_head),
     .fence_value_i  (fetcher_fence_value),
@@ -621,6 +628,12 @@ assign DDRAM_WE       = blit_busy ? blit_we       : 1'b0;
 // every cycle anyway. Wire-suppress to avoid unused warnings until
 // M2c+ lets it gate a low-power idle.
 wire _unused_kick = reg_ring_kick;
+
+// Layer-table sideband: programmed by the host but consumed only
+// once the compositor's layer cache + DMA + walker land in Phase 2a
+// step 2/3. Suppress unused-warnings until then.
+wire _unused_layer = &{1'b0, reg_layer_table_base, reg_layer_active,
+                       reg_layer_count, 1'b0};
 
 ////////////////////////////////////////////////////////////////////////////
 // MISTER_FB configuration. FB_FORMAT selects BGR 32bpp so the framework
