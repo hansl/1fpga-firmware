@@ -105,6 +105,13 @@ pub enum Command {
     /// then COPY_RECTs the cached texture to the centre of the FB.
     /// Validates the FPGA's RTT path end-to-end.
     RttTest,
+
+    /// Phase 2a step 2 round-trip: write a single solid layer, commit,
+    /// sample LAYER_DEBUG over 1s to confirm the FPGA-side DMA ticks
+    /// at frame rate, then re-commit with count=0 and confirm the DMA
+    /// halts. No visual change — the colour-bar test pattern stays
+    /// (the renderer lands in step 3).
+    LayerProbe,
 }
 
 fn parse_u32_hex_or_dec(s: &str) -> Result<u32, std::num::ParseIntError> {
@@ -169,6 +176,7 @@ fn main() {
         Some(Command::TextAnim) => text_anim(base).map_err(Into::into),
         Some(Command::ClipTest) => clip_test(base).map_err(Into::into),
         Some(Command::RttTest) => rtt_test(base).map_err(Into::into),
+        Some(Command::LayerProbe) => layer_probe(base).map_err(Into::into),
         None => {
             info!(
                 "no subcommand given — re-run with `probe`, `ring-test`, `draw-test`, …, or `--print-layout`"
@@ -768,6 +776,93 @@ fn rtt_test(base: u32) -> Result<(), DeviceError> {
         "rtt-test: check HDMI — 200×200 four-quadrant tile (red TL, green TR, \
          blue BL, amber BR) centred on dark navy"
     );
+    Ok(())
+}
+
+/// Phase 2a step 2 verification.
+///
+/// Confirms three things end-to-end:
+///   1. `Device::set_layer` causes a write into the layer-table region
+///      and `Device::commit_layers` makes it visible to the FPGA via
+///      LAYER_COMMIT (single 32-bit atomic).
+///   2. The on-FPGA `layer_dma` actually fires once per vsync and
+///      reads `count` × 32 bytes from DDR3 — observed by LAYER_DEBUG
+///      advancing at frame_rate × count.
+///   3. Setting LAYER_COMMIT.count = 0 halts the DMA (the IDLE-state
+///      guard `count_i != 0` works).
+///
+/// No visual change: the renderer is not wired to the cache yet
+/// (that's step 3), so the HDMI output stays on the colour-bar test
+/// pattern regardless of what we commit.
+fn layer_probe(base: u32) -> Result<(), DeviceError> {
+    let mut device = Device::open_with(DeviceConfig {
+        base_phys_addr: base,
+        ..DeviceConfig::default()
+    })?;
+
+    let initial = device.layer_dma_descriptors();
+    println!("LAYER_DEBUG (initial): {initial}");
+
+    // Step 1: write one solid-blue layer and commit.
+    let layer = protocol::LayerDescriptor::solid(
+        0xFF_FF_00_00, // BGRA bytes [B=00, G=00, R=FF, A=FF] = red
+        100, 100, 200, 200,
+    );
+    device.set_layer(0, &layer)?;
+    let active_after = device.layer_back_idx() ^ 1; // about-to-be-active
+    device.commit_layers();
+    println!(
+        "Committed: 1 solid layer at (100,100, 200×200), active table = {}",
+        if active_after == 0 { "A" } else { "B" }
+    );
+
+    // Step 2: sample DMA tick rate over ~1 second. Expected:
+    //   delta ≈ count × frame_rate
+    // For 1280×720@30 (the compositor's nominal timing),
+    // count=1 → ~30 ticks per second.
+    let s0 = device.layer_dma_descriptors();
+    let t0 = Instant::now();
+    std::thread::sleep(Duration::from_secs(1));
+    let s1 = device.layer_dma_descriptors();
+    let elapsed = t0.elapsed();
+    let delta_running = s1.wrapping_sub(s0);
+    let rate = (delta_running as f32) / elapsed.as_secs_f32();
+    println!(
+        "running: LAYER_DEBUG {s0} → {s1} (Δ={delta_running} over {:.3}s ⇒ ~{:.1} desc/s)",
+        elapsed.as_secs_f32(),
+        rate
+    );
+    if delta_running == 0 {
+        println!(
+            "FAIL: DMA didn't tick. Check that vsync is reaching layer_dma \
+             (LAYER_TABLE_BASE programmed? LAYER_COMMIT count > 0?)."
+        );
+        return Ok(());
+    }
+
+    // Step 3: re-commit with count=0 (no intervening set_layer means
+    // back_valid_count is still 0 after the previous commit reset it).
+    device.commit_layers();
+    println!("Committed: 0 layers (count=0). DMA should halt.");
+
+    let s2 = device.layer_dma_descriptors();
+    let t1 = Instant::now();
+    std::thread::sleep(Duration::from_secs(1));
+    let s3 = device.layer_dma_descriptors();
+    let halted_delta = s3.wrapping_sub(s2);
+    println!(
+        "halted: LAYER_DEBUG {s2} → {s3} (Δ={halted_delta} over {:.3}s; expected 0)",
+        t1.elapsed().as_secs_f32()
+    );
+    if halted_delta != 0 {
+        println!(
+            "FAIL: DMA still ticking with count=0 — the count-gating guard \
+             in layer_dma's S_IDLE → S_REQ transition isn't holding."
+        );
+        return Ok(());
+    }
+
+    println!("PASS: layer plumbing + DMA + LAYER_COMMIT round-trip verified.");
     Ok(())
 }
 
