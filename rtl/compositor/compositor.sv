@@ -33,18 +33,18 @@
 //============================================================================
 
 module compositor (
-    input  logic        clk,        // CLK_VIDEO (200 MHz)
+    input  logic        clk,        // CLK_VIDEO == pixel clock (50 MHz)
     input  logic        rst_n,
 
-    // Pixel-clock enable, 1-in-4 cycles. Effective pixel rate =
-    // CLK_VIDEO / 4 = 50 MHz. video_mixer's input port `ce_pix`
-    // takes the same signal so its capture and our generator stay
-    // aligned.
+    // CE_PIXEL for the framework — always asserted because we run at
+    // the actual pixel rate. Kept as an output (rather than tied off
+    // upstream) so future variants can divide if clk_video runs
+    // faster than the pixel rate.
     output logic        ce_pix,
 
-    // Pixel data + timing for the framework's video_mixer / ASCAL.
-    // HSync / VSync are positive-polarity pulses; HBlank / VBlank
-    // are positive during the blanking interval (i.e. inverse of DE).
+    // Pixel data + timing for the framework's ASCAL. HSync / VSync
+    // are positive-polarity pulses; HBlank / VBlank are positive
+    // during the blanking interval (i.e. inverse of DE).
     output logic [7:0]  r,
     output logic [7:0]  g,
     output logic [7:0]  b,
@@ -71,20 +71,19 @@ module compositor (
     logic [11:0] hcount;
     logic [11:0] vcount;
 
-    // ---- ce_pix divider: 1-in-4 of the 200 MHz CLK_VIDEO -------------
-    logic [1:0] ce_div;
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) ce_div <= 2'd0;
-        else        ce_div <= ce_div + 2'd1;
-    end
-    assign ce_pix = (ce_div == 2'd0);
+    // ---- ce_pix is always asserted ----------------------------------
+    // CLK_VIDEO runs at the pixel rate (we bypass the framework's
+    // video_mixer, which is the only reason a 4×-pixel CLK_VIDEO with
+    // a divided ce_pix would have been required). ASCAL is happy
+    // capturing on every cycle.
+    assign ce_pix = 1'b1;
 
-    // ---- Counter advance (only on ce_pix) ----------------------------
+    // ---- Counter advance ---------------------------------------------
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             hcount <= 12'd0;
             vcount <= 12'd0;
-        end else if (ce_pix) begin
+        end else begin
             if (hcount == H_TOTAL - 1) begin
                 hcount <= 12'd0;
                 if (vcount == V_TOTAL - 1) begin
@@ -150,7 +149,7 @@ module compositor (
         end
     end
 
-    // ---- One-cycle register on the outputs (only updates on ce_pix) --
+    // ---- One-cycle register on the outputs ---------------------------
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             r      <= 8'd0;
@@ -160,7 +159,7 @@ module compositor (
             vsync  <= 1'b0;
             hblank <= 1'b1;
             vblank <= 1'b1;
-        end else if (ce_pix) begin
+        end else begin
             r      <= pix_r;
             g      <= pix_g;
             b      <= pix_b;

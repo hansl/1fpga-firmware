@@ -182,7 +182,8 @@ assign VGA_SL       = 2'b00;
 // ASCAL is the path from VGA_* to HDMI on DE10-Nano. Setting
 // VGA_SCALER=1 routes our compositor pixels through it; with =0 the
 // stream goes to the analog VGA output which the DE10-Nano doesn't
-// have, so HDMI shows black. CE_PIXEL is driven by video_mixer.
+// have, so HDMI shows black. CE_PIXEL is driven by the compositor
+// (always 1 in Phase 1; CLK_VIDEO runs at pixel rate).
 assign VGA_SCALER   = 1'b1;
 assign VGA_DISABLE  = 1'b0;  // VGA_* path is active
 assign VIDEO_ARX    = 13'd16;
@@ -206,40 +207,46 @@ assign BUTTONS   = 2'b00;
 // System clock.
 //
 // Cyclone V's clock-select blocks in sys_top require a PLL output on
-// inclk[3] (synthesis error 15836 if driven by a raw input pin). We
-// therefore instantiate a 50→50 MHz pass-through PLL here. When the blit
-// engine and command fetcher land, retune the PLL parameters (or add
-// additional outputs) for the blit and pixel clocks; see rtl/pll/pll.v.
+// inclk[3] (synthesis error 15836 if driven by a raw input pin). One
+// 50→50 MHz pass-through output drives clk_sys (compositor + blit
+// engine + ring fetcher + regs) and is re-exposed as CLK_VIDEO; the
+// compositor runs at the pixel rate with CE_PIXEL held high (no 4×
+// CLK_VIDEO requirement because we bypass video_mixer). When Phase 2
+// pushes pixel rates higher (≈75-150 MHz for native 1080p), add a
+// second PLL output for the higher clk_video and keep clk_sys at 50.
 ////////////////////////////////////////////////////////////////////////////
 
-wire clk_sys;     // 50 MHz: blit engine, ring fetcher, regs
-wire clk_video;   // 200 MHz: framework's video pipeline (4× pixel rate)
+wire clk_sys;     // 50 MHz: blit engine, ring fetcher, regs, compositor
 wire pll_locked;
 
 pll pll_inst (
 	.refclk   (CLK_50M),
 	.rst      (1'b0),
 	.outclk_0 (clk_sys),
-	.outclk_1 (clk_video),
 	.locked   (pll_locked)
 );
 
-assign CLK_VIDEO = clk_video;
+assign CLK_VIDEO = clk_sys;
 
 ////////////////////////////////////////////////////////////////////////////
-// Compositor scanout → video_mixer → VGA_* → ASCAL → HDMI.
+// Compositor scanout → VGA_* → ASCAL → HDMI.
 //
-// Drives the framework's video_mixer at the system clock instead of
-// the framework's MISTER_FB scanout. Phase 1 outputs a fixed colour-
-// bar pattern with a 1-pixel white border so we can confirm timing,
-// clocking, and HDMI sink negotiation. Subsequent phases swap the
-// pattern source for a layer-table walk that reads LAYER_TABLE_OFFSET.
+// Phase 1 emits a fixed colour-bar pattern with a 1-pixel white border
+// so we can confirm timing, clocking, and HDMI sink negotiation.
+// Subsequent phases swap the pattern source for a layer-table walk
+// that reads LAYER_TABLE_OFFSET.
 //
-// video_mixer is the framework-supplied module that handles
-// scandoubling, scanlines, gamma, and the freeze-on-HDMI-status
-// support. We feed it raw R/G/B + HSync/VSync/HBlank/VBlank from the
-// compositor; it produces the registered VGA_* outputs the framework
-// expects.
+// We deliberately bypass the framework's video_mixer:
+//   - We don't need scandoubling, hq2x, gamma, or HDMI freeze
+//     (none apply to a UI compositor that emits final pixels).
+//   - video_mixer always synthesises its scandoubler module (even
+//     with scandoubler=0), and it expects CLK_VIDEO ≥ 4× pixel rate.
+//     At 50 MHz pixel that puts CLK_VIDEO at 200 MHz, which is at
+//     the edge of Cyclone V SE-A6 fabric — Quartus reported -4.4 ns
+//     setup slack on internal video_mixer paths even at idle.
+//   - Bypassing collapses two clock domains to one (clk_sys at the
+//     pixel rate) and lets timing close cleanly. ASCAL is happy
+//     capturing on every CLK_VIDEO cycle when CE_PIXEL = 1.
 ////////////////////////////////////////////////////////////////////////////
 
 wire [7:0] comp_r, comp_g, comp_b;
@@ -247,7 +254,7 @@ wire       comp_hs, comp_vs, comp_hb, comp_vb;
 wire       comp_ce_pix;
 
 compositor u_compositor (
-	.clk     (clk_video),
+	.clk     (clk_sys),
 	.rst_n   (pll_locked),
 	.ce_pix  (comp_ce_pix),
 	.r       (comp_r),
@@ -259,39 +266,15 @@ compositor u_compositor (
 	.vblank  (comp_vb)
 );
 
-// gamma_bus is supplied by the framework (hps_io); for now we tie it
-// off so video_mixer has stable inputs. Gamma correction is disabled
-// via the GAMMA=0 parameter so the bus is unused.
-wire [21:0] gamma_bus_unused = 22'd0;
-wire        freeze_sync_unused;
-
-video_mixer #(
-	.LINE_LENGTH (1280),
-	.HALF_DEPTH  (0),
-	.GAMMA       (0)
-) u_video_mixer (
-	.CLK_VIDEO   (clk_video),
-	.CE_PIXEL    (CE_PIXEL),
-	.ce_pix      (comp_ce_pix), // 1-in-4 of CLK_VIDEO → 50 MHz pixel rate
-	.scandoubler (1'b0),
-	.hq2x        (1'b0),
-	.gamma_bus   (gamma_bus_unused),
-	.R           (comp_r),
-	.G           (comp_g),
-	.B           (comp_b),
-	.HSync       (comp_hs),
-	.VSync       (comp_vs),
-	.HBlank      (comp_hb),
-	.VBlank      (comp_vb),
-	.HDMI_FREEZE (1'b0),
-	.freeze_sync (freeze_sync_unused),
-	.VGA_R       (VGA_R),
-	.VGA_G       (VGA_G),
-	.VGA_B       (VGA_B),
-	.VGA_VS      (VGA_VS),
-	.VGA_HS      (VGA_HS),
-	.VGA_DE      (VGA_DE)
-);
+// Compositor drives VGA_* directly. CE_PIXEL is held high because
+// CLK_VIDEO == pixel rate; ASCAL captures every clock.
+assign VGA_R   = comp_r;
+assign VGA_G   = comp_g;
+assign VGA_B   = comp_b;
+assign VGA_HS  = comp_hs;
+assign VGA_VS  = comp_vs;
+assign VGA_DE  = ~(comp_hb | comp_vb);
+assign CE_PIXEL = comp_ce_pix; // currently always 1; kept symbolic
 
 ////////////////////////////////////////////////////////////////////////////
 // HPS I/O.

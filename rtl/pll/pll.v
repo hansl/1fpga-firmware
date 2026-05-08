@@ -7,23 +7,17 @@
 // because their `inclk[3]` input must come from a PLL output, not a
 // raw input pin (Cyclone V routing constraint, error 15836).
 //
-// Outputs (integer multipliers — VCO = 800 MHz, well within the
-// Cyclone V's 600-1300 MHz range):
-//   outclk_0 — 50 MHz system clock for the blit engine, ring fetcher,
-//              register file, etc. (= VCO / 16)
-//   outclk_1 — 200 MHz video clock for the framework's video_mixer.
-//              video_mixer's CLK_VIDEO needs to run at ≥ 4× the actual
-//              pixel rate (the comment in sys/video_mixer.sv says
-//              "should be multiple by (ce_pix*4)") so ASCAL/HDMI
-//              capture stages have the headroom they expect. 200 MHz
-//              is 4× our 50 MHz pixel rate; compositor gates itself
-//              with a ce_pix that pulses 1-in-4 cycles. (= VCO / 4)
+// Single 50 MHz output drives clk_sys (blit engine + ring fetcher +
+// regs) and is also re-exposed as CLK_VIDEO in menu_core.sv. The
+// compositor runs at this clock with CE_PIXEL held high; we bypass
+// the framework's video_mixer (which would have demanded
+// CLK_VIDEO ≥ 4× pixel rate). VCO = 800 MHz, well within the
+// Cyclone V's 600-1300 MHz fractional-PLL range.
 
 module pll(
 	input  refclk,
 	input  rst,
 	output outclk_0,
-	output outclk_1,
 	output locked
 );
 
@@ -31,11 +25,11 @@ altera_pll #(
 	.fractional_vco_multiplier("false"),
 	.reference_clock_frequency  ("50.0 MHz"),
 	.operation_mode             ("normal"),
-	.number_of_clocks           (2),
+	.number_of_clocks           (1),
 	.output_clock_frequency0    ("50.000000 MHz"),
 	.phase_shift0               ("0 ps"),
 	.duty_cycle0                (50),
-	.output_clock_frequency1    ("200.000000 MHz"),
+	.output_clock_frequency1    ("0 MHz"),
 	.phase_shift1               ("0 ps"),
 	.duty_cycle1                (50),
 	.output_clock_frequency2    ("0 MHz"),
@@ -64,7 +58,7 @@ altera_pll #(
 ) altera_pll_i (
 	.rst       (rst),
 	.refclk    (refclk),
-	.outclk    ({outclk_1, outclk_0}),
+	.outclk    (outclk_0),
 	.locked    (locked),
 	.fboutclk  (),
 	.fbclk     (1'b0)
