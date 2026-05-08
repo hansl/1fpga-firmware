@@ -10,25 +10,30 @@
 //    1. The video clock + timing generator drive a stable HDMI sink.
 //    2. VGA_R/G/B/HS/VS/DE wiring flows through the framework's HDMI
 //       pipeline correctly with FB_EN = 0.
-//    3. The framework's HDMI scaler (if any) and clock-select block
-//       accept our timing.
+//    3. ASCAL accepts our timing and scales it to the user's HDMI mode.
 //
 //  Phase 2 will replace the test pattern with a layer-table walk that
 //  reads from the host-managed layer descriptors at LAYER_TABLE_OFFSET
 //  and samples textures from the existing texture pool.
 //
-//  Timing is hard-coded for 1080p60 (CEA-861 mode 16):
+//  Timing: 1280×720 @ 30 Hz with stuffed blanking, 50 MHz pixel clock
+//  (== clk_sys). The framework's ASCAL accepts arbitrary core-side
+//  timings and scales to whatever HDMI mode the user has configured;
+//  we just need a stable VSYNC/HSYNC/DE pulse train. Stuffed blanking
+//  (large H_TOTAL, V_TOTAL) lets the math come out at 50 MHz × ~30 Hz
+//  with active 1280×720.
 //
-//    H: 1920 active + 88 fp + 44 sync + 148 bp = 2200 total
-//    V: 1080 active + 4 fp + 5 sync + 36 bp   = 1125 total
-//    Pixel clock: 148.5 MHz
+//    H: 1280 active + 386 blank = 1666 total
+//    V:  720 active + 280 blank = 1000 total
+//    => 50 MHz / (1666 × 1000) ≈ 30.01 Hz
 //
-//  HSYNC and VSYNC are positive-polarity per CEA-861.
+//  HSYNC and VSYNC are positive-polarity (matches what most ASCAL
+//  configurations and HDMI sinks accept).
 //
 //============================================================================
 
 module compositor (
-    input  logic        clk,        // pixel clock (148.5 MHz for 1080p60)
+    input  logic        clk,        // pixel clock (50 MHz here)
     input  logic        rst_n,
 
     // Video output to the framework's HDMI pipeline (or external scaler).
@@ -40,20 +45,20 @@ module compositor (
     output logic        vga_de
 );
 
-    // ---- 1080p60 timing constants (CEA-861 mode 16) -------------------
-    localparam int H_ACTIVE = 1920;
-    localparam int H_FP     = 88;
-    localparam int H_SYNC   = 44;
-    localparam int H_BP     = 148;
-    localparam int H_TOTAL  = H_ACTIVE + H_FP + H_SYNC + H_BP; // 2200
+    // ---- Timing constants (1280×720 @ 30 Hz, 50 MHz pixel clock) ------
+    localparam int H_ACTIVE = 1280;
+    localparam int H_FP     = 110;
+    localparam int H_SYNC   = 40;
+    localparam int H_BP     = 236;
+    localparam int H_TOTAL  = H_ACTIVE + H_FP + H_SYNC + H_BP; // 1666
 
-    localparam int V_ACTIVE = 1080;
-    localparam int V_FP     = 4;
+    localparam int V_ACTIVE = 720;
+    localparam int V_FP     = 5;
     localparam int V_SYNC   = 5;
-    localparam int V_BP     = 36;
-    localparam int V_TOTAL  = V_ACTIVE + V_FP + V_SYNC + V_BP; // 1125
+    localparam int V_BP     = 270;
+    localparam int V_TOTAL  = V_ACTIVE + V_FP + V_SYNC + V_BP; // 1000
 
-    // Counter widths sized to V_TOTAL=1125 → 11 bits.
+    // Counter widths sized to H_TOTAL=1666 → 11 bits, V_TOTAL=1000 → 10 bits.
     logic [11:0] hcount;
     logic [11:0] vcount;
 
@@ -86,11 +91,11 @@ module compositor (
     wire v_active  = (vcount < V_ACTIVE);
 
     // ---- Test pattern -------------------------------------------------
-    // 8 vertical color bars across the screen (240px each) + 1-pixel
-    // white border. Lets us eyeball that DE / sync are aligned and the
-    // whole screen is being addressed.
+    // 8 vertical color bars across the screen + 1-pixel white border.
+    // Lets us eyeball that DE / sync are aligned and the whole screen
+    // is being addressed. With H_ACTIVE = 1280, /160 gives us 8 bars.
     logic [2:0] bar_idx;
-    assign bar_idx = hcount[10:8]; // groups of 256, close enough to 240
+    assign bar_idx = hcount[9:7]; // groups of 128, close enough to 160
 
     logic [7:0] bar_r, bar_g, bar_b;
     always_comb begin

@@ -7,36 +7,32 @@
 // because their `inclk[3]` input must come from a PLL output, not a
 // raw input pin (Cyclone V routing constraint, error 15836).
 //
-// Outputs:
-//   outclk_0 — 49.5 MHz system clock for the blit engine, ring
-//              fetcher, register file, etc. (NOT 50 MHz: fractional
-//              VCO doesn't include exactly-50 MHz as a legal output
-//              counter setting; 49.5 MHz is the closest legal value.
-//              Functionally equivalent — 1 % slower than the prior
-//              integer-PLL config, transparent to all downstream
-//              consumers including the framework's DDR3 controller.)
-//   outclk_1 — 148.5 MHz video clock used by the compositor scanout
-//              (see rtl/compositor/compositor.sv) for 1080p60 output.
-//              Both outputs share VCO = 1485 MHz; outclk_0 = VCO/30,
-//              outclk_1 = VCO/10. Single fractional PLL instance.
+// 50 MHz integer pass-through. The compositor scanout (Phase 1+) uses
+// the same clock as both pixel clock and system clock; the framework's
+// ASCAL handles upscaling our compositor output to the HDMI mode the
+// user has configured. A fractional VCO would allow generating a
+// 1080p60-native 148.5 MHz pixel clock here, but the (49.5, 148.5) MHz
+// pair pushes the VCO past Cyclone V's ~1300 MHz upper limit and the
+// PLL fails to lock at runtime — staying with integer multiplication
+// is reliable and the perf hit is tiny (compositor doesn't need to
+// run that fast for our use case).
 
 module pll(
 	input  refclk,
 	input  rst,
 	output outclk_0,
-	output outclk_1,
 	output locked
 );
 
 altera_pll #(
-	.fractional_vco_multiplier("true"),
+	.fractional_vco_multiplier("false"),
 	.reference_clock_frequency  ("50.0 MHz"),
 	.operation_mode             ("normal"),
-	.number_of_clocks           (2),
-	.output_clock_frequency0    ("49.500000 MHz"),
+	.number_of_clocks           (1),
+	.output_clock_frequency0    ("50.000000 MHz"),
 	.phase_shift0               ("0 ps"),
 	.duty_cycle0                (50),
-	.output_clock_frequency1    ("148.500000 MHz"),
+	.output_clock_frequency1    ("0 MHz"),
 	.phase_shift1               ("0 ps"),
 	.duty_cycle1                (50),
 	.output_clock_frequency2    ("0 MHz"),
@@ -65,7 +61,7 @@ altera_pll #(
 ) altera_pll_i (
 	.rst       (rst),
 	.refclk    (refclk),
-	.outclk    ({outclk_1, outclk_0}),
+	.outclk    (outclk_0),
 	.locked    (locked),
 	.fboutclk  (),
 	.fbclk     (1'b0)

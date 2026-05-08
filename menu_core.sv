@@ -214,17 +214,19 @@ assign BUTTONS   = 2'b00;
 ////////////////////////////////////////////////////////////////////////////
 
 wire clk_sys;
-wire clk_video;
 wire pll_locked;
 
 pll pll_inst (
 	.refclk   (CLK_50M),
 	.rst      (1'b0),
 	.outclk_0 (clk_sys),
-	.outclk_1 (clk_video),
 	.locked   (pll_locked)
 );
 
+// Compositor uses the same 50 MHz clock as everything else. ASCAL
+// scales our output to the user's HDMI mode regardless of input
+// timing, so we don't need a separate higher-rate pixel clock.
+wire clk_video = clk_sys;
 assign CLK_VIDEO = clk_video;
 
 ////////////////////////////////////////////////////////////////////////////
