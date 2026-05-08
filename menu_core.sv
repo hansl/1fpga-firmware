@@ -409,6 +409,8 @@ menu_core_regs u_menu_core_regs (
     .layer_active_o     (reg_layer_active),
     .layer_count_o      (reg_layer_count),
 
+    .layer_descriptors_i (layer_dma_descriptors),
+
     .ring_head_i    (fetcher_ring_head),
     .fence_value_i  (fetcher_fence_value),
     .frame_count_i  (swap_frame_count),
@@ -609,31 +611,110 @@ blit_engine u_blit_engine (
     .ddram_dout_valid_i (DDRAM_DOUT_READY)
 );
 
-// DDRAM_* mux: blit engine owns the bus while it's busy (writes only),
-// fetcher otherwise (reads only). Read-data flows back to the fetcher
-// regardless — only the request side is muxed.
-assign DDRAM_ADDR     = blit_busy ? blit_addr     : fetch_addr;
-assign DDRAM_BURSTCNT = blit_busy ? blit_burstcnt : fetch_burstcnt;
-assign DDRAM_BE       = blit_busy ? blit_be       : fetch_be;
-assign DDRAM_DIN      = blit_busy ? blit_din      : 64'd0;
-assign DDRAM_RD       = blit_busy ? blit_rd       : fetch_rd;
-assign DDRAM_WE       = blit_busy ? blit_we       : 1'b0;
-// DDRAM_DOUT / DDRAM_DOUT_READY are routed in parallel to both the
-// fetcher and the blit_engine read paths. Only one is actively waiting
-// for a response at any time (fetcher when blit_busy=0, blit when
-// blit_busy=1), so the unintended consumer just doesn't sample the
-// signal.
+////////////////////////////////////////////////////////////////////////////
+// Layer-cache + DMA (Phase 2a step 2).
+//
+// On every vsync rising edge, layer_dma fetches `layer_count`
+// descriptors starting at the active half of `layer_table_base`
+// (PROTOCOL.md §11.2) and writes them into layer_cache. The renderer
+// (step 3) consumes the cache via its read port; for step 2 the read
+// port is held idle (slot 0) and its output is wire-suppressed.
+////////////////////////////////////////////////////////////////////////////
+
+// Edge-detect on compositor vsync (compositor's own clock = clk_sys).
+logic prev_comp_vs;
+always_ff @(posedge clk_sys) prev_comp_vs <= comp_vs;
+wire vsync_rising = comp_vs & ~prev_comp_vs;
+
+// Active-table base = layer_table_base + (active ? 0x2000 : 0x0).
+// 0x2000 = LAYER_TABLE_SIZE = 256 * 32 bytes.
+wire [31:0] active_layer_base = reg_layer_table_base
+                              + (reg_layer_active ? 32'h0000_2000 : 32'd0);
+
+// layer_dma → layer_cache write port.
+wire [7:0]   cache_wr_slot;
+wire [255:0] cache_wr_data;
+wire         cache_wr_en;
+
+// layer_cache read port (consumed by step 3 renderer; idle for now).
+wire [255:0] cache_rd_data;
+
+layer_cache u_layer_cache (
+    .clk        (clk_sys),
+    .wr_slot_i  (cache_wr_slot),
+    .wr_data_i  (cache_wr_data),
+    .wr_en_i    (cache_wr_en),
+    .rd_slot_i  (8'd0),
+    .rd_data_o  (cache_rd_data)
+);
+
+// Step 2 only writes the cache; the read port is stubbed. Suppress the
+// unused-output warning until the renderer in step 3 consumes it.
+wire _unused_cache_rd = &{1'b0, cache_rd_data, 1'b0};
+
+// layer_dma → DDRAM master signals.
+wire [28:0] layer_dma_addr;
+wire [7:0]  layer_dma_burstcnt;
+wire [7:0]  layer_dma_be;
+wire        layer_dma_rd;
+wire        layer_dma_busy;
+wire        layer_dma_done;
+wire [31:0] layer_dma_descriptors;
+
+layer_dma u_layer_dma (
+    .clk          (clk_sys),
+    .rst_n        (fetcher_rst_n),
+    .start_i      (vsync_rising),
+    .base_i       (active_layer_base),
+    .count_i      (reg_layer_count),
+    .cache_slot_o (cache_wr_slot),
+    .cache_data_o (cache_wr_data),
+    .cache_we_o   (cache_wr_en),
+    .ddram_addr_o       (layer_dma_addr),
+    .ddram_burstcnt_o   (layer_dma_burstcnt),
+    .ddram_be_o         (layer_dma_be),
+    .ddram_rd_o         (layer_dma_rd),
+    .ddram_busy_i       (DDRAM_BUSY),
+    .ddram_dout_i       (DDRAM_DOUT),
+    .ddram_dout_valid_i (DDRAM_DOUT_READY),
+    .busy_o             (layer_dma_busy),
+    .done_pulse_o       (layer_dma_done),
+    .descriptors_o      (layer_dma_descriptors)
+);
+
+// DDRAM_* mux. Priority: blit_engine > layer_dma > ring_fetcher.
+// blit_engine has hard real-time deadlines through the fence pipeline
+// so it always wins; layer_dma runs once per frame in VBlank and only
+// preempts the fetcher when its `busy_o` is high; otherwise the
+// fetcher drives the bus. Reads return on a shared dout bus — each
+// consumer only samples valid pulses while it has the bus, so cross-
+// talk is not possible.
+wire layer_dma_owns_bus = layer_dma_busy & ~blit_busy;
+
+assign DDRAM_ADDR     = blit_busy        ? blit_addr
+                      : layer_dma_owns_bus ? layer_dma_addr
+                      : fetch_addr;
+assign DDRAM_BURSTCNT = blit_busy        ? blit_burstcnt
+                      : layer_dma_owns_bus ? layer_dma_burstcnt
+                      : fetch_burstcnt;
+assign DDRAM_BE       = blit_busy        ? blit_be
+                      : layer_dma_owns_bus ? layer_dma_be
+                      : fetch_be;
+assign DDRAM_DIN      = blit_busy ? blit_din : 64'd0;
+assign DDRAM_RD       = blit_busy        ? blit_rd
+                      : layer_dma_owns_bus ? layer_dma_rd
+                      : fetch_rd;
+assign DDRAM_WE       = blit_busy ? blit_we : 1'b0;
 
 // reg_ring_kick is currently advisory — the fetcher polls RING_TAIL
 // every cycle anyway. Wire-suppress to avoid unused warnings until
 // M2c+ lets it gate a low-power idle.
 wire _unused_kick = reg_ring_kick;
 
-// Layer-table sideband: programmed by the host but consumed only
-// once the compositor's layer cache + DMA + walker land in Phase 2a
-// step 2/3. Suppress unused-warnings until then.
-wire _unused_layer = &{1'b0, reg_layer_table_base, reg_layer_active,
-                       reg_layer_count, 1'b0};
+// layer_dma_done isn't consumed yet (step 3 will gate the renderer
+// off it). Same for layer_active_o — only used inside the active-base
+// calc. Both quietly used / suppressed.
+wire _unused_layer = &{1'b0, layer_dma_done, 1'b0};
 
 ////////////////////////////////////////////////////////////////////////////
 // MISTER_FB configuration. FB_FORMAT selects BGR 32bpp so the framework

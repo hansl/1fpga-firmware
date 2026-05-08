@@ -29,6 +29,10 @@
 //    - LAYER_COMMIT  (0x6C) R/W; bit 31 = active table (0 = A, 1 = B),
 //                              bits 8..0 = valid layer count (0..256).
 //                              Single-write atomic frame-swap.
+//    - LAYER_DEBUG   (0x70) R-only; free-running count of layer
+//                              descriptors the DMA has shipped into
+//                              the cache (sideband from `layer_dma`).
+//                              Diagnostic only.
 //    - all other slots in 0x00..0xFF: R/W scratch
 //
 //============================================================================
@@ -71,6 +75,12 @@ module menu_core_regs (
     output logic        layer_active_o,
     output logic [8:0]  layer_count_o,
 
+    // Compositor observability — surfaces through LAYER_DEBUG (0x70).
+    // descriptors_i is a free-running count of layer descriptors the
+    // DMA has written into the cache, so the host can verify it is
+    // ticking at frame rate (count × frames per second).
+    input  logic [31:0] layer_descriptors_i,
+
     // Sideband in: FPGA-driven views.
     input  logic [31:0] ring_head_i,
     input  logic [31:0] fence_value_i,
@@ -108,6 +118,7 @@ module menu_core_regs (
     localparam logic [5:0] IDX_TEX_TABLE_ADDR  = 6'h18;   // 0x60 / 4
     localparam logic [5:0] IDX_LAYER_TABLE_BASE = 6'h1A;  // 0x68 / 4
     localparam logic [5:0] IDX_LAYER_COMMIT     = 6'h1B;  // 0x6C / 4
+    localparam logic [5:0] IDX_LAYER_DEBUG      = 6'h1C;  // 0x70 / 4
 
     // The LW_H2F window is 2 MiB (21-bit address). Our register block
     // sits at host physical 0xFF210000, which is offset 0x10000 within
@@ -137,6 +148,7 @@ module menu_core_regs (
                 IDX_FB_STATE:    req_readdata = fb_state_i;
                 IDX_RING_HEAD:   req_readdata = ring_head_i;
                 IDX_FENCE_VALUE: req_readdata = fence_value_i;
+                IDX_LAYER_DEBUG: req_readdata = layer_descriptors_i;
                 default:         req_readdata = scratch[reg_idx];
             endcase
         end
@@ -172,7 +184,8 @@ module menu_core_regs (
                     IDX_ID, IDX_STATUS, IDX_ERROR_INFO,
                     IDX_VSYNC_COUNT, IDX_FRAME_COUNT,
                     IDX_VIDEO_INFO, IDX_FB_STATE,
-                    IDX_RING_HEAD, IDX_FENCE_VALUE: ;
+                    IDX_RING_HEAD, IDX_FENCE_VALUE,
+                    IDX_LAYER_DEBUG: ;
 
                     IDX_CONTROL: begin
                         if (req_byteenable[0]) begin
