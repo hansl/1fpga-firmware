@@ -89,7 +89,6 @@ quartus-shell:
 # Deploy the built menu-core .rbf to the device
 deploy-menu-core: build-menu-core
     scp cores/menu-core-fpga/output_files/menu_core.rbf root@{{mister_ip}}:/media/fat/menu.rbf
-    ssh root@{{mister_ip}} 'killall -9 MiSTer one_fpga && /media/fat/MiSTer & && sleep 5 && killall -9 MiSTer'
 
 # Cross-compile the menu-core host probe binary for armv7 (musl, static)
 # Uses a separate community image because the device's glibc is older
