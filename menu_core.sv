@@ -648,16 +648,24 @@ wire _unused_kick = reg_ring_kick;
 ////////////////////////////////////////////////////////////////////////////
 
 `ifdef MISTER_FB
-// Compositor scanout drives HDMI via VGA_*; MISTER_FB stays idle.
+// Compositor scanout drives HDMI via VGA_* → ASCAL; MISTER_FB stays idle.
 // Sentinel zero values keep the framework from latching stale FB
 // geometry.
+//
+// FB_FORCE_BLANK MUST be 0 even though MISTER_FB is unused. In
+// sys_top.v the signal ANDs into the HDMI shadowmask (`dis_output`,
+// line 1134/1155): `dis <= fb_force_blank & ~LFB_EN; .din(dis_output
+// ? 24'd0 : hdmi_data)`. With LFB_EN low (Linux fb not in use) and
+// FB_FORCE_BLANK=1, the framework masks every HDMI pixel to zero —
+// even when our compositor is driving VGA_* correctly through ASCAL.
+// 0 lets ASCAL's pixels reach the HDMI transmitter.
 assign FB_EN          = 1'b0;
 assign FB_FORMAT      = 5'b00000;
 assign FB_WIDTH       = 12'd0;
 assign FB_HEIGHT      = 12'd0;
 assign FB_BASE        = 32'd0;
 assign FB_STRIDE      = 14'd0;
-assign FB_FORCE_BLANK = 1'b1;
+assign FB_FORCE_BLANK = 1'b0;
 `endif
 
 ////////////////////////////////////////////////////////////////////////////
