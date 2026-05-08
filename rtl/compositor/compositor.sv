@@ -36,13 +36,16 @@ module compositor (
     input  logic        clk,        // pixel clock (50 MHz here)
     input  logic        rst_n,
 
-    // Video output to the framework's HDMI pipeline (or external scaler).
-    output logic [7:0]  vga_r,
-    output logic [7:0]  vga_g,
-    output logic [7:0]  vga_b,
-    output logic        vga_hs,
-    output logic        vga_vs,
-    output logic        vga_de
+    // Pixel data + timing for the framework's video_mixer / ASCAL.
+    // HSync / VSync are positive-polarity pulses; HBlank / VBlank
+    // are positive during the blanking interval (i.e. inverse of DE).
+    output logic [7:0]  r,
+    output logic [7:0]  g,
+    output logic [7:0]  b,
+    output logic        hsync,
+    output logic        vsync,
+    output logic        hblank,
+    output logic        vblank
 );
 
     // ---- Timing constants (1280×720 @ 30 Hz, 50 MHz pixel clock) ------
@@ -136,19 +139,21 @@ module compositor (
     // ---- One-cycle register on the outputs to keep IO timing clean ----
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            vga_r  <= 8'd0;
-            vga_g  <= 8'd0;
-            vga_b  <= 8'd0;
-            vga_hs <= 1'b0;
-            vga_vs <= 1'b0;
-            vga_de <= 1'b0;
+            r      <= 8'd0;
+            g      <= 8'd0;
+            b      <= 8'd0;
+            hsync  <= 1'b0;
+            vsync  <= 1'b0;
+            hblank <= 1'b1;
+            vblank <= 1'b1;
         end else begin
-            vga_r  <= pix_r;
-            vga_g  <= pix_g;
-            vga_b  <= pix_b;
-            vga_hs <= h_in_sync;
-            vga_vs <= v_in_sync;
-            vga_de <= h_active && v_active;
+            r      <= pix_r;
+            g      <= pix_g;
+            b      <= pix_b;
+            hsync  <= h_in_sync;
+            vsync  <= v_in_sync;
+            hblank <= ~h_active;
+            vblank <= ~v_active;
         end
     end
 

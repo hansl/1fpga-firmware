@@ -182,12 +182,11 @@ assign VGA_SL       = 2'b00;
 // ASCAL is the path from VGA_* to HDMI on DE10-Nano. Setting
 // VGA_SCALER=1 routes our compositor pixels through it; with =0 the
 // stream goes to the analog VGA output which the DE10-Nano doesn't
-// have, so HDMI shows black.
+// have, so HDMI shows black. CE_PIXEL is driven by video_mixer.
 assign VGA_SCALER   = 1'b1;
 assign VGA_DISABLE  = 1'b0;  // VGA_* path is active
 assign VIDEO_ARX    = 13'd16;
 assign VIDEO_ARY    = 13'd9;
-assign CE_PIXEL     = 1'b1;
 assign HDMI_FREEZE    = 1'b0;
 assign HDMI_BLACKOUT  = 1'b0;
 assign HDMI_BOB_DEINT = 1'b0;
@@ -230,24 +229,68 @@ wire clk_video = clk_sys;
 assign CLK_VIDEO = clk_video;
 
 ////////////////////////////////////////////////////////////////////////////
-// Compositor scanout.
+// Compositor scanout → video_mixer → VGA_* → ASCAL → HDMI.
 //
-// Drives VGA_R/G/B/HS/VS/DE at the 1080p60 video clock instead of the
-// framework's MISTER_FB scanout. Phase 1 outputs a fixed colour-bar
-// pattern with a 1-pixel white border so we can confirm timing,
+// Drives the framework's video_mixer at the system clock instead of
+// the framework's MISTER_FB scanout. Phase 1 outputs a fixed colour-
+// bar pattern with a 1-pixel white border so we can confirm timing,
 // clocking, and HDMI sink negotiation. Subsequent phases swap the
 // pattern source for a layer-table walk that reads LAYER_TABLE_OFFSET.
+//
+// video_mixer is the framework-supplied module that handles
+// scandoubling, scanlines, gamma, and the freeze-on-HDMI-status
+// support. We feed it raw R/G/B + HSync/VSync/HBlank/VBlank from the
+// compositor; it produces the registered VGA_* outputs the framework
+// expects.
 ////////////////////////////////////////////////////////////////////////////
 
+wire [7:0] comp_r, comp_g, comp_b;
+wire       comp_hs, comp_vs, comp_hb, comp_vb;
+
 compositor u_compositor (
-	.clk    (clk_video),
-	.rst_n  (pll_locked),
-	.vga_r  (VGA_R),
-	.vga_g  (VGA_G),
-	.vga_b  (VGA_B),
-	.vga_hs (VGA_HS),
-	.vga_vs (VGA_VS),
-	.vga_de (VGA_DE)
+	.clk     (clk_video),
+	.rst_n   (pll_locked),
+	.r       (comp_r),
+	.g       (comp_g),
+	.b       (comp_b),
+	.hsync   (comp_hs),
+	.vsync   (comp_vs),
+	.hblank  (comp_hb),
+	.vblank  (comp_vb)
+);
+
+// gamma_bus is supplied by the framework (hps_io); for now we tie it
+// off so video_mixer has stable inputs. Gamma correction is disabled
+// via the GAMMA=0 parameter so the bus is unused.
+wire [21:0] gamma_bus_unused = 22'd0;
+wire        freeze_sync_unused;
+
+video_mixer #(
+	.LINE_LENGTH (1280),
+	.HALF_DEPTH  (0),
+	.GAMMA       (0)
+) u_video_mixer (
+	.CLK_VIDEO   (clk_video),
+	.CE_PIXEL    (CE_PIXEL),
+	.ce_pix      (1'b1),       // input pixel clock enable: every cycle
+	.scandoubler (1'b0),
+	.hq2x        (1'b0),
+	.gamma_bus   (gamma_bus_unused),
+	.R           (comp_r),
+	.G           (comp_g),
+	.B           (comp_b),
+	.HSync       (comp_hs),
+	.VSync       (comp_vs),
+	.HBlank      (comp_hb),
+	.VBlank      (comp_vb),
+	.HDMI_FREEZE (1'b0),
+	.freeze_sync (freeze_sync_unused),
+	.VGA_R       (VGA_R),
+	.VGA_G       (VGA_G),
+	.VGA_B       (VGA_B),
+	.VGA_VS      (VGA_VS),
+	.VGA_HS      (VGA_HS),
+	.VGA_DE      (VGA_DE)
 );
 
 ////////////////////////////////////////////////////////////////////////////
