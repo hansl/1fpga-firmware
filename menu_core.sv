@@ -212,20 +212,18 @@ assign BUTTONS   = 2'b00;
 // additional outputs) for the blit and pixel clocks; see rtl/pll/pll.v.
 ////////////////////////////////////////////////////////////////////////////
 
-wire clk_sys;
+wire clk_sys;     // 50 MHz: blit engine, ring fetcher, regs
+wire clk_video;   // 200 MHz: framework's video pipeline (4× pixel rate)
 wire pll_locked;
 
 pll pll_inst (
 	.refclk   (CLK_50M),
 	.rst      (1'b0),
 	.outclk_0 (clk_sys),
+	.outclk_1 (clk_video),
 	.locked   (pll_locked)
 );
 
-// Compositor uses the same 50 MHz clock as everything else. ASCAL
-// scales our output to the user's HDMI mode regardless of input
-// timing, so we don't need a separate higher-rate pixel clock.
-wire clk_video = clk_sys;
 assign CLK_VIDEO = clk_video;
 
 ////////////////////////////////////////////////////////////////////////////
@@ -246,10 +244,12 @@ assign CLK_VIDEO = clk_video;
 
 wire [7:0] comp_r, comp_g, comp_b;
 wire       comp_hs, comp_vs, comp_hb, comp_vb;
+wire       comp_ce_pix;
 
 compositor u_compositor (
 	.clk     (clk_video),
 	.rst_n   (pll_locked),
+	.ce_pix  (comp_ce_pix),
 	.r       (comp_r),
 	.g       (comp_g),
 	.b       (comp_b),
@@ -272,7 +272,7 @@ video_mixer #(
 ) u_video_mixer (
 	.CLK_VIDEO   (clk_video),
 	.CE_PIXEL    (CE_PIXEL),
-	.ce_pix      (1'b1),       // input pixel clock enable: every cycle
+	.ce_pix      (comp_ce_pix), // 1-in-4 of CLK_VIDEO → 50 MHz pixel rate
 	.scandoubler (1'b0),
 	.hq2x        (1'b0),
 	.gamma_bus   (gamma_bus_unused),

@@ -33,8 +33,14 @@
 //============================================================================
 
 module compositor (
-    input  logic        clk,        // pixel clock (50 MHz here)
+    input  logic        clk,        // CLK_VIDEO (200 MHz)
     input  logic        rst_n,
+
+    // Pixel-clock enable, 1-in-4 cycles. Effective pixel rate =
+    // CLK_VIDEO / 4 = 50 MHz. video_mixer's input port `ce_pix`
+    // takes the same signal so its capture and our generator stay
+    // aligned.
+    output logic        ce_pix,
 
     // Pixel data + timing for the framework's video_mixer / ASCAL.
     // HSync / VSync are positive-polarity pulses; HBlank / VBlank
@@ -65,12 +71,20 @@ module compositor (
     logic [11:0] hcount;
     logic [11:0] vcount;
 
-    // ---- Counter advance ---------------------------------------------
+    // ---- ce_pix divider: 1-in-4 of the 200 MHz CLK_VIDEO -------------
+    logic [1:0] ce_div;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) ce_div <= 2'd0;
+        else        ce_div <= ce_div + 2'd1;
+    end
+    assign ce_pix = (ce_div == 2'd0);
+
+    // ---- Counter advance (only on ce_pix) ----------------------------
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             hcount <= 12'd0;
             vcount <= 12'd0;
-        end else begin
+        end else if (ce_pix) begin
             if (hcount == H_TOTAL - 1) begin
                 hcount <= 12'd0;
                 if (vcount == V_TOTAL - 1) begin
@@ -136,7 +150,7 @@ module compositor (
         end
     end
 
-    // ---- One-cycle register on the outputs to keep IO timing clean ----
+    // ---- One-cycle register on the outputs (only updates on ce_pix) --
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             r      <= 8'd0;
@@ -146,7 +160,7 @@ module compositor (
             vsync  <= 1'b0;
             hblank <= 1'b1;
             vblank <= 1'b1;
-        end else begin
+        end else if (ce_pix) begin
             r      <= pix_r;
             g      <= pix_g;
             b      <= pix_b;
