@@ -80,7 +80,6 @@ module compositor #(
     output logic [15:0] tex_id_o,
     output logic [15:0] tex_src_x_o,
     output logic [15:0] tex_ty_o,
-    output logic [10:0] tex_dst_x_lo_o,
     output logic [11:0] tex_dst_w_o,
 
     // Line buffer read port (painter side). Address = (x - dst_x_lo)
@@ -184,19 +183,34 @@ module compositor #(
 
     // ---- Topmost-textured selector + kick generator -----------------
     // After the filter completes, find the highest-index entry whose
-    // tex_id != 0xFFFF. That entry is the one the texture_unit will
-    // sample on the next scanline; other textured entries (if any)
-    // still fall through to the painter's debug-magenta branch.
-    logic       topmost_tex_valid;
-    logic [4:0] topmost_tex_idx;
+    // tex_id != 0xFFFF. The 16-deep priority scan is too long to
+    // chain into the painter's already 16-deep mux loop at 100 MHz
+    // (-1.1 ns slack observed), so the combinational result is
+    // captured into registers each cycle. The active list is stable
+    // for the duration of the active scanout, so a 1-cycle delay is
+    // invisible.
+    logic       topmost_tex_valid_c;
+    logic [4:0] topmost_tex_idx_c;
     always_comb begin
-        topmost_tex_valid = 1'b0;
-        topmost_tex_idx   = 5'd0;
+        topmost_tex_valid_c = 1'b0;
+        topmost_tex_idx_c   = 5'd0;
         for (int i = 0; i < MAX_ACTIVE; i++) begin
             if (i < int'(active_count) && active_tex_id[i] != 16'hFFFF) begin
-                topmost_tex_valid = 1'b1;
-                topmost_tex_idx   = i[4:0];
+                topmost_tex_valid_c = 1'b1;
+                topmost_tex_idx_c   = i[4:0];
             end
+        end
+    end
+
+    logic       topmost_tex_valid;
+    logic [4:0] topmost_tex_idx;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            topmost_tex_valid <= 1'b0;
+            topmost_tex_idx   <= 5'd0;
+        end else begin
+            topmost_tex_valid <= topmost_tex_valid_c;
+            topmost_tex_idx   <= topmost_tex_idx_c;
         end
     end
 
@@ -206,13 +220,12 @@ module compositor #(
     // on the clk_sys side to catch the rising edge.
     wire kick_window = (hcount >= 12'(H_ACTIVE + 280))
                     && (hcount <  12'(H_ACTIVE + 340));
-    assign tex_kick_o     = kick_window && topmost_tex_valid;
-    assign tex_id_o       = active_tex_id [topmost_tex_idx];
-    assign tex_src_x_o    = active_src_x  [topmost_tex_idx];
-    assign tex_ty_o       = active_ty     [topmost_tex_idx];
-    assign tex_dst_x_lo_o = active_dst_x_lo[topmost_tex_idx][10:0];
-    assign tex_dst_w_o    = active_dst_x_hi[topmost_tex_idx][11:0]
-                          - active_dst_x_lo[topmost_tex_idx][11:0];
+    assign tex_kick_o  = kick_window && topmost_tex_valid;
+    assign tex_id_o    = active_tex_id [topmost_tex_idx];
+    assign tex_src_x_o = active_src_x  [topmost_tex_idx];
+    assign tex_ty_o    = active_ty     [topmost_tex_idx];
+    assign tex_dst_w_o = active_dst_x_hi[topmost_tex_idx][11:0]
+                       - active_dst_x_lo[topmost_tex_idx][11:0];
 
     // ---- Per-pixel painter ------------------------------------------
     // Scan low-to-high so the topmost (highest-index) hit wins via

@@ -46,7 +46,6 @@ module texture_unit #(
     input  logic [15:0] tex_id_i,
     input  logic [15:0] ty_i,         // texture-Y for this scanline
     input  logic [15:0] src_x_i,      // texture-X start (MUST be even)
-    input  logic [10:0] dst_x_lo_i,   // line buffer pixel start (MUST be even)
     input  logic [11:0] dst_w_i,      // pixel count (will be rounded up to even)
 
     // Texture descriptor table base (programmed by host).
@@ -88,7 +87,6 @@ module texture_unit #(
     logic [15:0]  tex_id_latched;
     logic [15:0]  ty_latched;
     logic [15:0]  src_x_latched;
-    logic [10:0]  dst_x_lo_latched;
     logic [11:0]  dst_w_clipped;
     logic [1:0]   desc_beat_q;
     logic [255:0] desc_beats_q;
@@ -121,7 +119,6 @@ module texture_unit #(
             tex_id_latched   <= 16'd0;
             ty_latched       <= 16'd0;
             src_x_latched    <= 16'd0;
-            dst_x_lo_latched <= 11'd0;
             dst_w_clipped    <= 12'd0;
             desc_beat_q      <= 2'd0;
             desc_beats_q     <= 256'd0;
@@ -146,7 +143,6 @@ module texture_unit #(
                         tex_id_latched   <= tex_id_i;
                         ty_latched       <= ty_i;
                         src_x_latched    <= src_x_i;
-                        dst_x_lo_latched <= dst_x_lo_i;
                         dst_w_clipped    <= dst_w_sat;
                         row_beats_total  <= beats_needed;
                         desc_beat_q      <= 2'd0;

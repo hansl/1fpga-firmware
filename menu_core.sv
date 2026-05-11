@@ -259,7 +259,6 @@ wire         comp_tex_kick;
 wire [15:0]  comp_tex_id;
 wire [15:0]  comp_tex_src_x;
 wire [15:0]  comp_tex_ty;
-wire [10:0]  comp_tex_dst_x_lo;
 wire [11:0]  comp_tex_dst_w;
 // Line buffer read port (clk_video).
 wire [9:0]   comp_line_buf_addr;
@@ -313,7 +312,6 @@ compositor u_compositor (
 	.tex_id_o        (comp_tex_id),
 	.tex_src_x_o     (comp_tex_src_x),
 	.tex_ty_o        (comp_tex_ty),
-	.tex_dst_x_lo_o  (comp_tex_dst_x_lo),
 	.tex_dst_w_o     (comp_tex_dst_w),
 	.line_buf_addr_o (comp_line_buf_addr),
 	.line_buf_data_i (comp_line_buf_data)
@@ -741,17 +739,15 @@ wire tex_kick_rising = tex_kick_sync_1 & ~tex_kick_sync_2;
 
 // CDC: multi-bit params (stable while comp_tex_kick is high, which
 // is at least 60 clk_video cycles = 30 clk_sys cycles).
-(* preserve *) logic [15:0] tex_id_sync_0,       tex_id_sync_1;
-(* preserve *) logic [15:0] tex_src_x_sync_0,    tex_src_x_sync_1;
-(* preserve *) logic [15:0] tex_ty_sync_0,       tex_ty_sync_1;
-(* preserve *) logic [10:0] tex_dst_x_lo_sync_0, tex_dst_x_lo_sync_1;
-(* preserve *) logic [11:0] tex_dst_w_sync_0,    tex_dst_w_sync_1;
+(* preserve *) logic [15:0] tex_id_sync_0,    tex_id_sync_1;
+(* preserve *) logic [15:0] tex_src_x_sync_0, tex_src_x_sync_1;
+(* preserve *) logic [15:0] tex_ty_sync_0,    tex_ty_sync_1;
+(* preserve *) logic [11:0] tex_dst_w_sync_0, tex_dst_w_sync_1;
 always_ff @(posedge clk_sys) begin
-    tex_id_sync_0       <= comp_tex_id;       tex_id_sync_1       <= tex_id_sync_0;
-    tex_src_x_sync_0    <= comp_tex_src_x;    tex_src_x_sync_1    <= tex_src_x_sync_0;
-    tex_ty_sync_0       <= comp_tex_ty;       tex_ty_sync_1       <= tex_ty_sync_0;
-    tex_dst_x_lo_sync_0 <= comp_tex_dst_x_lo; tex_dst_x_lo_sync_1 <= tex_dst_x_lo_sync_0;
-    tex_dst_w_sync_0    <= comp_tex_dst_w;    tex_dst_w_sync_1    <= tex_dst_w_sync_0;
+    tex_id_sync_0    <= comp_tex_id;    tex_id_sync_1    <= tex_id_sync_0;
+    tex_src_x_sync_0 <= comp_tex_src_x; tex_src_x_sync_1 <= tex_src_x_sync_0;
+    tex_ty_sync_0    <= comp_tex_ty;    tex_ty_sync_1    <= tex_ty_sync_0;
+    tex_dst_w_sync_0 <= comp_tex_dst_w; tex_dst_w_sync_1 <= tex_dst_w_sync_0;
 end
 
 // Line buffer: wr_clk = clk_sys (texture_unit), rd_clk = clk_video
@@ -785,7 +781,6 @@ texture_unit u_texture_unit (
     .tex_id_i         (tex_id_sync_1),
     .ty_i             (tex_ty_sync_1),
     .src_x_i          (tex_src_x_sync_1),
-    .dst_x_lo_i       (tex_dst_x_lo_sync_1),
     .dst_w_i          (tex_dst_w_sync_1),
     .tex_table_addr_i (reg_tex_table_addr),
     .line_buf_addr_o  (line_buf_wr_addr),
