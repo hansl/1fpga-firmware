@@ -263,10 +263,12 @@ module compositor #(
     wire [31:0] tex_pixel     = tex_pixel_sel ? line_buf_data_i[63:32]
                                               : line_buf_data_i[31:0];
 
-    // First pass: find the topmost solid (= highest-index solid that
-    // covers this pixel). `solid_idx_q_c` = its index, or 5'h1F as a
-    // sentinel meaning "no solid covers this pixel" (in which case the
-    // background defaults to black).
+    // Stage 0 (combinational): scan the active list to find the
+    // topmost SOLID covering this pixel, plus whether the topmost
+    // textured layer covers it, plus whether any non-topmost
+    // textured slot covers it. These three reductions feed Stage 1
+    // through a pipeline register so the 16-deep mux chain doesn't
+    // share a combinational budget with the blend math.
     logic        solid_hit_c;
     logic [4:0]  solid_idx_c;
     logic [31:0] solid_color_c;
@@ -286,39 +288,15 @@ module compositor #(
         end
     end
 
-    // Is the topmost textured layer covering this pixel, and is it
-    // above the topmost solid?
     wire signed [16:0] topmost_lo_s = {active_dst_x_lo[topmost_tex_idx][16],
                                        active_dst_x_lo[topmost_tex_idx]};
     wire signed [17:0] topmost_hi_s = active_dst_x_hi[topmost_tex_idx];
-    wire topmost_tex_covers = topmost_tex_valid
-                           && x_s >= {topmost_lo_s[16], topmost_lo_s}
-                           && x_s <  topmost_hi_s
-                           && (!solid_hit_c || (topmost_tex_idx > solid_idx_c));
+    wire topmost_tex_covers_c = topmost_tex_valid
+                             && x_s >= {topmost_lo_s[16], topmost_lo_s}
+                             && x_s <  topmost_hi_s
+                             && (!solid_hit_c || (topmost_tex_idx > solid_idx_c));
 
-    // SrcAlpha blend: out = src.rgb * a + dst.rgb * (255 - a), all
-    // /255. We approximate /255 as >>8 (saturating mul) — a 0.4%
-    // brightness error that's invisible on a 8bpc display. Each
-    // channel: (src_c * a + dst_c * (255-a) + 128) >> 8 would be the
-    // rounding-true form; we drop the +128 to keep the LUTs cheap.
-    wire [7:0] tex_a = tex_pixel[31:24];
-    wire [7:0] tex_r = tex_pixel[23:16];
-    wire [7:0] tex_g = tex_pixel[15:8];
-    wire [7:0] tex_b = tex_pixel[7:0];
-    wire [7:0] inv_a = 8'd255 - tex_a;
-    wire [7:0] bg_r  = solid_color_c[23:16];
-    wire [7:0] bg_g  = solid_color_c[15:8];
-    wire [7:0] bg_b  = solid_color_c[7:0];
-
-    wire [15:0] blend_r = tex_r * tex_a + bg_r * inv_a;
-    wire [15:0] blend_g = tex_g * tex_a + bg_g * inv_a;
-    wire [15:0] blend_b = tex_b * tex_a + bg_b * inv_a;
-
-    wire [31:0] blended_color = {8'hFF, blend_r[15:8], blend_g[15:8], blend_b[15:8]};
-
-    // Other-textured (non-topmost) slots paint debug-magenta so a
-    // multi-textured scene visibly flags the unsupported case.
-    logic         other_tex_hit_c;
+    logic other_tex_hit_c;
     always_comb begin
         other_tex_hit_c = 1'b0;
         for (int i = 0; i < MAX_ACTIVE; i++) begin
@@ -332,14 +310,66 @@ module compositor #(
         end
     end
 
+    // Pipeline register between the 16-deep scans and the blend
+    // math. Every signal that lands in the final r/g/b/sync/de
+    // register stage gets the matching 1-cycle delay here so the
+    // output beat for pixel X is fully consistent.
+    logic        solid_hit_q1;
+    logic [31:0] solid_color_q1;
+    logic        topmost_tex_covers_q1;
+    logic        other_tex_hit_q1;
+    logic [31:0] tex_pixel_q1;
+    logic        h_in_sync_q1, v_in_sync_q1;
+    logic        h_active_q1,  v_active_q1;
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            solid_hit_q1          <= 1'b0;
+            solid_color_q1        <= 32'd0;
+            topmost_tex_covers_q1 <= 1'b0;
+            other_tex_hit_q1      <= 1'b0;
+            tex_pixel_q1          <= 32'd0;
+            h_in_sync_q1          <= 1'b0;
+            v_in_sync_q1          <= 1'b0;
+            h_active_q1           <= 1'b0;
+            v_active_q1           <= 1'b0;
+        end else begin
+            solid_hit_q1          <= solid_hit_c;
+            solid_color_q1        <= solid_color_c;
+            topmost_tex_covers_q1 <= topmost_tex_covers_c;
+            other_tex_hit_q1      <= other_tex_hit_c;
+            tex_pixel_q1          <= tex_pixel;
+            h_in_sync_q1          <= h_in_sync;
+            v_in_sync_q1          <= v_in_sync;
+            h_active_q1           <= h_active;
+            v_active_q1           <= v_active;
+        end
+    end
+
+    // Stage 1 (combinational): SrcAlpha blend and final pixel mux.
+    //   out = src.rgb * a + dst.rgb * (255 - a), then /255 ≈ >>8.
+    // The 0.4% brightness error vs a /255 round is invisible at 8bpc.
+    wire [7:0] tex_a = tex_pixel_q1[31:24];
+    wire [7:0] tex_r = tex_pixel_q1[23:16];
+    wire [7:0] tex_g = tex_pixel_q1[15:8];
+    wire [7:0] tex_b = tex_pixel_q1[7:0];
+    wire [7:0] inv_a = 8'd255 - tex_a;
+    wire [7:0] bg_r  = solid_color_q1[23:16];
+    wire [7:0] bg_g  = solid_color_q1[15:8];
+    wire [7:0] bg_b  = solid_color_q1[7:0];
+    wire [15:0] blend_r = tex_r * tex_a + bg_r * inv_a;
+    wire [15:0] blend_g = tex_g * tex_a + bg_g * inv_a;
+    wire [15:0] blend_b = tex_b * tex_a + bg_b * inv_a;
+    wire [31:0] blended_color = {8'hFF, blend_r[15:8], blend_g[15:8], blend_b[15:8]};
+
     logic [31:0] pix_color;
     always_comb begin
-        if (topmost_tex_covers) begin
+        if (topmost_tex_covers_q1) begin
             pix_color = blended_color;
-        end else if (other_tex_hit_c) begin
+        end else if (other_tex_hit_q1) begin
             pix_color = DEBUG_TEX_COLOR;
-        end else if (solid_hit_c) begin
-            pix_color = solid_color_c;
+        end else if (solid_hit_q1) begin
+            pix_color = solid_color_q1;
         end else begin
             pix_color = 32'h0000_0000;
         end
@@ -347,7 +377,7 @@ module compositor #(
 
     logic [7:0] pix_r, pix_g, pix_b;
     always_comb begin
-        if (h_active && v_active) begin
+        if (h_active_q1 && v_active_q1) begin
             pix_r = pix_color[23:16];
             pix_g = pix_color[15:8];
             pix_b = pix_color[7:0];
@@ -358,7 +388,10 @@ module compositor #(
         end
     end
 
-    // ---- One-cycle register on the outputs ---------------------------
+    // ---- Output register ---------------------------------------------
+    // r/g/b lag hcount by 2 cycles now (stage-1 register + this
+    // output register). Sync / blank signals likewise go through the
+    // _q1 stage to stay aligned with the pixel data.
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             r      <= 8'd0;
@@ -372,10 +405,10 @@ module compositor #(
             r      <= pix_r;
             g      <= pix_g;
             b      <= pix_b;
-            hsync  <= h_in_sync;
-            vsync  <= v_in_sync;
-            hblank <= ~h_active;
-            vblank <= ~v_active;
+            hsync  <= h_in_sync_q1;
+            vsync  <= v_in_sync_q1;
+            hblank <= ~h_active_q1;
+            vblank <= ~v_active_q1;
         end
     end
 
