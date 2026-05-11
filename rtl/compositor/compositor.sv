@@ -43,7 +43,7 @@
 module compositor #(
     parameter int MAX_ACTIVE = 16
 ) (
-    input  logic        clk,        // CLK_VIDEO == pixel clock (50 MHz)
+    input  logic        clk,        // CLK_VIDEO == pixel clock (100 MHz)
     input  logic        rst_n,
 
     // CE_PIXEL for the framework — always 1 (we run at pixel rate).
@@ -66,22 +66,43 @@ module compositor #(
 
     // Count from the host (LAYER_COMMIT.count). Sampled at each
     // HBlank start; 0 means "no layers", and the painter emits black.
-    input  logic [8:0]   layer_count_i
+    input  logic [8:0]   layer_count_i,
+
+    // Texture sampler interface (Phase 2b step 2). The compositor
+    // identifies the topmost textured layer in the active list after
+    // the filter completes, and pulses `tex_kick_o` with the
+    // descriptor params. The texture_unit on clk_sys responds by
+    // fetching the texel row into the line buffer; the painter then
+    // reads `line_buf_data_i` at half-resolution addresses (each
+    // entry holds 2 BGRA pixels). All multi-bit kick params are
+    // expected to be held stable while `tex_kick_o` is high.
+    output logic        tex_kick_o,
+    output logic [15:0] tex_id_o,
+    output logic [15:0] tex_src_x_o,
+    output logic [15:0] tex_ty_o,
+    output logic [10:0] tex_dst_x_lo_o,
+    output logic [11:0] tex_dst_w_o,
+
+    // Line buffer read port (painter side). Address = (x - dst_x_lo)
+    // >> 1 — each 64-bit word holds 2 pixels.
+    output logic [9:0]  line_buf_addr_o,
+    input  logic [63:0] line_buf_data_i
 );
 
-    // ---- Timing constants (1920×1080, min-blanking, 100 MHz pixel
-    //                         clock = clk_video).
-    // HBlank = 280 cycles: 22 cycles' margin above the scanline_filter
-    //                       worst case (count=256 → 258 cycles).
-    // VBlank = 20 lines:   layer_dma still runs on clk_sys (50 MHz),
-    //                       takes ~1.5 kcycles ≈ 3 kcycles on clk_video
-    //                       — well under 1 line of 2200 cycles.
-    // fps = 100 MHz / (2200 × 1100) ≈ 41.3 Hz.
+    // ---- Timing constants (1920×1080, 100 MHz pixel clock).
+    // HBlank widened in Phase 2b step 2 to fit:
+    //   - scanline_filter worst case (count=256): ~260 cycles
+    //   - kick-to-clk_sys CDC: ~10 cycles
+    //   - texture_unit (descriptor + 256-pixel row burst): ~290 cycles
+    //   - margin: ~40 cycles
+    // Total HBlank ≈ 600 cycles.
+    // VBlank = 20 lines (unchanged; layer_dma fits comfortably).
+    // fps = 100 MHz / (2520 × 1100) ≈ 36.1 Hz.
     localparam int H_ACTIVE = 1920;
     localparam int H_FP     = 60;
     localparam int H_SYNC   = 40;
-    localparam int H_BP     = 180;
-    localparam int H_TOTAL  = H_ACTIVE + H_FP + H_SYNC + H_BP; // 2200
+    localparam int H_BP     = 500;
+    localparam int H_TOTAL  = H_ACTIVE + H_FP + H_SYNC + H_BP; // 2520
 
     localparam int V_ACTIVE = 1080;
     localparam int V_FP     = 4;
@@ -141,6 +162,8 @@ module compositor #(
     logic signed [17:0]         active_dst_x_hi [MAX_ACTIVE-1:0];
     logic [31:0]                active_color    [MAX_ACTIVE-1:0];
     logic [15:0]                active_tex_id   [MAX_ACTIVE-1:0];
+    logic [15:0]                active_src_x    [MAX_ACTIVE-1:0];
+    logic [15:0]                active_ty       [MAX_ACTIVE-1:0];
 
     scanline_filter #(.MAX_ACTIVE(MAX_ACTIVE)) u_filter (
         .clk              (clk),
@@ -154,20 +177,68 @@ module compositor #(
         .active_dst_x_lo_o(active_dst_x_lo),
         .active_dst_x_hi_o(active_dst_x_hi),
         .active_color_o   (active_color),
-        .active_tex_id_o  (active_tex_id)
+        .active_tex_id_o  (active_tex_id),
+        .active_src_x_o   (active_src_x),
+        .active_ty_o      (active_ty)
     );
+
+    // ---- Topmost-textured selector + kick generator -----------------
+    // After the filter completes, find the highest-index entry whose
+    // tex_id != 0xFFFF. That entry is the one the texture_unit will
+    // sample on the next scanline; other textured entries (if any)
+    // still fall through to the painter's debug-magenta branch.
+    logic       topmost_tex_valid;
+    logic [4:0] topmost_tex_idx;
+    always_comb begin
+        topmost_tex_valid = 1'b0;
+        topmost_tex_idx   = 5'd0;
+        for (int i = 0; i < MAX_ACTIVE; i++) begin
+            if (i < int'(active_count) && active_tex_id[i] != 16'hFFFF) begin
+                topmost_tex_valid = 1'b1;
+                topmost_tex_idx   = i[4:0];
+            end
+        end
+    end
+
+    // Kick window: hold tex_kick_o high for a chunk of HBlank after
+    // the filter has had time to complete (~260 cycles). 60 clk_video
+    // cycles ≈ 30 clk_sys cycles — plenty for the 2-flop synchroniser
+    // on the clk_sys side to catch the rising edge.
+    wire kick_window = (hcount >= 12'(H_ACTIVE + 280))
+                    && (hcount <  12'(H_ACTIVE + 340));
+    assign tex_kick_o     = kick_window && topmost_tex_valid;
+    assign tex_id_o       = active_tex_id [topmost_tex_idx];
+    assign tex_src_x_o    = active_src_x  [topmost_tex_idx];
+    assign tex_ty_o       = active_ty     [topmost_tex_idx];
+    assign tex_dst_x_lo_o = active_dst_x_lo[topmost_tex_idx][10:0];
+    assign tex_dst_w_o    = active_dst_x_hi[topmost_tex_idx][11:0]
+                          - active_dst_x_lo[topmost_tex_idx][11:0];
 
     // ---- Per-pixel painter ------------------------------------------
     // Scan low-to-high so the topmost (highest-index) hit wins via
     // last-assignment-wins. BGRA byte order: B at LSB, R at byte 2.
     //
-    // Phase 2b step 1: textured layers (tex_id != 0xFFFF) paint a
-    // fixed debug-magenta. Phase 2b step 2 will replace the magenta
-    // with a per-pixel read from a line buffer that the texture_unit
-    // fills during the previous active scanout.
+    // Phase 2b step 2: the topmost textured layer in the active list
+    // samples from line_buffer (filled this HBlank by texture_unit).
+    // Other textured slots fall back to the debug-magenta colour from
+    // step 1 — they're not rendered correctly until Phase 2c adds
+    // multi-textured pipelining.
     localparam logic [31:0] DEBUG_TEX_COLOR = 32'hFF_FF_00_FF; // BGRA magenta
 
     wire signed [17:0] x_s = $signed({6'b0, hcount});
+
+    // Line-buffer prefetch: read for `hcount + 1` so the data arrives
+    // one cycle later, in time for that pixel's painter pass.
+    wire [11:0] next_hcount      = hcount + 12'd1;
+    wire [10:0] topmost_dst_lo_u = active_dst_x_lo[topmost_tex_idx][10:0];
+    wire [11:0] line_buf_x_off   = next_hcount - {1'b0, topmost_dst_lo_u};
+    assign line_buf_addr_o = line_buf_x_off[10:1]; // /2, 10-bit
+
+    // Pixel within the 64-bit line buffer entry (bit 0 of the
+    // x-offset selects upper/lower 32-bit half).
+    wire        tex_pixel_sel = line_buf_x_off[0];
+    wire [31:0] tex_pixel     = tex_pixel_sel ? line_buf_data_i[63:32]
+                                              : line_buf_data_i[31:0];
 
     logic [31:0] pix_color;
     always_comb begin
@@ -176,9 +247,14 @@ module compositor #(
             if (i < int'(active_count)
                 && x_s >= $signed({active_dst_x_lo[i][16], active_dst_x_lo[i]})
                 && x_s <  active_dst_x_hi[i]) begin
-                pix_color = (active_tex_id[i] == 16'hFFFF)
-                          ? active_color[i]
-                          : DEBUG_TEX_COLOR;
+                if (active_tex_id[i] == 16'hFFFF) begin
+                    pix_color = active_color[i];
+                end else if (i[4:0] == topmost_tex_idx
+                             && topmost_tex_valid) begin
+                    pix_color = tex_pixel;
+                end else begin
+                    pix_color = DEBUG_TEX_COLOR;
+                end
             end
         end
     end

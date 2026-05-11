@@ -62,7 +62,13 @@ module scanline_filter #(
     // tex_id rides along with each active entry. 0xFFFF means
     // solid-colour (use `color` field); anything else means the
     // painter / texture_unit will sample texels for this rect.
-    output logic [15:0]             active_tex_id_o   [MAX_ACTIVE-1:0]
+    output logic [15:0]             active_tex_id_o   [MAX_ACTIVE-1:0],
+    // Texture sampling info for textured layers. `src_x` is the
+    // texture-X origin and `ty` is the precomputed texture-Y for the
+    // current scanline (= src_y + (y_next - dst_y), clamped to u16).
+    // Both are meaningless for solid (tex_id == 0xFFFF) layers.
+    output logic [15:0]             active_src_x_o    [MAX_ACTIVE-1:0],
+    output logic [15:0]             active_ty_o       [MAX_ACTIVE-1:0]
 );
 
     typedef enum logic [1:0] {
@@ -97,6 +103,15 @@ module scanline_filter #(
     wire signed [16:0] y_next_s   = $signed({5'b0, y_next_latched});
     wire y_in_range = (y_next_s >= dst_y_lo_s) && (y_next_s < dst_y_hi_s);
 
+    // Precompute the texture-Y for this scanline (= src_y + (y_next -
+    // dst_y)). Within the hit window y_in_range is true and the
+    // delta is non-negative, so a simple 16-bit truncation is safe.
+    wire [15:0] src_x = cache_data_i[111:96];
+    wire [15:0] src_y = cache_data_i[127:112];
+    wire signed [16:0] y_minus_dst_y = y_next_s - dst_y_lo_s;
+    wire signed [17:0] ty_calc = $signed({2'b00, src_y}) + {y_minus_dst_y[16], y_minus_dst_y};
+    wire [15:0] ty_for_line = ty_calc[15:0];
+
     // Phase 2b: accept both solid (tex_id == 0xFFFF) and textured
     // (tex_id < 0xFFFF) layers. The painter / texture_unit downstream
     // routes them differently based on the recorded tex_id.
@@ -126,6 +141,8 @@ module scanline_filter #(
                 active_dst_x_hi_o[i] <= 18'd0;
                 active_color_o[i]    <= 32'd0;
                 active_tex_id_o[i]   <= 16'd0;
+                active_src_x_o[i]    <= 16'd0;
+                active_ty_o[i]       <= 16'd0;
             end
         end else begin
             // 1-cycle data pipeline: data_valid_q true iff the *previous*
@@ -169,6 +186,8 @@ module scanline_filter #(
                 active_dst_x_hi_o[active_idx_q] <= hit_dst_x_hi;
                 active_color_o[active_idx_q]    <= color;
                 active_tex_id_o[active_idx_q]   <= tex_id;
+                active_src_x_o[active_idx_q]    <= src_x;
+                active_ty_o[active_idx_q]       <= ty_for_line;
                 active_idx_q                    <= active_idx_q + 5'd1;
             end
         end

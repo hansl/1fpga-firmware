@@ -32,3 +32,10 @@ set_clock_groups -asynchronous \
 set_false_path -to [get_registers {emu:emu|comp_vs_sync_0}]
 set_false_path -to [get_registers {emu:emu|layer_count_sync_0[*]}]
 set_false_path -to [get_registers {emu:emu|comp_rst_n_sync_0}]
+# Phase 2b step 2: texture_unit kick + multi-bit params (clk_video → clk_sys).
+set_false_path -to [get_registers {emu:emu|tex_kick_sync_0}]
+set_false_path -to [get_registers {emu:emu|tex_id_sync_0[*]}]
+set_false_path -to [get_registers {emu:emu|tex_src_x_sync_0[*]}]
+set_false_path -to [get_registers {emu:emu|tex_ty_sync_0[*]}]
+set_false_path -to [get_registers {emu:emu|tex_dst_x_lo_sync_0[*]}]
+set_false_path -to [get_registers {emu:emu|tex_dst_w_sync_0[*]}]

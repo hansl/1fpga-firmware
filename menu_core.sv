@@ -252,6 +252,18 @@ wire       comp_hs, comp_vs, comp_hb, comp_vb;
 wire       comp_ce_pix;
 wire [7:0]   comp_cache_slot;
 wire [255:0] comp_cache_data;
+// Texture sampler interface (Phase 2b step 2). Compositor (clk_video)
+// produces these; texture_unit (clk_sys) consumes them via the CDC
+// synchronisers below.
+wire         comp_tex_kick;
+wire [15:0]  comp_tex_id;
+wire [15:0]  comp_tex_src_x;
+wire [15:0]  comp_tex_ty;
+wire [10:0]  comp_tex_dst_x_lo;
+wire [11:0]  comp_tex_dst_w;
+// Line buffer read port (clk_video).
+wire [9:0]   comp_line_buf_addr;
+wire [63:0]  comp_line_buf_data;
 
 // Reset bridge: pll_locked is asynchronous to clk_video, so feeding
 // it raw as rst_n would risk recovery/removal violations at the
@@ -284,19 +296,27 @@ always_ff @(posedge clk_video) begin
 end
 
 compositor u_compositor (
-	.clk           (clk_video),
-	.rst_n         (comp_rst_n),
-	.ce_pix        (comp_ce_pix),
-	.r             (comp_r),
-	.g             (comp_g),
-	.b             (comp_b),
-	.hsync         (comp_hs),
-	.vsync         (comp_vs),
-	.hblank        (comp_hb),
-	.vblank        (comp_vb),
-	.cache_slot_o  (comp_cache_slot),
-	.cache_data_i  (comp_cache_data),
-	.layer_count_i (layer_count_sync_1)
+	.clk             (clk_video),
+	.rst_n           (comp_rst_n),
+	.ce_pix          (comp_ce_pix),
+	.r               (comp_r),
+	.g               (comp_g),
+	.b               (comp_b),
+	.hsync           (comp_hs),
+	.vsync           (comp_vs),
+	.hblank          (comp_hb),
+	.vblank          (comp_vb),
+	.cache_slot_o    (comp_cache_slot),
+	.cache_data_i    (comp_cache_data),
+	.layer_count_i   (layer_count_sync_1),
+	.tex_kick_o      (comp_tex_kick),
+	.tex_id_o        (comp_tex_id),
+	.tex_src_x_o     (comp_tex_src_x),
+	.tex_ty_o        (comp_tex_ty),
+	.tex_dst_x_lo_o  (comp_tex_dst_x_lo),
+	.tex_dst_w_o     (comp_tex_dst_w),
+	.line_buf_addr_o (comp_line_buf_addr),
+	.line_buf_data_i (comp_line_buf_data)
 );
 
 // Compositor drives VGA_* directly. CE_PIXEL is held high because
@@ -695,6 +715,93 @@ layer_cache u_layer_cache (
     .rd_data_o  (comp_cache_data)
 );
 
+////////////////////////////////////////////////////////////////////////////
+// Texture unit + line buffer (Phase 2b step 2).
+//
+// The compositor (clk_video) identifies the topmost textured layer in
+// the active list after the scanline_filter completes, and pulses
+// `comp_tex_kick` with the descriptor params held stable for ~60
+// clk_video cycles. The texture_unit on clk_sys samples this via a
+// 2-flop synchroniser, edge-detects the rising edge, and runs its
+// own state machine: fetch the texture descriptor, then burst a row
+// of pixels into the line_buffer. The painter then reads the line
+// buffer during active scanout.
+////////////////////////////////////////////////////////////////////////////
+
+// CDC: kick pulse from clk_video to clk_sys.
+(* preserve *) logic tex_kick_sync_0;
+(* preserve *) logic tex_kick_sync_1;
+logic tex_kick_sync_2;
+always_ff @(posedge clk_sys) begin
+    tex_kick_sync_0 <= comp_tex_kick;
+    tex_kick_sync_1 <= tex_kick_sync_0;
+    tex_kick_sync_2 <= tex_kick_sync_1;
+end
+wire tex_kick_rising = tex_kick_sync_1 & ~tex_kick_sync_2;
+
+// CDC: multi-bit params (stable while comp_tex_kick is high, which
+// is at least 60 clk_video cycles = 30 clk_sys cycles).
+(* preserve *) logic [15:0] tex_id_sync_0,       tex_id_sync_1;
+(* preserve *) logic [15:0] tex_src_x_sync_0,    tex_src_x_sync_1;
+(* preserve *) logic [15:0] tex_ty_sync_0,       tex_ty_sync_1;
+(* preserve *) logic [10:0] tex_dst_x_lo_sync_0, tex_dst_x_lo_sync_1;
+(* preserve *) logic [11:0] tex_dst_w_sync_0,    tex_dst_w_sync_1;
+always_ff @(posedge clk_sys) begin
+    tex_id_sync_0       <= comp_tex_id;       tex_id_sync_1       <= tex_id_sync_0;
+    tex_src_x_sync_0    <= comp_tex_src_x;    tex_src_x_sync_1    <= tex_src_x_sync_0;
+    tex_ty_sync_0       <= comp_tex_ty;       tex_ty_sync_1       <= tex_ty_sync_0;
+    tex_dst_x_lo_sync_0 <= comp_tex_dst_x_lo; tex_dst_x_lo_sync_1 <= tex_dst_x_lo_sync_0;
+    tex_dst_w_sync_0    <= comp_tex_dst_w;    tex_dst_w_sync_1    <= tex_dst_w_sync_0;
+end
+
+// Line buffer: wr_clk = clk_sys (texture_unit), rd_clk = clk_video
+// (painter). 64-bit wide (2 pixels per entry).
+wire [9:0]  line_buf_wr_addr;
+wire [63:0] line_buf_wr_data;
+wire        line_buf_we;
+
+line_buffer u_line_buffer (
+    .wr_clk    (clk_sys),
+    .wr_addr_i (line_buf_wr_addr),
+    .wr_data_i (line_buf_wr_data),
+    .wr_en_i   (line_buf_we),
+    .rd_clk    (clk_video),
+    .rd_addr_i (comp_line_buf_addr),
+    .rd_data_o (comp_line_buf_data)
+);
+
+// Texture unit: shares the DDR3 bus through the 4-way arbiter below.
+wire [28:0] tex_unit_addr;
+wire [7:0]  tex_unit_burstcnt;
+wire [7:0]  tex_unit_be;
+wire        tex_unit_rd;
+wire        tex_unit_busy;
+wire        tex_unit_done;
+
+texture_unit u_texture_unit (
+    .clk              (clk_sys),
+    .rst_n            (fetcher_rst_n),
+    .kick_i           (tex_kick_rising),
+    .tex_id_i         (tex_id_sync_1),
+    .ty_i             (tex_ty_sync_1),
+    .src_x_i          (tex_src_x_sync_1),
+    .dst_x_lo_i       (tex_dst_x_lo_sync_1),
+    .dst_w_i          (tex_dst_w_sync_1),
+    .tex_table_addr_i (reg_tex_table_addr),
+    .line_buf_addr_o  (line_buf_wr_addr),
+    .line_buf_data_o  (line_buf_wr_data),
+    .line_buf_we_o    (line_buf_we),
+    .ddram_addr_o     (tex_unit_addr),
+    .ddram_burstcnt_o (tex_unit_burstcnt),
+    .ddram_be_o       (tex_unit_be),
+    .ddram_rd_o       (tex_unit_rd),
+    .ddram_busy_i     (DDRAM_BUSY),
+    .ddram_dout_i     (DDRAM_DOUT),
+    .ddram_dout_valid_i (DDRAM_DOUT_READY),
+    .busy_o           (tex_unit_busy),
+    .done_pulse_o     (tex_unit_done)
+);
+
 // layer_dma → DDRAM master signals.
 wire [28:0] layer_dma_addr;
 wire [7:0]  layer_dma_burstcnt;
@@ -725,27 +832,33 @@ layer_dma u_layer_dma (
     .descriptors_o      (layer_dma_descriptors)
 );
 
-// DDRAM_* mux. Priority: blit_engine > layer_dma > ring_fetcher.
-// blit_engine has hard real-time deadlines through the fence pipeline
-// so it always wins; layer_dma runs once per frame in VBlank and only
-// preempts the fetcher when its `busy_o` is high; otherwise the
-// fetcher drives the bus. Reads return on a shared dout bus — each
-// consumer only samples valid pulses while it has the bus, so cross-
-// talk is not possible.
+// DDRAM_* mux. Priority: blit_engine > layer_dma > texture_unit >
+// ring_fetcher. blit_engine has hard real-time deadlines through the
+// fence pipeline; layer_dma fires once per frame in VBlank;
+// texture_unit fires once per scanline in HBlank. The fetcher is the
+// background polling master that owns the bus whenever nothing else
+// needs it. Reads return on a shared dout bus — each consumer only
+// samples valid pulses while it owns the bus, so cross-talk is not
+// possible.
 wire layer_dma_owns_bus = layer_dma_busy & ~blit_busy;
+wire tex_unit_owns_bus  = tex_unit_busy & ~blit_busy & ~layer_dma_busy;
 
-assign DDRAM_ADDR     = blit_busy        ? blit_addr
+assign DDRAM_ADDR     = blit_busy          ? blit_addr
                       : layer_dma_owns_bus ? layer_dma_addr
+                      : tex_unit_owns_bus  ? tex_unit_addr
                       : fetch_addr;
-assign DDRAM_BURSTCNT = blit_busy        ? blit_burstcnt
+assign DDRAM_BURSTCNT = blit_busy          ? blit_burstcnt
                       : layer_dma_owns_bus ? layer_dma_burstcnt
+                      : tex_unit_owns_bus  ? tex_unit_burstcnt
                       : fetch_burstcnt;
-assign DDRAM_BE       = blit_busy        ? blit_be
+assign DDRAM_BE       = blit_busy          ? blit_be
                       : layer_dma_owns_bus ? layer_dma_be
+                      : tex_unit_owns_bus  ? tex_unit_be
                       : fetch_be;
 assign DDRAM_DIN      = blit_busy ? blit_din : 64'd0;
-assign DDRAM_RD       = blit_busy        ? blit_rd
+assign DDRAM_RD       = blit_busy          ? blit_rd
                       : layer_dma_owns_bus ? layer_dma_rd
+                      : tex_unit_owns_bus  ? tex_unit_rd
                       : fetch_rd;
 assign DDRAM_WE       = blit_busy ? blit_we : 1'b0;
 
@@ -754,10 +867,10 @@ assign DDRAM_WE       = blit_busy ? blit_we : 1'b0;
 // M2c+ lets it gate a low-power idle.
 wire _unused_kick = reg_ring_kick;
 
-// layer_dma_done isn't consumed yet (step 3 will gate the renderer
-// off it). Same for layer_active_o — only used inside the active-base
-// calc. Both quietly used / suppressed.
-wire _unused_layer = &{1'b0, layer_dma_done, 1'b0};
+// layer_dma_done and tex_unit_done aren't consumed (we rely on the
+// HBlank budget being wide enough to guarantee completion by the
+// start of active scanout). Wire-suppress.
+wire _unused_layer = &{1'b0, layer_dma_done, tex_unit_done, 1'b0};
 
 ////////////////////////////////////////////////////////////////////////////
 // MISTER_FB configuration. FB_FORMAT selects BGR 32bpp so the framework
