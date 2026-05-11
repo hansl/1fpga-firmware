@@ -228,14 +228,24 @@ module compositor #(
                        - active_dst_x_lo[topmost_tex_idx][11:0];
 
     // ---- Per-pixel painter ------------------------------------------
-    // Scan low-to-high so the topmost (highest-index) hit wins via
-    // last-assignment-wins. BGRA byte order: B at LSB, R at byte 2.
+    // Two-pass logic. First pass (combinational): find the topmost
+    // SOLID layer covering this pixel — that's the "background" the
+    // textured layer (if any) blends against. Second pass: if the
+    // topmost textured layer covers this pixel AND its z-order is
+    // above the topmost solid, SrcAlpha-blend the textured pixel
+    // over the solid; otherwise output the solid (or black if no
+    // layer covers this pixel).
     //
-    // Phase 2b step 2: the topmost textured layer in the active list
-    // samples from line_buffer (filled this HBlank by texture_unit).
-    // Other textured slots fall back to the debug-magenta colour from
-    // step 1 — they're not rendered correctly until Phase 2c adds
-    // multi-textured pipelining.
+    // Phase 2c step 1 limitations:
+    //   - Only the topmost textured layer's pixels render. Other
+    //     textured slots still paint debug-magenta.
+    //   - Blend uses the textured pixel's own alpha channel
+    //     (BGRA8888). A8 textures land in step 2.
+    //   - "Background" for the blend is the topmost SOLID at this x,
+    //     not the full back-to-front composite. Multi-layer blending
+    //     lands in step 3.
+    //   - 8×8 multiplies inferred for the blend math. Cyclone V has
+    //     ~150 DSP blocks; trivial to absorb 3 (R/G/B channels).
     localparam logic [31:0] DEBUG_TEX_COLOR = 32'hFF_FF_00_FF; // BGRA magenta
 
     wire signed [17:0] x_s = $signed({6'b0, hcount});
@@ -253,22 +263,85 @@ module compositor #(
     wire [31:0] tex_pixel     = tex_pixel_sel ? line_buf_data_i[63:32]
                                               : line_buf_data_i[31:0];
 
-    logic [31:0] pix_color;
+    // First pass: find the topmost solid (= highest-index solid that
+    // covers this pixel). `solid_idx_q_c` = its index, or 5'h1F as a
+    // sentinel meaning "no solid covers this pixel" (in which case the
+    // background defaults to black).
+    logic        solid_hit_c;
+    logic [4:0]  solid_idx_c;
+    logic [31:0] solid_color_c;
     always_comb begin
-        pix_color = 32'h0000_0000; // black background
+        solid_hit_c   = 1'b0;
+        solid_idx_c   = 5'd0;
+        solid_color_c = 32'h0000_0000;
         for (int i = 0; i < MAX_ACTIVE; i++) begin
             if (i < int'(active_count)
+                && active_tex_id[i] == 16'hFFFF
                 && x_s >= $signed({active_dst_x_lo[i][16], active_dst_x_lo[i]})
                 && x_s <  active_dst_x_hi[i]) begin
-                if (active_tex_id[i] == 16'hFFFF) begin
-                    pix_color = active_color[i];
-                end else if (i[4:0] == topmost_tex_idx
-                             && topmost_tex_valid) begin
-                    pix_color = tex_pixel;
-                end else begin
-                    pix_color = DEBUG_TEX_COLOR;
-                end
+                solid_hit_c   = 1'b1;
+                solid_idx_c   = i[4:0];
+                solid_color_c = active_color[i];
             end
+        end
+    end
+
+    // Is the topmost textured layer covering this pixel, and is it
+    // above the topmost solid?
+    wire signed [16:0] topmost_lo_s = {active_dst_x_lo[topmost_tex_idx][16],
+                                       active_dst_x_lo[topmost_tex_idx]};
+    wire signed [17:0] topmost_hi_s = active_dst_x_hi[topmost_tex_idx];
+    wire topmost_tex_covers = topmost_tex_valid
+                           && x_s >= {topmost_lo_s[16], topmost_lo_s}
+                           && x_s <  topmost_hi_s
+                           && (!solid_hit_c || (topmost_tex_idx > solid_idx_c));
+
+    // SrcAlpha blend: out = src.rgb * a + dst.rgb * (255 - a), all
+    // /255. We approximate /255 as >>8 (saturating mul) — a 0.4%
+    // brightness error that's invisible on a 8bpc display. Each
+    // channel: (src_c * a + dst_c * (255-a) + 128) >> 8 would be the
+    // rounding-true form; we drop the +128 to keep the LUTs cheap.
+    wire [7:0] tex_a = tex_pixel[31:24];
+    wire [7:0] tex_r = tex_pixel[23:16];
+    wire [7:0] tex_g = tex_pixel[15:8];
+    wire [7:0] tex_b = tex_pixel[7:0];
+    wire [7:0] inv_a = 8'd255 - tex_a;
+    wire [7:0] bg_r  = solid_color_c[23:16];
+    wire [7:0] bg_g  = solid_color_c[15:8];
+    wire [7:0] bg_b  = solid_color_c[7:0];
+
+    wire [15:0] blend_r = tex_r * tex_a + bg_r * inv_a;
+    wire [15:0] blend_g = tex_g * tex_a + bg_g * inv_a;
+    wire [15:0] blend_b = tex_b * tex_a + bg_b * inv_a;
+
+    wire [31:0] blended_color = {8'hFF, blend_r[15:8], blend_g[15:8], blend_b[15:8]};
+
+    // Other-textured (non-topmost) slots paint debug-magenta so a
+    // multi-textured scene visibly flags the unsupported case.
+    logic         other_tex_hit_c;
+    always_comb begin
+        other_tex_hit_c = 1'b0;
+        for (int i = 0; i < MAX_ACTIVE; i++) begin
+            if (i < int'(active_count)
+                && active_tex_id[i] != 16'hFFFF
+                && (!topmost_tex_valid || i[4:0] != topmost_tex_idx)
+                && x_s >= $signed({active_dst_x_lo[i][16], active_dst_x_lo[i]})
+                && x_s <  active_dst_x_hi[i]) begin
+                other_tex_hit_c = 1'b1;
+            end
+        end
+    end
+
+    logic [31:0] pix_color;
+    always_comb begin
+        if (topmost_tex_covers) begin
+            pix_color = blended_color;
+        end else if (other_tex_hit_c) begin
+            pix_color = DEBUG_TEX_COLOR;
+        end else if (solid_hit_c) begin
+            pix_color = solid_color_c;
+        end else begin
+            pix_color = 32'h0000_0000;
         end
     end
 
