@@ -119,6 +119,14 @@ pub enum Command {
     /// prints the compositor's frame rate every second. Useful for
     /// eyeballing z-order behaviour. Runs until Ctrl-C or 60 s.
     LayerDraw,
+
+    /// Phase 2b step 1 visual: uploads a 64×64 BGRA texture, commits
+    /// a 4-layer scene with one *textured* layer (slot 2) plus two
+    /// solid panels and a background. Renderer currently paints the
+    /// textured slot in fixed debug-magenta (texture sampling lands in
+    /// step 2). PASS = magenta where the textured panel sits, normal
+    /// colours for the solid panels. Runs until Ctrl-C or 60 s.
+    LayerTexProbe,
 }
 
 fn parse_u32_hex_or_dec(s: &str) -> Result<u32, std::num::ParseIntError> {
@@ -185,6 +193,7 @@ fn main() {
         Some(Command::RttTest) => rtt_test(base).map_err(Into::into),
         Some(Command::LayerProbe) => layer_probe(base).map_err(Into::into),
         Some(Command::LayerDraw) => layer_draw(base).map_err(Into::into),
+        Some(Command::LayerTexProbe) => layer_tex_probe(base).map_err(Into::into),
         None => {
             info!(
                 "no subcommand given — re-run with `probe`, `ring-test`, `draw-test`, …, or `--print-layout`"
@@ -960,6 +969,105 @@ fn layer_draw(base: u32) -> Result<(), DeviceError> {
     }
 
     // Clean exit: black screen.
+    device.commit_layers();
+    println!("Cleared layers (count=0). Screen returns to black.");
+    Ok(())
+}
+
+/// Phase 2b step 1 verification.
+///
+/// Builds a 4-layer scene with one textured layer in the mix. The
+/// renderer currently paints textured layers in a fixed debug-magenta
+/// because the texel-sampler path lands in step 2; visually you should
+/// see magenta where the textured panel sits and the usual solid
+/// colours for the other slots. The texture's pixel content itself is
+/// irrelevant for step 1 — we're just checking that the textured
+/// layer survives `scanline_filter`, lands in the active list with a
+/// non-sentinel tex_id, and lights up the painter's textured branch.
+fn layer_tex_probe(base: u32) -> Result<(), DeviceError> {
+    let mut device = Device::open_with(DeviceConfig {
+        base_phys_addr: base,
+        ..DeviceConfig::default()
+    })?;
+
+    let info = device.video_info();
+    println!(
+        "Framework HDMI mode (VIDEO_INFO): {}x{}",
+        info.width, info.height
+    );
+
+    // Upload a 64×64 BGRA checkerboard. Content is moot for step 1;
+    // we just need a valid texture descriptor so the host call paths
+    // are exercised end-to-end.
+    const TEX_W: u16 = 64;
+    const TEX_H: u16 = 64;
+    const CELL: u16 = 8;
+    let red = protocol::Rgba::new(0xFF, 0x00, 0x00, 0xFF);
+    let yellow = protocol::Rgba::new(0xFF, 0xFF, 0x00, 0xFF);
+    let mut tex_bytes = vec![0u8; (TEX_W as usize) * (TEX_H as usize) * 4];
+    for y in 0..TEX_H {
+        for x in 0..TEX_W {
+            let color = if ((x / CELL) + (y / CELL)) % 2 == 0 { red } else { yellow };
+            let off = ((y as usize) * (TEX_W as usize) + (x as usize)) * 4;
+            tex_bytes[off..off + 4].copy_from_slice(&color.to_u32().to_le_bytes());
+        }
+    }
+    let tex = device.upload_texture(&TextureSpec {
+        format: TextureFormat::Rgba8888,
+        width: TEX_W,
+        height: TEX_H,
+        stride: (TEX_W as u32) * 4,
+        data: &tex_bytes,
+    })?;
+    println!(
+        "Uploaded 64×64 checker texture: id={}, base={:#010X}",
+        tex.id, tex.phys_addr
+    );
+
+    let navy   = 0xFF_05_10_40u32;
+    let header = 0xFF_10_30_80u32;
+    let cyan   = 0xFF_00_FF_FFu32;
+
+    // Slot 2 is the textured layer — 400×400 panel centred. Step 1
+    // paints it magenta regardless of texture content.
+    device.set_layer(0, &protocol::LayerDescriptor::solid(navy,    0,   0, 1920, 1080))?;
+    device.set_layer(1, &protocol::LayerDescriptor::solid(header,  0,   0, 1920,  120))?;
+    device.set_layer(2, &protocol::LayerDescriptor::textured(tex.id, 760, 340, 400, 400))?;
+    device.set_layer(3, &protocol::LayerDescriptor::solid(cyan,   200, 700,  500, 300))?;
+    device.commit_layers();
+    const COUNT: u32 = 4;
+
+    println!(
+        "Committed 4 layers (slot 2 is textured, tex_id={}). \n\
+         Expect: navy bg, blue header, magenta 400×400 panel centred, cyan panel bottom-left. \n\
+         Ctrl-C to exit (max 60 s).",
+        tex.id
+    );
+
+    let running = Arc::new(AtomicBool::new(true));
+    {
+        let r = running.clone();
+        ctrlc::set_handler(move || r.store(false, Ordering::SeqCst))
+            .map_err(|e| DeviceError::Io(std::io::Error::other(e.to_string())))?;
+    }
+
+    let start = Instant::now();
+    let mut last_t = start;
+    let mut last_d = device.layer_dma_descriptors();
+    let max_dur = Duration::from_secs(60);
+
+    while running.load(Ordering::SeqCst) && start.elapsed() < max_dur {
+        std::thread::sleep(Duration::from_millis(1000));
+        let now = Instant::now();
+        let d = device.layer_dma_descriptors();
+        let elapsed = (now - last_t).as_secs_f32();
+        let frames = (d.wrapping_sub(last_d) as f32) / (COUNT as f32);
+        let fps = frames / elapsed;
+        println!("compositor: {fps:5.1} fps ({frames:>5.0} frames / {elapsed:.3}s)");
+        last_t = now;
+        last_d = d;
+    }
+
     device.commit_layers();
     println!("Cleared layers (count=0). Screen returns to black.");
     Ok(())
