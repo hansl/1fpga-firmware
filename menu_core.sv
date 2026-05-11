@@ -231,10 +231,12 @@ assign CLK_VIDEO = clk_sys;
 ////////////////////////////////////////////////////////////////////////////
 // Compositor scanout → VGA_* → ASCAL → HDMI.
 //
-// Phase 1 emits a fixed colour-bar pattern with a 1-pixel white border
-// so we can confirm timing, clocking, and HDMI sink negotiation.
-// Subsequent phases swap the pattern source for a layer-table walk
-// that reads LAYER_TABLE_OFFSET.
+// Walks the on-chip layer cache (filled by layer_dma each frame) and
+// paints solid-colour layers over a black background, one pixel per
+// clk_sys cycle. The cache read port is owned by the compositor;
+// during each HBlank it builds the active list for the next scanline
+// (see compositor.sv + scanline_filter.sv), and during the active
+// region a parallel comparator picks the topmost match.
 //
 // We deliberately bypass the framework's video_mixer:
 //   - We don't need scandoubling, hq2x, gamma, or HDMI freeze
@@ -252,18 +254,23 @@ assign CLK_VIDEO = clk_sys;
 wire [7:0] comp_r, comp_g, comp_b;
 wire       comp_hs, comp_vs, comp_hb, comp_vb;
 wire       comp_ce_pix;
+wire [7:0]   comp_cache_slot;
+wire [255:0] comp_cache_data;
 
 compositor u_compositor (
-	.clk     (clk_sys),
-	.rst_n   (pll_locked),
-	.ce_pix  (comp_ce_pix),
-	.r       (comp_r),
-	.g       (comp_g),
-	.b       (comp_b),
-	.hsync   (comp_hs),
-	.vsync   (comp_vs),
-	.hblank  (comp_hb),
-	.vblank  (comp_vb)
+	.clk           (clk_sys),
+	.rst_n         (pll_locked),
+	.ce_pix        (comp_ce_pix),
+	.r             (comp_r),
+	.g             (comp_g),
+	.b             (comp_b),
+	.hsync         (comp_hs),
+	.vsync         (comp_vs),
+	.hblank        (comp_hb),
+	.vblank        (comp_vb),
+	.cache_slot_o  (comp_cache_slot),
+	.cache_data_i  (comp_cache_data),
+	.layer_count_i (reg_layer_count)
 );
 
 // Compositor drives VGA_* directly. CE_PIXEL is held high because
@@ -612,13 +619,14 @@ blit_engine u_blit_engine (
 );
 
 ////////////////////////////////////////////////////////////////////////////
-// Layer-cache + DMA (Phase 2a step 2).
+// Layer-cache + DMA (Phase 2a step 2/3).
 //
 // On every vsync rising edge, layer_dma fetches `layer_count`
 // descriptors starting at the active half of `layer_table_base`
-// (PROTOCOL.md §11.2) and writes them into layer_cache. The renderer
-// (step 3) consumes the cache via its read port; for step 2 the read
-// port is held idle (slot 0) and its output is wire-suppressed.
+// (PROTOCOL.md §11.2) and writes them into layer_cache. The
+// compositor reads the cache through its `cache_slot_o` /
+// `cache_data_i` port during each HBlank to build a per-scanline
+// active list (see scanline_filter.sv).
 ////////////////////////////////////////////////////////////////////////////
 
 // Edge-detect on compositor vsync (compositor's own clock = clk_sys).
@@ -636,21 +644,14 @@ wire [7:0]   cache_wr_slot;
 wire [255:0] cache_wr_data;
 wire         cache_wr_en;
 
-// layer_cache read port (consumed by step 3 renderer; idle for now).
-wire [255:0] cache_rd_data;
-
 layer_cache u_layer_cache (
     .clk        (clk_sys),
     .wr_slot_i  (cache_wr_slot),
     .wr_data_i  (cache_wr_data),
     .wr_en_i    (cache_wr_en),
-    .rd_slot_i  (8'd0),
-    .rd_data_o  (cache_rd_data)
+    .rd_slot_i  (comp_cache_slot),
+    .rd_data_o  (comp_cache_data)
 );
-
-// Step 2 only writes the cache; the read port is stubbed. Suppress the
-// unused-output warning until the renderer in step 3 consumes it.
-wire _unused_cache_rd = &{1'b0, cache_rd_data, 1'b0};
 
 // layer_dma → DDRAM master signals.
 wire [28:0] layer_dma_addr;

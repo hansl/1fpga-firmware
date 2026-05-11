@@ -1,57 +1,65 @@
 //============================================================================
 //
-//  Compositor scanout — Phase 1 (test pattern).
+//  Compositor scanout — Phase 2a step 3 (solid-colour layer walker).
 //
-//  Replaces the framework's MISTER_FB scanout path with our own per-scanline
-//  pixel generator. At Phase 1 the output is a fixed test pattern (color
-//  bars + a 1-pixel white border) — no layer-table reads yet, no DDR3
-//  traffic. Just enough to validate that:
+//  Drives VGA_R/G/B/HS/VS/DE directly from a host-managed layer table
+//  cached on-chip by `layer_dma` + `layer_cache`. Each scanline:
 //
-//    1. The video clock + timing generator drive a stable HDMI sink.
-//    2. VGA_R/G/B/HS/VS/DE wiring flows through the framework's HDMI
-//       pipeline correctly with FB_EN = 0.
-//    3. ASCAL accepts our timing and scales it to the user's HDMI mode.
+//    1. During HBlank, `scanline_filter` walks the cached layers and
+//       picks those whose `dst` rect covers the *next* scanline,
+//       writing them into a small `active` array.
+//    2. During active scanout, this module's per-pixel painter walks
+//       `active` in parallel: for each x, the topmost (highest-index)
+//       hit's `color` is output; if no hit, the pixel is black.
 //
-//  Phase 2 will replace the test pattern with a layer-table walk that
-//  reads from the host-managed layer descriptors at LAYER_TABLE_OFFSET
-//  and samples textures from the existing texture pool.
+//  Slot index is z-order (PROTOCOL.md §11.1): slot 0 = back, slot
+//  N = front. The painter therefore wants the *latest* match in
+//  `active`, which is achieved by an always_comb for-loop that
+//  scans low-to-high with last-assignment-wins semantics.
+//
+//  Phase 2a only honours solid-colour layers (`tex_id == 0xFFFF`).
+//  Textured layers are dropped by `scanline_filter`; they light up
+//  in Phase 2b.
 //
 //  Timing: 1280×720 @ 30 Hz with stuffed blanking, 50 MHz pixel clock
 //  (== clk_sys). The framework's ASCAL accepts arbitrary core-side
-//  timings and scales to whatever HDMI mode the user has configured;
-//  we just need a stable VSYNC/HSYNC/DE pulse train. Stuffed blanking
-//  (large H_TOTAL, V_TOTAL) lets the math come out at 50 MHz × ~30 Hz
-//  with active 1280×720.
+//  timings and scales to whatever HDMI mode the user has configured.
 //
 //    H: 1280 active + 386 blank = 1666 total
 //    V:  720 active + 280 blank = 1000 total
 //    => 50 MHz / (1666 × 1000) ≈ 30.01 Hz
 //
-//  HSYNC and VSYNC are positive-polarity (matches what most ASCAL
-//  configurations and HDMI sinks accept).
+//  HSYNC and VSYNC are positive-polarity.
 //
 //============================================================================
 
-module compositor (
+module compositor #(
+    parameter int MAX_ACTIVE = 16
+) (
     input  logic        clk,        // CLK_VIDEO == pixel clock (50 MHz)
     input  logic        rst_n,
 
-    // CE_PIXEL for the framework — always asserted because we run at
-    // the actual pixel rate. Kept as an output (rather than tied off
-    // upstream) so future variants can divide if clk_video runs
-    // faster than the pixel rate.
+    // CE_PIXEL for the framework — always 1 (we run at pixel rate).
     output logic        ce_pix,
 
-    // Pixel data + timing for the framework's ASCAL. HSync / VSync
-    // are positive-polarity pulses; HBlank / VBlank are positive
-    // during the blanking interval (i.e. inverse of DE).
+    // Pixel data + timing for the framework's ASCAL.
     output logic [7:0]  r,
     output logic [7:0]  g,
     output logic [7:0]  b,
     output logic        hsync,
     output logic        vsync,
     output logic        hblank,
-    output logic        vblank
+    output logic        vblank,
+
+    // Layer-cache read port. The compositor owns this; it walks the
+    // cache during each HBlank to build the active list for the next
+    // scanline.
+    output logic [7:0]   cache_slot_o,
+    input  logic [255:0] cache_data_i,
+
+    // Count from the host (LAYER_COMMIT.count). Sampled at each
+    // HBlank start; 0 means "no layers", and the painter emits black.
+    input  logic [8:0]   layer_count_i
 );
 
     // ---- Timing constants (1280×720 @ 30 Hz, 50 MHz pixel clock) ------
@@ -67,15 +75,9 @@ module compositor (
     localparam int V_BP     = 270;
     localparam int V_TOTAL  = V_ACTIVE + V_FP + V_SYNC + V_BP; // 1000
 
-    // Counter widths sized to H_TOTAL=1666 → 11 bits, V_TOTAL=1000 → 10 bits.
     logic [11:0] hcount;
     logic [11:0] vcount;
 
-    // ---- ce_pix is always asserted ----------------------------------
-    // CLK_VIDEO runs at the pixel rate (we bypass the framework's
-    // video_mixer, which is the only reason a 4×-pixel CLK_VIDEO with
-    // a divided ce_pix would have been required). ASCAL is happy
-    // capturing on every cycle.
     assign ce_pix = 1'b1;
 
     // ---- Counter advance ---------------------------------------------
@@ -98,7 +100,6 @@ module compositor (
     end
 
     // ---- Sync / DE generation ----------------------------------------
-    // Sync windows: directly after the front porch.
     wire h_in_sync = (hcount >= H_ACTIVE + H_FP)
                   && (hcount <  H_ACTIVE + H_FP + H_SYNC);
     wire v_in_sync = (vcount >= V_ACTIVE + V_FP)
@@ -106,46 +107,67 @@ module compositor (
     wire h_active  = (hcount < H_ACTIVE);
     wire v_active  = (vcount < V_ACTIVE);
 
-    // ---- Test pattern -------------------------------------------------
-    // 8 vertical color bars across the screen + 1-pixel white border.
-    // Lets us eyeball that DE / sync are aligned and the whole screen
-    // is being addressed. With H_ACTIVE = 1280, /160 gives us 8 bars.
-    logic [2:0] bar_idx;
-    assign bar_idx = hcount[9:7]; // groups of 128, close enough to 160
-
-    logic [7:0] bar_r, bar_g, bar_b;
-    always_comb begin
-        unique case (bar_idx)
-            3'd0: {bar_r, bar_g, bar_b} = 24'hFF_FF_FF; // white
-            3'd1: {bar_r, bar_g, bar_b} = 24'hFF_FF_00; // yellow
-            3'd2: {bar_r, bar_g, bar_b} = 24'h00_FF_FF; // cyan
-            3'd3: {bar_r, bar_g, bar_b} = 24'h00_FF_00; // green
-            3'd4: {bar_r, bar_g, bar_b} = 24'hFF_00_FF; // magenta
-            3'd5: {bar_r, bar_g, bar_b} = 24'hFF_00_00; // red
-            3'd6: {bar_r, bar_g, bar_b} = 24'h00_00_FF; // blue
-            3'd7: {bar_r, bar_g, bar_b} = 24'h20_20_20; // dark grey
-        endcase
+    // ---- HBlank edge → kick filter ------------------------------------
+    // Trigger one cycle after hcount == H_ACTIVE-1 transitions to
+    // hcount == H_ACTIVE (i.e. exactly when h_active falls).
+    logic prev_h_active;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) prev_h_active <= 1'b0;
+        else        prev_h_active <= h_active;
     end
+    wire build_start = prev_h_active & ~h_active;
 
-    wire on_border = h_active && v_active
-                  && ((hcount == 0) || (hcount == H_ACTIVE - 1)
-                   || (vcount == 0) || (vcount == V_ACTIVE - 1));
+    // y_next wraps at V_TOTAL so HBlank of the last line builds the
+    // first line of the next frame.
+    wire [11:0] y_next = (vcount == V_TOTAL - 1) ? 12'd0 : vcount + 12'd1;
+
+    // ---- Scanline filter ---------------------------------------------
+    logic [4:0]                 active_count;
+    logic signed [16:0]         active_dst_x_lo [MAX_ACTIVE-1:0];
+    logic signed [17:0]         active_dst_x_hi [MAX_ACTIVE-1:0];
+    logic [31:0]                active_color    [MAX_ACTIVE-1:0];
+
+    scanline_filter #(.MAX_ACTIVE(MAX_ACTIVE)) u_filter (
+        .clk              (clk),
+        .rst_n            (rst_n),
+        .start_i          (build_start),
+        .y_next_i         (y_next),
+        .layer_count_i    (layer_count_i),
+        .cache_slot_o     (cache_slot_o),
+        .cache_data_i     (cache_data_i),
+        .active_count_o   (active_count),
+        .active_dst_x_lo_o(active_dst_x_lo),
+        .active_dst_x_hi_o(active_dst_x_hi),
+        .active_color_o   (active_color)
+    );
+
+    // ---- Per-pixel painter ------------------------------------------
+    // Scan low-to-high so the topmost (highest-index) hit wins via
+    // last-assignment-wins. BGRA byte order: B at LSB, R at byte 2.
+    wire signed [17:0] x_s = $signed({6'b0, hcount});
+
+    logic [31:0] pix_color;
+    always_comb begin
+        pix_color = 32'h0000_0000; // black background
+        for (int i = 0; i < MAX_ACTIVE; i++) begin
+            if (i < int'(active_count)
+                && x_s >= $signed({active_dst_x_lo[i][16], active_dst_x_lo[i]})
+                && x_s <  active_dst_x_hi[i]) begin
+                pix_color = active_color[i];
+            end
+        end
+    end
 
     logic [7:0] pix_r, pix_g, pix_b;
     always_comb begin
-        if (!h_active || !v_active) begin
-            // Blanking interval — must drive 0 per HDMI conventions.
+        if (h_active && v_active) begin
+            pix_r = pix_color[23:16];
+            pix_g = pix_color[15:8];
+            pix_b = pix_color[7:0];
+        end else begin
             pix_r = 8'd0;
             pix_g = 8'd0;
             pix_b = 8'd0;
-        end else if (on_border) begin
-            pix_r = 8'hFF;
-            pix_g = 8'hFF;
-            pix_b = 8'hFF;
-        end else begin
-            pix_r = bar_r;
-            pix_g = bar_g;
-            pix_b = bar_b;
         end
     end
 
