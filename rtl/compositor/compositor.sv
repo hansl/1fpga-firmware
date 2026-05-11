@@ -288,13 +288,17 @@ module compositor #(
         end
     end
 
+    // Just the x-range portion of the topmost-textured coverage
+    // check. The z-order comparison vs solid_idx (which would otherwise
+    // chain a 16-deep solid scan into the comparator) is deferred to
+    // stage 2 so it runs on _q1 values; the chain is broken at the
+    // pipeline register.
     wire signed [16:0] topmost_lo_s = {active_dst_x_lo[topmost_tex_idx][16],
                                        active_dst_x_lo[topmost_tex_idx]};
     wire signed [17:0] topmost_hi_s = active_dst_x_hi[topmost_tex_idx];
-    wire topmost_tex_covers_c = topmost_tex_valid
-                             && x_s >= {topmost_lo_s[16], topmost_lo_s}
-                             && x_s <  topmost_hi_s
-                             && (!solid_hit_c || (topmost_tex_idx > solid_idx_c));
+    wire topmost_tex_range_c = topmost_tex_valid
+                            && x_s >= {topmost_lo_s[16], topmost_lo_s}
+                            && x_s <  topmost_hi_s;
 
     logic other_tex_hit_c;
     always_comb begin
@@ -315,8 +319,9 @@ module compositor #(
     // register stage gets the matching 1-cycle delay here so the
     // output beat for pixel X is fully consistent.
     logic        solid_hit_q1;
+    logic [4:0]  solid_idx_q1;
     logic [31:0] solid_color_q1;
-    logic        topmost_tex_covers_q1;
+    logic        topmost_tex_range_q1;
     logic        other_tex_hit_q1;
     logic [31:0] tex_pixel_q1;
     logic        h_in_sync_q1, v_in_sync_q1;
@@ -324,25 +329,27 @@ module compositor #(
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            solid_hit_q1          <= 1'b0;
-            solid_color_q1        <= 32'd0;
-            topmost_tex_covers_q1 <= 1'b0;
-            other_tex_hit_q1      <= 1'b0;
-            tex_pixel_q1          <= 32'd0;
-            h_in_sync_q1          <= 1'b0;
-            v_in_sync_q1          <= 1'b0;
-            h_active_q1           <= 1'b0;
-            v_active_q1           <= 1'b0;
+            solid_hit_q1         <= 1'b0;
+            solid_idx_q1         <= 5'd0;
+            solid_color_q1       <= 32'd0;
+            topmost_tex_range_q1 <= 1'b0;
+            other_tex_hit_q1     <= 1'b0;
+            tex_pixel_q1         <= 32'd0;
+            h_in_sync_q1         <= 1'b0;
+            v_in_sync_q1         <= 1'b0;
+            h_active_q1          <= 1'b0;
+            v_active_q1          <= 1'b0;
         end else begin
-            solid_hit_q1          <= solid_hit_c;
-            solid_color_q1        <= solid_color_c;
-            topmost_tex_covers_q1 <= topmost_tex_covers_c;
-            other_tex_hit_q1      <= other_tex_hit_c;
-            tex_pixel_q1          <= tex_pixel;
-            h_in_sync_q1          <= h_in_sync;
-            v_in_sync_q1          <= v_in_sync;
-            h_active_q1           <= h_active;
-            v_active_q1           <= v_active;
+            solid_hit_q1         <= solid_hit_c;
+            solid_idx_q1         <= solid_idx_c;
+            solid_color_q1       <= solid_color_c;
+            topmost_tex_range_q1 <= topmost_tex_range_c;
+            other_tex_hit_q1     <= other_tex_hit_c;
+            tex_pixel_q1         <= tex_pixel;
+            h_in_sync_q1         <= h_in_sync;
+            v_in_sync_q1         <= v_in_sync;
+            h_active_q1          <= h_active;
+            v_active_q1          <= v_active;
         end
     end
 
@@ -362,9 +369,17 @@ module compositor #(
     wire [15:0] blend_b = tex_b * tex_a + bg_b * inv_a;
     wire [31:0] blended_color = {8'hFF, blend_r[15:8], blend_g[15:8], blend_b[15:8]};
 
+    // Final topmost-textured coverage: x-range gate from stage 0
+    // (registered) ANDed with the z-order check, which now runs on
+    // registered solid_idx_q1 and the already-registered
+    // topmost_tex_idx. Combinational depth here is just a 5-bit
+    // compare + 2 ANDs — well under the 10 ns budget.
+    wire topmost_tex_covers = topmost_tex_range_q1
+                           && (!solid_hit_q1 || (topmost_tex_idx > solid_idx_q1));
+
     logic [31:0] pix_color;
     always_comb begin
-        if (topmost_tex_covers_q1) begin
+        if (topmost_tex_covers) begin
             pix_color = blended_color;
         end else if (other_tex_hit_q1) begin
             pix_color = DEBUG_TEX_COLOR;
