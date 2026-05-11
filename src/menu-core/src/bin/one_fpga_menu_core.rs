@@ -894,6 +894,24 @@ fn layer_draw(base: u32) -> Result<(), DeviceError> {
         ..DeviceConfig::default()
     })?;
 
+    let info = device.video_info();
+    println!(
+        "Framework HDMI mode (VIDEO_INFO): {}x{}",
+        info.width, info.height
+    );
+    println!(
+        "Compositor native:                 1920x1080 @ ~41 Hz (100 MHz pixel clock)"
+    );
+    if info.width != 1920 || info.height != 1080 {
+        println!(
+            "NOTE: ASCAL is feeding HDMI at {}x{}, not 1080p. Our 1920x1080 \n\
+             output will be either downscaled or clipped depending on the \n\
+             MiSTer.ini `vscale_mode`. To see the demo fill the screen, set \n\
+             `video_mode=` to a 1080p mode in /media/fat/MiSTer.ini.",
+            info.width, info.height
+        );
+    }
+
     // BGRA byte order (PROTOCOL.md §11): u32 LE bytes are [B, G, R, A].
     let navy    = 0xFF_05_10_40u32; // dark navy: B=40 G=10 R=05
     let header  = 0xFF_10_30_80u32; // muted steel-blue header
