@@ -140,6 +140,7 @@ module compositor #(
     logic signed [16:0]         active_dst_x_lo [MAX_ACTIVE-1:0];
     logic signed [17:0]         active_dst_x_hi [MAX_ACTIVE-1:0];
     logic [31:0]                active_color    [MAX_ACTIVE-1:0];
+    logic [15:0]                active_tex_id   [MAX_ACTIVE-1:0];
 
     scanline_filter #(.MAX_ACTIVE(MAX_ACTIVE)) u_filter (
         .clk              (clk),
@@ -152,12 +153,20 @@ module compositor #(
         .active_count_o   (active_count),
         .active_dst_x_lo_o(active_dst_x_lo),
         .active_dst_x_hi_o(active_dst_x_hi),
-        .active_color_o   (active_color)
+        .active_color_o   (active_color),
+        .active_tex_id_o  (active_tex_id)
     );
 
     // ---- Per-pixel painter ------------------------------------------
     // Scan low-to-high so the topmost (highest-index) hit wins via
     // last-assignment-wins. BGRA byte order: B at LSB, R at byte 2.
+    //
+    // Phase 2b step 1: textured layers (tex_id != 0xFFFF) paint a
+    // fixed debug-magenta. Phase 2b step 2 will replace the magenta
+    // with a per-pixel read from a line buffer that the texture_unit
+    // fills during the previous active scanout.
+    localparam logic [31:0] DEBUG_TEX_COLOR = 32'hFF_FF_00_FF; // BGRA magenta
+
     wire signed [17:0] x_s = $signed({6'b0, hcount});
 
     logic [31:0] pix_color;
@@ -167,7 +176,9 @@ module compositor #(
             if (i < int'(active_count)
                 && x_s >= $signed({active_dst_x_lo[i][16], active_dst_x_lo[i]})
                 && x_s <  active_dst_x_hi[i]) begin
-                pix_color = active_color[i];
+                pix_color = (active_tex_id[i] == 16'hFFFF)
+                          ? active_color[i]
+                          : DEBUG_TEX_COLOR;
             end
         end
     end

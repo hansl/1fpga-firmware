@@ -20,9 +20,10 @@
 //  margin above the worst-case count=256 walk. If you shrink HBlank
 //  below 258, full layer-count frames will clip.
 //
-//  Phase 2a only honours solid-colour layers (tex_id == 0xFFFF).
-//  Textured layers are silently dropped from the active list — they
-//  light up in Phase 2b.
+//  Phase 2b step 1: textured layers (tex_id != 0xFFFF) are kept in
+//  the active list. Their tex_id field rides along so the painter
+//  (and, in step 2, the texture_unit) can route them through the
+//  texel-sampler path instead of using the solid `color` field.
 //
 //  Output capacity: parametrised by MAX_ACTIVE. Hits beyond the cap
 //  are silently dropped. Default 16 is enough for a typical UI scene
@@ -57,7 +58,11 @@ module scanline_filter #(
     output logic [4:0]              active_count_o,
     output logic signed [16:0]      active_dst_x_lo_o [MAX_ACTIVE-1:0],
     output logic signed [17:0]      active_dst_x_hi_o [MAX_ACTIVE-1:0],
-    output logic [31:0]             active_color_o    [MAX_ACTIVE-1:0]
+    output logic [31:0]             active_color_o    [MAX_ACTIVE-1:0],
+    // tex_id rides along with each active entry. 0xFFFF means
+    // solid-colour (use `color` field); anything else means the
+    // painter / texture_unit will sample texels for this rect.
+    output logic [15:0]             active_tex_id_o   [MAX_ACTIVE-1:0]
 );
 
     typedef enum logic [1:0] {
@@ -83,8 +88,7 @@ module scanline_filter #(
     wire [15:0]        dst_h  = cache_data_i[95:80];
     wire [31:0]        color  = cache_data_i[191:160];
 
-    wire enabled  = flags[0];
-    wire is_solid = (tex_id == 16'hFFFF);
+    wire enabled = flags[0];
 
     // Y-in-range test. dst_y is i16 (layer can extend off-screen top);
     // dst_h is u16. y_next_i is u12. Compare in 17-bit signed.
@@ -93,7 +97,10 @@ module scanline_filter #(
     wire signed [16:0] y_next_s   = $signed({5'b0, y_next_latched});
     wire y_in_range = (y_next_s >= dst_y_lo_s) && (y_next_s < dst_y_hi_s);
 
-    wire hit = data_valid_q && enabled && is_solid && y_in_range;
+    // Phase 2b: accept both solid (tex_id == 0xFFFF) and textured
+    // (tex_id < 0xFFFF) layers. The painter / texture_unit downstream
+    // routes them differently based on the recorded tex_id.
+    wire hit = data_valid_q && enabled && y_in_range;
 
     // dst_x extends to 17-bit signed; dst_x + dst_w to 18-bit (worst
     // case dst_x = -32768, dst_w = 65535 → 32767 which fits 17-bit
@@ -118,6 +125,7 @@ module scanline_filter #(
                 active_dst_x_lo_o[i] <= 17'd0;
                 active_dst_x_hi_o[i] <= 18'd0;
                 active_color_o[i]    <= 32'd0;
+                active_tex_id_o[i]   <= 16'd0;
             end
         end else begin
             // 1-cycle data pipeline: data_valid_q true iff the *previous*
@@ -160,6 +168,7 @@ module scanline_filter #(
                 active_dst_x_lo_o[active_idx_q] <= hit_dst_x_lo;
                 active_dst_x_hi_o[active_idx_q] <= hit_dst_x_hi;
                 active_color_o[active_idx_q]    <= color;
+                active_tex_id_o[active_idx_q]   <= tex_id;
                 active_idx_q                    <= active_idx_q + 5'd1;
             end
         end
