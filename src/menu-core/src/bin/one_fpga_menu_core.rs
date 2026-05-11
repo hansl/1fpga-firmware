@@ -120,12 +120,11 @@ pub enum Command {
     /// eyeballing z-order behaviour. Runs until Ctrl-C or 60 s.
     LayerDraw,
 
-    /// Phase 2b step 1 visual: uploads a 64×64 BGRA texture, commits
-    /// a 4-layer scene with one *textured* layer (slot 2) plus two
-    /// solid panels and a background. Renderer currently paints the
-    /// textured slot in fixed debug-magenta (texture sampling lands in
-    /// step 2). PASS = magenta where the textured panel sits, normal
-    /// colours for the solid panels. Runs until Ctrl-C or 60 s.
+    /// Phase 2b step 2 visual: uploads a 256×256 BGRA checkerboard,
+    /// commits a 4-layer scene with one textured slot. PASS = the
+    /// checkerboard appears centred (red/yellow 32-pixel cells),
+    /// surrounded by navy bg, blue header, and a cyan panel bottom-
+    /// left. Runs until Ctrl-C or 60 s.
     LayerTexProbe,
 }
 
@@ -974,16 +973,18 @@ fn layer_draw(base: u32) -> Result<(), DeviceError> {
     Ok(())
 }
 
-/// Phase 2b step 1 verification.
+/// Phase 2b step 2 verification.
 ///
-/// Builds a 4-layer scene with one textured layer in the mix. The
-/// renderer currently paints textured layers in a fixed debug-magenta
-/// because the texel-sampler path lands in step 2; visually you should
-/// see magenta where the textured panel sits and the usual solid
-/// colours for the other slots. The texture's pixel content itself is
-/// irrelevant for step 1 — we're just checking that the textured
-/// layer survives `scanline_filter`, lands in the active list with a
-/// non-sentinel tex_id, and lights up the painter's textured branch.
+/// Builds a 4-layer scene with one textured layer in the mix. Step 2
+/// wires up the texture_unit + line_buffer pipeline, so the textured
+/// slot now renders ACTUAL pixels from the uploaded texture (a 256×256
+/// red/yellow checkerboard) instead of the step-1 debug magenta.
+///
+/// Sizing notes:
+///   - Texture is 256×256 BGRA so the textured layer's src rect
+///     (= dst rect since `textured()` defaults src=dst) stays in
+///     bounds.
+///   - dst_x and dst_y are even — line_buffer alignment requirement.
 fn layer_tex_probe(base: u32) -> Result<(), DeviceError> {
     let mut device = Device::open_with(DeviceConfig {
         base_phys_addr: base,
@@ -996,12 +997,10 @@ fn layer_tex_probe(base: u32) -> Result<(), DeviceError> {
         info.width, info.height
     );
 
-    // Upload a 64×64 BGRA checkerboard. Content is moot for step 1;
-    // we just need a valid texture descriptor so the host call paths
-    // are exercised end-to-end.
-    const TEX_W: u16 = 64;
-    const TEX_H: u16 = 64;
-    const CELL: u16 = 8;
+    // Upload a 256×256 BGRA checkerboard.
+    const TEX_W: u16 = 256;
+    const TEX_H: u16 = 256;
+    const CELL: u16 = 32;
     let red = protocol::Rgba::new(0xFF, 0x00, 0x00, 0xFF);
     let yellow = protocol::Rgba::new(0xFF, 0xFF, 0x00, 0xFF);
     let mut tex_bytes = vec![0u8; (TEX_W as usize) * (TEX_H as usize) * 4];
@@ -1020,7 +1019,7 @@ fn layer_tex_probe(base: u32) -> Result<(), DeviceError> {
         data: &tex_bytes,
     })?;
     println!(
-        "Uploaded 64×64 checker texture: id={}, base={:#010X}",
+        "Uploaded 256×256 checker texture: id={}, base={:#010X}",
         tex.id, tex.phys_addr
     );
 
@@ -1028,19 +1027,19 @@ fn layer_tex_probe(base: u32) -> Result<(), DeviceError> {
     let header = 0xFF_10_30_80u32;
     let cyan   = 0xFF_00_FF_FFu32;
 
-    // Slot 2 is the textured layer — 400×400 panel centred. Step 1
-    // paints it magenta regardless of texture content.
+    // Slot 2 is the textured layer — 256×256 panel slightly right of
+    // centre (even dst_x for line-buffer alignment).
     device.set_layer(0, &protocol::LayerDescriptor::solid(navy,    0,   0, 1920, 1080))?;
     device.set_layer(1, &protocol::LayerDescriptor::solid(header,  0,   0, 1920,  120))?;
-    device.set_layer(2, &protocol::LayerDescriptor::textured(tex.id, 760, 340, 400, 400))?;
+    device.set_layer(2, &protocol::LayerDescriptor::textured(tex.id, 832, 412, 256, 256))?;
     device.set_layer(3, &protocol::LayerDescriptor::solid(cyan,   200, 700,  500, 300))?;
     device.commit_layers();
     const COUNT: u32 = 4;
 
     println!(
         "Committed 4 layers (slot 2 is textured, tex_id={}). \n\
-         Expect: navy bg, blue header, magenta 400×400 panel centred, cyan panel bottom-left. \n\
-         Ctrl-C to exit (max 60 s).",
+         Expect: navy bg, blue header, red/yellow 256×256 checkerboard centred, \n\
+         cyan panel bottom-left. Ctrl-C to exit (max 60 s).",
         tex.id
     );
 
