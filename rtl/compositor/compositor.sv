@@ -21,13 +21,24 @@
 //  Textured layers are dropped by `scanline_filter`; they light up
 //  in Phase 2b.
 //
-//  Timing: 1280×720 @ 30 Hz with stuffed blanking, 50 MHz pixel clock
+//  Timing: 1280×720 with minimum-blanking, 50 MHz pixel clock
 //  (== clk_sys). The framework's ASCAL accepts arbitrary core-side
-//  timings and scales to whatever HDMI mode the user has configured.
+//  timings and scales to whatever HDMI mode the user has configured;
+//  internally we just produce a stable HSync/VSync/DE pulse train.
 //
-//    H: 1280 active + 386 blank = 1666 total
-//    V:  720 active + 280 blank = 1000 total
-//    => 50 MHz / (1666 × 1000) ≈ 30.01 Hz
+//    H: 1280 active + 280 blank = 1560 total
+//    V:  720 active +  20 blank =  740 total
+//    => 50 MHz / (1560 × 740) ≈ 43.3 Hz
+//
+//  HBlank is set just wide enough to fit the worst-case `scanline_filter`
+//  walk of all 256 layer slots (count + 2 = 258 cycles) plus a small
+//  margin. Shrinking it further would clip the active list build for
+//  full layer-count frames. VBlank just needs to be > 1 scanline so
+//  the once-per-frame `layer_dma` pass fits comfortably.
+//
+//  To push past ~45 fps we'd need either a faster pixel clock (which
+//  reopens the timing-closure question on blit_engine), or a
+//  parallel/pipelined scanline walker that doesn't gate HBlank width.
 //
 //  HSYNC and VSYNC are positive-polarity.
 //
@@ -62,18 +73,23 @@ module compositor #(
     input  logic [8:0]   layer_count_i
 );
 
-    // ---- Timing constants (1280×720 @ 30 Hz, 50 MHz pixel clock) ------
+    // ---- Timing constants (1280×720, min-blanking, 50 MHz pixel clock).
+    // HBlank = 280 cycles: 22 cycles' margin above the scanline_filter
+    //                       worst case (count=256 → 258 cycles).
+    // VBlank = 20 lines:   layer_dma's ~1.5 kcycle once-per-frame fetch
+    //                       fits in <1 line, leaving plenty of margin.
+    // fps = 50 MHz / (1560 × 740) ≈ 43.3 Hz.
     localparam int H_ACTIVE = 1280;
-    localparam int H_FP     = 110;
+    localparam int H_FP     = 60;
     localparam int H_SYNC   = 40;
-    localparam int H_BP     = 236;
-    localparam int H_TOTAL  = H_ACTIVE + H_FP + H_SYNC + H_BP; // 1666
+    localparam int H_BP     = 180;
+    localparam int H_TOTAL  = H_ACTIVE + H_FP + H_SYNC + H_BP; // 1560
 
     localparam int V_ACTIVE = 720;
-    localparam int V_FP     = 5;
-    localparam int V_SYNC   = 5;
-    localparam int V_BP     = 270;
-    localparam int V_TOTAL  = V_ACTIVE + V_FP + V_SYNC + V_BP; // 1000
+    localparam int V_FP     = 4;
+    localparam int V_SYNC   = 4;
+    localparam int V_BP     = 12;
+    localparam int V_TOTAL  = V_ACTIVE + V_FP + V_SYNC + V_BP; // 740
 
     logic [11:0] hcount;
     logic [11:0] vcount;

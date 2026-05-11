@@ -15,8 +15,10 @@
 //                write to active list.
 //
 //  Total cycles per pass: layer_count + ~2 (one for IDLE→ISSUE, one
-//  for DRAIN). 256 layers → ~258 cycles. HBlank window is 386 cycles
-//  (for the compositor's 1280x720@30 timing) so we have ~30% headroom.
+//  for DRAIN). 256 layers → ~258 cycles. HBlank window is 280 cycles
+//  in the compositor's min-blanking 1280x720@43 timing — i.e. ~8%
+//  margin above the worst-case count=256 walk. If you shrink HBlank
+//  below 258, full layer-count frames will clip.
 //
 //  Phase 2a only honours solid-colour layers (tex_id == 0xFFFF).
 //  Textured layers are silently dropped from the active list — they
