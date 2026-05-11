@@ -120,11 +120,11 @@ pub enum Command {
     /// eyeballing z-order behaviour. Runs until Ctrl-C or 60 s.
     LayerDraw,
 
-    /// Phase 2b step 2 visual: uploads a 256×256 BGRA checkerboard,
-    /// commits a 4-layer scene with one textured slot. PASS = the
-    /// checkerboard appears centred (red/yellow 32-pixel cells),
-    /// surrounded by navy bg, blue header, and a cyan panel bottom-
-    /// left. Runs until Ctrl-C or 60 s.
+    /// Phase 2c step 1 visual: uploads a 256×256 BGRA texture (red
+    /// disc with smooth alpha falloff) and commits a 4-layer scene.
+    /// PASS = a soft red disc visibly fading into the navy background
+    /// near its edges (SrcAlpha blend). Sharp solid panels above /
+    /// below the disc, FPS readout to confirm timing closure.
     LayerTexProbe,
 }
 
@@ -997,16 +997,26 @@ fn layer_tex_probe(base: u32) -> Result<(), DeviceError> {
         info.width, info.height
     );
 
-    // Upload a 256×256 BGRA checkerboard.
+    // Upload a 256×256 BGRA texture: a red disc with a smooth alpha
+    // fall-off from the centre. Demonstrates SrcAlpha blending against
+    // the navy background — opaque red in the middle, fading into the
+    // background colour at the edges.
     const TEX_W: u16 = 256;
     const TEX_H: u16 = 256;
-    const CELL: u16 = 32;
-    let red = protocol::Rgba::new(0xFF, 0x00, 0x00, 0xFF);
-    let yellow = protocol::Rgba::new(0xFF, 0xFF, 0x00, 0xFF);
+    let cx: f32 = (TEX_W as f32) / 2.0;
+    let cy: f32 = (TEX_H as f32) / 2.0;
+    let r_max: f32 = (TEX_W as f32) / 2.0;
     let mut tex_bytes = vec![0u8; (TEX_W as usize) * (TEX_H as usize) * 4];
     for y in 0..TEX_H {
         for x in 0..TEX_W {
-            let color = if ((x / CELL) + (y / CELL)) % 2 == 0 { red } else { yellow };
+            let dx = (x as f32) - cx;
+            let dy = (y as f32) - cy;
+            let dist = (dx * dx + dy * dy).sqrt();
+            let t = (1.0 - (dist / r_max)).clamp(0.0, 1.0);
+            // Smoothstep-ish curve so the falloff isn't perfectly
+            // linear. alpha = t^2 (sharper centre, softer edge).
+            let alpha = (t * t * 255.0) as u8;
+            let color = protocol::Rgba::new(0xFF, 0x40, 0x40, alpha);
             let off = ((y as usize) * (TEX_W as usize) + (x as usize)) * 4;
             tex_bytes[off..off + 4].copy_from_slice(&color.to_u32().to_le_bytes());
         }
@@ -1019,7 +1029,7 @@ fn layer_tex_probe(base: u32) -> Result<(), DeviceError> {
         data: &tex_bytes,
     })?;
     println!(
-        "Uploaded 256×256 checker texture: id={}, base={:#010X}",
+        "Uploaded 256×256 alpha-disc texture: id={}, base={:#010X}",
         tex.id, tex.phys_addr
     );
 
@@ -1038,8 +1048,9 @@ fn layer_tex_probe(base: u32) -> Result<(), DeviceError> {
 
     println!(
         "Committed 4 layers (slot 2 is textured, tex_id={}). \n\
-         Expect: navy bg, blue header, red/yellow 256×256 checkerboard centred, \n\
-         cyan panel bottom-left. Ctrl-C to exit (max 60 s).",
+         Expect: navy bg, blue header, soft red disc fading into the navy \n\
+         around the centre (SrcAlpha blend), cyan panel bottom-left. \n\
+         Ctrl-C to exit (max 60 s).",
         tex.id
     );
 
