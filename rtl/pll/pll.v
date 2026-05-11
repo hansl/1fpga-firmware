@@ -7,17 +7,27 @@
 // because their `inclk[3]` input must come from a PLL output, not a
 // raw input pin (Cyclone V routing constraint, error 15836).
 //
-// Single 50 MHz output drives clk_sys (blit engine + ring fetcher +
-// regs) and is also re-exposed as CLK_VIDEO in menu_core.sv. The
-// compositor runs at this clock with CE_PIXEL held high; we bypass
-// the framework's video_mixer (which would have demanded
-// CLK_VIDEO ≥ 4× pixel rate). VCO = 800 MHz, well within the
-// Cyclone V's 600-1300 MHz fractional-PLL range.
+// Two outputs, both from a 600 MHz VCO (= 50 MHz × 12), well within
+// the Cyclone V's 600-1300 MHz fractional-PLL range:
+//
+//   outclk_0 = 50 MHz  → clk_sys. Drives the blit engine, ring
+//              fetcher, register file, and layer_dma. Proven stable
+//              at 50 MHz with positive slack on all paths.
+//   outclk_1 = 100 MHz → clk_video. Drives the compositor and
+//              scanline_filter (Phase 2a step 4 / native 1080p
+//              scanout). The compositor's combinational logic is
+//              simple enough to close timing comfortably at 100 MHz
+//              on Cyclone V SE-A6.
+//
+// The two are related (same PLL); Quartus times paths between them as
+// synchronous unless menu_core.sdc explicitly marks CDC synchronizers
+// as false_paths.
 
 module pll(
 	input  refclk,
 	input  rst,
 	output outclk_0,
+	output outclk_1,
 	output locked
 );
 
@@ -25,11 +35,11 @@ altera_pll #(
 	.fractional_vco_multiplier("false"),
 	.reference_clock_frequency  ("50.0 MHz"),
 	.operation_mode             ("normal"),
-	.number_of_clocks           (1),
+	.number_of_clocks           (2),
 	.output_clock_frequency0    ("50.000000 MHz"),
 	.phase_shift0               ("0 ps"),
 	.duty_cycle0                (50),
-	.output_clock_frequency1    ("0 MHz"),
+	.output_clock_frequency1    ("100.000000 MHz"),
 	.phase_shift1               ("0 ps"),
 	.duty_cycle1                (50),
 	.output_clock_frequency2    ("0 MHz"),
@@ -58,7 +68,7 @@ altera_pll #(
 ) altera_pll_i (
 	.rst       (rst),
 	.refclk    (refclk),
-	.outclk    (outclk_0),
+	.outclk    ({outclk_1, outclk_0}),
 	.locked    (locked),
 	.fboutclk  (),
 	.fbclk     (1'b0)

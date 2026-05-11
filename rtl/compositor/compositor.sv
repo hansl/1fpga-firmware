@@ -21,24 +21,20 @@
 //  Textured layers are dropped by `scanline_filter`; they light up
 //  in Phase 2b.
 //
-//  Timing: 1280×720 with minimum-blanking, 50 MHz pixel clock
-//  (== clk_sys). The framework's ASCAL accepts arbitrary core-side
-//  timings and scales to whatever HDMI mode the user has configured;
-//  internally we just produce a stable HSync/VSync/DE pulse train.
+//  Timing: native 1920×1080 with minimum-blanking, 100 MHz pixel
+//  clock (= clk_video, separate from clk_sys via a second PLL output).
+//  ASCAL still accepts arbitrary core-side timing; producing pixels at
+//  native resolution lets text/UI keep their pixel-perfect crispness
+//  on a 1080p HDMI sink.
 //
-//    H: 1280 active + 280 blank = 1560 total
-//    V:  720 active +  20 blank =  740 total
-//    => 50 MHz / (1560 × 740) ≈ 43.3 Hz
+//    H: 1920 active + 280 blank = 2200 total
+//    V: 1080 active +  20 blank = 1100 total
+//    => 100 MHz / (2200 × 1100) ≈ 41.3 Hz
 //
 //  HBlank is set just wide enough to fit the worst-case `scanline_filter`
 //  walk of all 256 layer slots (count + 2 = 258 cycles) plus a small
-//  margin. Shrinking it further would clip the active list build for
-//  full layer-count frames. VBlank just needs to be > 1 scanline so
-//  the once-per-frame `layer_dma` pass fits comfortably.
-//
-//  To push past ~45 fps we'd need either a faster pixel clock (which
-//  reopens the timing-closure question on blit_engine), or a
-//  parallel/pipelined scanline walker that doesn't gate HBlank width.
+//  margin. VBlank just needs to be > 1 scanline so the once-per-frame
+//  `layer_dma` pass fits comfortably.
 //
 //  HSYNC and VSYNC are positive-polarity.
 //
@@ -73,23 +69,25 @@ module compositor #(
     input  logic [8:0]   layer_count_i
 );
 
-    // ---- Timing constants (1280×720, min-blanking, 50 MHz pixel clock).
+    // ---- Timing constants (1920×1080, min-blanking, 100 MHz pixel
+    //                         clock = clk_video).
     // HBlank = 280 cycles: 22 cycles' margin above the scanline_filter
     //                       worst case (count=256 → 258 cycles).
-    // VBlank = 20 lines:   layer_dma's ~1.5 kcycle once-per-frame fetch
-    //                       fits in <1 line, leaving plenty of margin.
-    // fps = 50 MHz / (1560 × 740) ≈ 43.3 Hz.
-    localparam int H_ACTIVE = 1280;
+    // VBlank = 20 lines:   layer_dma still runs on clk_sys (50 MHz),
+    //                       takes ~1.5 kcycles ≈ 3 kcycles on clk_video
+    //                       — well under 1 line of 2200 cycles.
+    // fps = 100 MHz / (2200 × 1100) ≈ 41.3 Hz.
+    localparam int H_ACTIVE = 1920;
     localparam int H_FP     = 60;
     localparam int H_SYNC   = 40;
     localparam int H_BP     = 180;
-    localparam int H_TOTAL  = H_ACTIVE + H_FP + H_SYNC + H_BP; // 1560
+    localparam int H_TOTAL  = H_ACTIVE + H_FP + H_SYNC + H_BP; // 2200
 
-    localparam int V_ACTIVE = 720;
+    localparam int V_ACTIVE = 1080;
     localparam int V_FP     = 4;
     localparam int V_SYNC   = 4;
     localparam int V_BP     = 12;
-    localparam int V_TOTAL  = V_ACTIVE + V_FP + V_SYNC + V_BP; // 740
+    localparam int V_TOTAL  = V_ACTIVE + V_FP + V_SYNC + V_BP; // 1100
 
     logic [11:0] hcount;
     logic [11:0] vcount;

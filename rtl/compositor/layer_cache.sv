@@ -1,14 +1,23 @@
 //============================================================================
 //
-//  Layer-descriptor cache (Phase 2a step 2).
+//  Layer-descriptor cache (Phase 2a, dual-clock).
 //
 //  256-entry × 32-byte BRAM holding the active layer table for the
-//  current frame. Write port is filled by `layer_dma` once per frame
-//  during VBlank; read port is consumed by the compositor's scanline
-//  walker (Phase 2a step 3).
+//  current frame. Write port is filled by `layer_dma` on `wr_clk`
+//  (= clk_sys, 50 MHz); read port is consumed by the compositor's
+//  scanline walker on `rd_clk` (= clk_video, 100 MHz for native
+//  1080p scanout).
 //
-//  Layout: 256 × 256 bits. Quartus infers ~8 M10K blocks per port
-//  (Cyclone V SE-A6 has hundreds, no pressure).
+//  Layout: 256 × 256 bits. Quartus infers ~8 M10K blocks (true
+//  dual-port mode with independent clocks) — Cyclone V SE-A6 has
+//  hundreds, no pressure.
+//
+//  Read-during-write coherence: with independent clocks, the read
+//  port returns "old" data for a slot concurrently being written.
+//  Cross-clock metastability of the data itself isn't a concern —
+//  the BRAM cells are stable storage and the read port latches a
+//  full 256-bit word per `rd_clk` cycle. We accept one frame of
+//  stale data on slots the DMA is updating during the same scanout.
 //
 //  Bit-mapping mirrors the host-side `LayerDescriptor` (PROTOCOL.md
 //  §11.1), starting at byte 0 in the LSB:
@@ -27,34 +36,30 @@
 //    [199:192]  opacity        (u8)
 //    [255:200]  reserved (host writes 0)
 //
-//  The renderer extracts fields by bit-slice rather than re-decoding
-//  bytes, so DDR3 endianness is "first byte in LSB" for the whole
-//  256-bit word. The DMA writer assembles beats LSB-first to match.
-//
 //============================================================================
 
 module layer_cache (
-    input  logic        clk,
-
-    // Write port — driven by layer_dma.
+    // Write port — driven by layer_dma on clk_sys.
+    input  logic        wr_clk,
     input  logic [7:0]   wr_slot_i,
     input  logic [255:0] wr_data_i,
     input  logic         wr_en_i,
 
-    // Read port — driven by the renderer in step 3. One-cycle latency:
-    // sample `rd_slot_i` on cycle N, `rd_data_o` is valid on cycle N+1.
+    // Read port — driven by the compositor on clk_video. One-cycle
+    // latency: sample `rd_slot_i` on cycle N, `rd_data_o` is valid
+    // on cycle N+1.
+    input  logic        rd_clk,
     input  logic [7:0]   rd_slot_i,
     output logic [255:0] rd_data_o
 );
 
     logic [255:0] mem [0:255];
 
-    // Synchronous read with read-during-write "old" semantics
-    // (Quartus's default for inferred BRAM). The renderer never reads
-    // from a slot that's currently being written (DMA only runs during
-    // VBlank, well before the renderer starts its first active line).
-    always_ff @(posedge clk) begin
+    always_ff @(posedge wr_clk) begin
         if (wr_en_i) mem[wr_slot_i] <= wr_data_i;
+    end
+
+    always_ff @(posedge rd_clk) begin
         rd_data_o <= mem[rd_slot_i];
     end
 

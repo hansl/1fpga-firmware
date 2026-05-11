@@ -207,48 +207,44 @@ assign BUTTONS   = 2'b00;
 // System clock.
 //
 // Cyclone V's clock-select blocks in sys_top require a PLL output on
-// inclk[3] (synthesis error 15836 if driven by a raw input pin). One
-// 50→50 MHz pass-through output drives clk_sys (compositor + blit
-// engine + ring fetcher + regs) and is re-exposed as CLK_VIDEO; the
-// compositor runs at the pixel rate with CE_PIXEL held high (no 4×
-// CLK_VIDEO requirement because we bypass video_mixer). When Phase 2
-// pushes pixel rates higher (≈75-150 MHz for native 1080p), add a
-// second PLL output for the higher clk_video and keep clk_sys at 50.
+// inclk[3] (synthesis error 15836 if driven by a raw input pin). Two
+// outputs from the core PLL:
+//   clk_sys (50 MHz)   — blit engine, ring fetcher, regs, layer_dma
+//   clk_video (100 MHz) — compositor + scanline_filter, also exposed
+//                          to the framework as CLK_VIDEO so ASCAL
+//                          captures at the native-1080p pixel rate.
+// The two are related clocks (same PLL); CDC paths are confined to
+// the synchronisers below, which menu_core.sdc marks as false_paths.
 ////////////////////////////////////////////////////////////////////////////
 
-wire clk_sys;     // 50 MHz: blit engine, ring fetcher, regs, compositor
+wire clk_sys;     // 50 MHz: blit engine, ring fetcher, regs, layer_dma
+wire clk_video;   // 100 MHz: compositor + scanline_filter
 wire pll_locked;
 
 pll pll_inst (
 	.refclk   (CLK_50M),
 	.rst      (1'b0),
 	.outclk_0 (clk_sys),
+	.outclk_1 (clk_video),
 	.locked   (pll_locked)
 );
 
-assign CLK_VIDEO = clk_sys;
+assign CLK_VIDEO = clk_video;
 
 ////////////////////////////////////////////////////////////////////////////
 // Compositor scanout → VGA_* → ASCAL → HDMI.
 //
-// Walks the on-chip layer cache (filled by layer_dma each frame) and
-// paints solid-colour layers over a black background, one pixel per
-// clk_sys cycle. The cache read port is owned by the compositor;
-// during each HBlank it builds the active list for the next scanline
-// (see compositor.sv + scanline_filter.sv), and during the active
-// region a parallel comparator picks the topmost match.
+// Runs on clk_video (100 MHz) for native-1080p output. Walks the
+// on-chip layer cache (filled by layer_dma on clk_sys each frame)
+// and paints solid-colour layers over a black background, one
+// pixel per clk_video cycle. The cache read port is owned by the
+// compositor; during each HBlank it builds the active list for the
+// next scanline (see compositor.sv + scanline_filter.sv), and during
+// the active region a parallel comparator picks the topmost match.
 //
-// We deliberately bypass the framework's video_mixer:
-//   - We don't need scandoubling, hq2x, gamma, or HDMI freeze
-//     (none apply to a UI compositor that emits final pixels).
-//   - video_mixer always synthesises its scandoubler module (even
-//     with scandoubler=0), and it expects CLK_VIDEO ≥ 4× pixel rate.
-//     At 50 MHz pixel that puts CLK_VIDEO at 200 MHz, which is at
-//     the edge of Cyclone V SE-A6 fabric — Quartus reported -4.4 ns
-//     setup slack on internal video_mixer paths even at idle.
-//   - Bypassing collapses two clock domains to one (clk_sys at the
-//     pixel rate) and lets timing close cleanly. ASCAL is happy
-//     capturing on every CLK_VIDEO cycle when CE_PIXEL = 1.
+// We deliberately bypass the framework's video_mixer (its always-
+// synthesised scandoubler + 4×-pixel CLK_VIDEO rule made timing
+// closure impossible at the rates we want for native 1080p).
 ////////////////////////////////////////////////////////////////////////////
 
 wire [7:0] comp_r, comp_g, comp_b;
@@ -257,9 +253,39 @@ wire       comp_ce_pix;
 wire [7:0]   comp_cache_slot;
 wire [255:0] comp_cache_data;
 
+// Reset bridge: pll_locked is asynchronous to clk_video, so feeding
+// it raw as rst_n would risk recovery/removal violations at the
+// faster clock. Standard pattern: assert async (low), deassert sync.
+(* preserve *) logic comp_rst_n_sync_0;
+(* preserve *) logic comp_rst_n_sync_1;
+always_ff @(posedge clk_video or negedge pll_locked) begin
+    if (!pll_locked) begin
+        comp_rst_n_sync_0 <= 1'b0;
+        comp_rst_n_sync_1 <= 1'b0;
+    end else begin
+        comp_rst_n_sync_0 <= 1'b1;
+        comp_rst_n_sync_1 <= comp_rst_n_sync_0;
+    end
+end
+wire comp_rst_n = comp_rst_n_sync_1;
+
+// CDC: clk_sys-owned `reg_layer_count` (9 bits) into the clk_video
+// domain. layer_count only changes on `LAYER_COMMIT` writes, which
+// are bursty (once per frame, separated by millions of clk_video
+// cycles), so the two-flop synchronisers see a stable value with
+// vanishing probability of mid-transition bit-mixing. Marked false-
+// path in menu_core.sdc so Quartus doesn't try to time the
+// inter-domain leg.
+(* preserve *) logic [8:0] layer_count_sync_0;
+(* preserve *) logic [8:0] layer_count_sync_1;
+always_ff @(posedge clk_video) begin
+    layer_count_sync_0 <= reg_layer_count;
+    layer_count_sync_1 <= layer_count_sync_0;
+end
+
 compositor u_compositor (
-	.clk           (clk_sys),
-	.rst_n         (pll_locked),
+	.clk           (clk_video),
+	.rst_n         (comp_rst_n),
 	.ce_pix        (comp_ce_pix),
 	.r             (comp_r),
 	.g             (comp_g),
@@ -270,7 +296,7 @@ compositor u_compositor (
 	.vblank        (comp_vb),
 	.cache_slot_o  (comp_cache_slot),
 	.cache_data_i  (comp_cache_data),
-	.layer_count_i (reg_layer_count)
+	.layer_count_i (layer_count_sync_1)
 );
 
 // Compositor drives VGA_* directly. CE_PIXEL is held high because
@@ -629,26 +655,42 @@ blit_engine u_blit_engine (
 // active list (see scanline_filter.sv).
 ////////////////////////////////////////////////////////////////////////////
 
-// Edge-detect on compositor vsync (compositor's own clock = clk_sys).
-logic prev_comp_vs;
-always_ff @(posedge clk_sys) prev_comp_vs <= comp_vs;
-wire vsync_rising = comp_vs & ~prev_comp_vs;
+// CDC: clk_video-owned `comp_vs` sampled into clk_sys for layer_dma's
+// start_i pulse. Two-flop synchroniser + a third register to detect
+// the rising edge in the destination domain. comp_vs holds high for
+// V_SYNC × H_TOTAL clk_video cycles (= ~4400 cycles for 1080p
+// timing = ~2200 clk_sys cycles), so the slower clock catches every
+// rising edge with comfortable margin.
+(* preserve *) logic comp_vs_sync_0;
+(* preserve *) logic comp_vs_sync_1;
+logic comp_vs_sync_2;
+always_ff @(posedge clk_sys) begin
+    comp_vs_sync_0 <= comp_vs;
+    comp_vs_sync_1 <= comp_vs_sync_0;
+    comp_vs_sync_2 <= comp_vs_sync_1;
+end
+wire vsync_rising = comp_vs_sync_1 & ~comp_vs_sync_2;
 
 // Active-table base = layer_table_base + (active ? 0x2000 : 0x0).
-// 0x2000 = LAYER_TABLE_SIZE = 256 * 32 bytes.
+// 0x2000 = LAYER_TABLE_SIZE = 256 * 32 bytes. All clk_sys-domain
+// signals — no CDC needed.
 wire [31:0] active_layer_base = reg_layer_table_base
                               + (reg_layer_active ? 32'h0000_2000 : 32'd0);
 
-// layer_dma → layer_cache write port.
+// layer_dma (clk_sys) → layer_cache write port (clk_sys).
+// Compositor (clk_video) → layer_cache read port (clk_video).
+// The BRAM straddles both domains; see layer_cache.sv for the
+// independent-clock dual-port arrangement.
 wire [7:0]   cache_wr_slot;
 wire [255:0] cache_wr_data;
 wire         cache_wr_en;
 
 layer_cache u_layer_cache (
-    .clk        (clk_sys),
+    .wr_clk     (clk_sys),
     .wr_slot_i  (cache_wr_slot),
     .wr_data_i  (cache_wr_data),
     .wr_en_i    (cache_wr_en),
+    .rd_clk     (clk_video),
     .rd_slot_i  (comp_cache_slot),
     .rd_data_o  (comp_cache_data)
 );
