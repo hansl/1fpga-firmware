@@ -874,20 +874,20 @@ fn layer_probe(base: u32) -> Result<(), DeviceError> {
     Ok(())
 }
 
-/// Phase 2a step 3 visual demo: 5-layer scene + compositor FPS probe.
+/// Phase 2a visual demo: 5-layer scene + compositor FPS probe.
 ///
-/// Layer stack (slot 0 = back):
-///   0  navy   1280×720 background
-///   1  blue   1280×80  header bar (top)
-///   2  cyan   300×200  panel at (100, 200)
-///   3  magenta 300×200 panel at (250, 250) — overlaps cyan
-///   4  yellow 300×200  panel at (400, 300) — overlaps magenta
+/// Layer stack (slot 0 = back, native-1080p coordinates):
+///   0  navy    1920×1080 background
+///   1  header  1920×120  bar (top)
+///   2  cyan     420×280  panel at (160, 320)
+///   3  magenta  420×280  panel at (360, 400) — overlaps cyan
+///   4  yellow   420×280  panel at (560, 480) — overlaps magenta
 ///
 /// Static (committed once); the loop just samples LAYER_DEBUG every
 /// second to compute the compositor's frame rate. Each frame the FPGA
 /// reads `count` (= 5) descriptors, so descriptors-per-second / count
-/// is the actual frame rate. Expected ≈ 30 fps at the compositor's
-/// nominal 1280×720@30 timing.
+/// is the actual frame rate. Expected ≈ 41 fps at the compositor's
+/// native-1080p timing (100 MHz / (2200 × 1100)).
 fn layer_draw(base: u32) -> Result<(), DeviceError> {
     let mut device = Device::open_with(DeviceConfig {
         base_phys_addr: base,
@@ -903,11 +903,11 @@ fn layer_draw(base: u32) -> Result<(), DeviceError> {
 
     const COUNT: u32 = 5;
 
-    device.set_layer(0, &protocol::LayerDescriptor::solid(navy,     0,   0, 1280, 720))?;
-    device.set_layer(1, &protocol::LayerDescriptor::solid(header,   0,   0, 1280,  80))?;
-    device.set_layer(2, &protocol::LayerDescriptor::solid(cyan,    100, 200,  300, 200))?;
-    device.set_layer(3, &protocol::LayerDescriptor::solid(magenta, 250, 250,  300, 200))?;
-    device.set_layer(4, &protocol::LayerDescriptor::solid(yellow,  400, 300,  300, 200))?;
+    device.set_layer(0, &protocol::LayerDescriptor::solid(navy,      0,   0, 1920, 1080))?;
+    device.set_layer(1, &protocol::LayerDescriptor::solid(header,    0,   0, 1920,  120))?;
+    device.set_layer(2, &protocol::LayerDescriptor::solid(cyan,     160, 320,  420,  280))?;
+    device.set_layer(3, &protocol::LayerDescriptor::solid(magenta,  360, 400,  420,  280))?;
+    device.set_layer(4, &protocol::LayerDescriptor::solid(yellow,   560, 480,  420,  280))?;
     device.commit_layers();
 
     println!("Committed 5-layer scene (navy bg + header + cyan/magenta/yellow panels).");
