@@ -7,6 +7,8 @@
 //! drive the ring via [`menu_core_host::Frame`]. See the docs on each
 //! subcommand for the visual outcome to verify.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
@@ -27,7 +29,6 @@ use menu_core_host::{device, mem};
 // Crates the binary itself doesn't reference, but the package depends
 // on for the lib (`text`) or for the sibling `menu_demo` binary. The
 // workspace lint is enabled per-target, so we declare them here.
-use ctrlc as _;
 use cyclone_v as _;
 use fontdue as _;
 use thiserror as _;
@@ -112,6 +113,12 @@ pub enum Command {
     /// halts. No visual change — the colour-bar test pattern stays
     /// (the renderer lands in step 3).
     LayerProbe,
+
+    /// Phase 2a step 3 visual: holds a 5-layer scene (navy background,
+    /// header bar, three overlapping coloured panels) on HDMI and
+    /// prints the compositor's frame rate every second. Useful for
+    /// eyeballing z-order behaviour. Runs until Ctrl-C or 60 s.
+    LayerDraw,
 }
 
 fn parse_u32_hex_or_dec(s: &str) -> Result<u32, std::num::ParseIntError> {
@@ -177,6 +184,7 @@ fn main() {
         Some(Command::ClipTest) => clip_test(base).map_err(Into::into),
         Some(Command::RttTest) => rtt_test(base).map_err(Into::into),
         Some(Command::LayerProbe) => layer_probe(base).map_err(Into::into),
+        Some(Command::LayerDraw) => layer_draw(base).map_err(Into::into),
         None => {
             info!(
                 "no subcommand given — re-run with `probe`, `ring-test`, `draw-test`, …, or `--print-layout`"
@@ -863,6 +871,79 @@ fn layer_probe(base: u32) -> Result<(), DeviceError> {
     }
 
     println!("PASS: layer plumbing + DMA + LAYER_COMMIT round-trip verified.");
+    Ok(())
+}
+
+/// Phase 2a step 3 visual demo: 5-layer scene + compositor FPS probe.
+///
+/// Layer stack (slot 0 = back):
+///   0  navy   1280×720 background
+///   1  blue   1280×80  header bar (top)
+///   2  cyan   300×200  panel at (100, 200)
+///   3  magenta 300×200 panel at (250, 250) — overlaps cyan
+///   4  yellow 300×200  panel at (400, 300) — overlaps magenta
+///
+/// Static (committed once); the loop just samples LAYER_DEBUG every
+/// second to compute the compositor's frame rate. Each frame the FPGA
+/// reads `count` (= 5) descriptors, so descriptors-per-second / count
+/// is the actual frame rate. Expected ≈ 30 fps at the compositor's
+/// nominal 1280×720@30 timing.
+fn layer_draw(base: u32) -> Result<(), DeviceError> {
+    let mut device = Device::open_with(DeviceConfig {
+        base_phys_addr: base,
+        ..DeviceConfig::default()
+    })?;
+
+    // BGRA byte order (PROTOCOL.md §11): u32 LE bytes are [B, G, R, A].
+    let navy    = 0xFF_05_10_40u32; // dark navy: B=40 G=10 R=05
+    let header  = 0xFF_10_30_80u32; // muted steel-blue header
+    let cyan    = 0xFF_00_FF_FFu32; // B=FF G=FF R=00
+    let magenta = 0xFF_FF_00_FFu32; // B=FF G=00 R=FF
+    let yellow  = 0xFF_FF_FF_00u32; // B=00 G=FF R=FF
+
+    const COUNT: u32 = 5;
+
+    device.set_layer(0, &protocol::LayerDescriptor::solid(navy,     0,   0, 1280, 720))?;
+    device.set_layer(1, &protocol::LayerDescriptor::solid(header,   0,   0, 1280,  80))?;
+    device.set_layer(2, &protocol::LayerDescriptor::solid(cyan,    100, 200,  300, 200))?;
+    device.set_layer(3, &protocol::LayerDescriptor::solid(magenta, 250, 250,  300, 200))?;
+    device.set_layer(4, &protocol::LayerDescriptor::solid(yellow,  400, 300,  300, 200))?;
+    device.commit_layers();
+
+    println!("Committed 5-layer scene (navy bg + header + cyan/magenta/yellow panels).");
+    println!("Compositor FPS sampled every second. Ctrl-C to exit (max 60 s).");
+
+    let running = Arc::new(AtomicBool::new(true));
+    {
+        let r = running.clone();
+        ctrlc::set_handler(move || r.store(false, Ordering::SeqCst))
+            .map_err(|e| DeviceError::Io(std::io::Error::other(e.to_string())))?;
+    }
+
+    let start = Instant::now();
+    let mut last_t = start;
+    let mut last_d = device.layer_dma_descriptors();
+    let max_dur = Duration::from_secs(60);
+
+    while running.load(Ordering::SeqCst) && start.elapsed() < max_dur {
+        std::thread::sleep(Duration::from_millis(1000));
+        let now = Instant::now();
+        let d = device.layer_dma_descriptors();
+        let elapsed = (now - last_t).as_secs_f32();
+        let desc_delta = d.wrapping_sub(last_d) as f32;
+        let frames = desc_delta / (COUNT as f32);
+        let fps = frames / elapsed;
+        println!(
+            "compositor: {fps:5.1} fps  ({frames:>5.0} frames / {elapsed:.3}s, \
+             LAYER_DEBUG Δ={desc_delta:.0})"
+        );
+        last_t = now;
+        last_d = d;
+    }
+
+    // Clean exit: black screen.
+    device.commit_layers();
+    println!("Cleared layers (count=0). Screen returns to black.");
     Ok(())
 }
 
