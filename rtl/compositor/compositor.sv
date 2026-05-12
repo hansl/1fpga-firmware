@@ -21,17 +21,15 @@
 //  Textured layers are dropped by `scanline_filter`; they light up
 //  in Phase 2b.
 //
-//  Timing: native 1920×1080, 90 MHz pixel clock (= clk_video,
+//  Timing: native 1920×1080, 100 MHz pixel clock (= clk_video,
 //  separate from clk_sys via a second PLL output). ASCAL still
 //  accepts arbitrary core-side timing; producing pixels at native
 //  resolution lets text/UI keep their pixel-perfect crispness on a
-//  1080p HDMI sink. Pixel clock dropped from 100 MHz when the
-//  painter grew the SrcAlpha blend + second 16-deep scan — see
-//  pll.v for the timing-closure rationale.
+//  1080p HDMI sink.
 //
 //    H: 1920 active + 600 blank = 2520 total
 //    V: 1080 active +  20 blank = 1100 total
-//    => 90 MHz / (2520 × 1100) ≈ 32.5 Hz
+//    => 100 MHz / (2520 × 1100) ≈ 36.0 Hz
 //
 //  HBlank is set just wide enough to fit the worst-case `scanline_filter`
 //  walk of all 256 layer slots (count + 2 = 258 cycles) plus a small
@@ -43,9 +41,14 @@
 //============================================================================
 
 module compositor #(
-    parameter int MAX_ACTIVE = 16
+    // Reduced from 16 to 8 to keep the painter's per-pixel scans
+    // under the 10 ns clk_video budget. 8 active layers per scanline
+    // is enough for a typical UI scene; if we ever need more, the
+    // first move is pipelining the scan into stages of 8 (each stage
+    // half the LUT depth), not bumping this further.
+    parameter int MAX_ACTIVE = 8
 ) (
-    input  logic        clk,        // CLK_VIDEO == pixel clock (90 MHz)
+    input  logic        clk,        // CLK_VIDEO == pixel clock (100 MHz)
     input  logic        rst_n,
 
     // CE_PIXEL for the framework — always 1 (we run at pixel rate).
@@ -90,7 +93,7 @@ module compositor #(
     input  logic [63:0] line_buf_data_i
 );
 
-    // ---- Timing constants (1920×1080, 90 MHz pixel clock).
+    // ---- Timing constants (1920×1080, 100 MHz pixel clock).
     // HBlank widened in Phase 2b step 2 to fit:
     //   - scanline_filter worst case (count=256): ~260 cycles
     //   - kick-to-clk_sys CDC: ~10 cycles
@@ -98,7 +101,7 @@ module compositor #(
     //   - margin: ~40 cycles
     // Total HBlank ≈ 600 cycles.
     // VBlank = 20 lines (unchanged; layer_dma fits comfortably).
-    // fps = 90 MHz / (2520 × 1100) ≈ 32.5 Hz.
+    // fps = 100 MHz / (2520 × 1100) ≈ 36.0 Hz.
     localparam int H_ACTIVE = 1920;
     localparam int H_FP     = 60;
     localparam int H_SYNC   = 40;
@@ -239,8 +242,10 @@ module compositor #(
     // layer covers this pixel).
     //
     // Phase 2c step 1 limitations:
-    //   - Only the topmost textured layer's pixels render. Other
-    //     textured slots still paint debug-magenta.
+    //   - Only the topmost textured layer renders. Other textured
+    //     slots are silently skipped (no debug colour — keeping the
+    //     painter's combinational depth small enough to close timing
+    //     at 100 MHz).
     //   - Blend uses the textured pixel's own alpha channel
     //     (BGRA8888). A8 textures land in step 2.
     //   - "Background" for the blend is the topmost SOLID at this x,
@@ -248,7 +253,6 @@ module compositor #(
     //     lands in step 3.
     //   - 8×8 multiplies inferred for the blend math. Cyclone V has
     //     ~150 DSP blocks; trivial to absorb 3 (R/G/B channels).
-    localparam logic [31:0] DEBUG_TEX_COLOR = 32'hFF_FF_00_FF; // BGRA magenta
 
     wire signed [17:0] x_s = $signed({6'b0, hcount});
 
@@ -302,21 +306,7 @@ module compositor #(
                             && x_s >= {topmost_lo_s[16], topmost_lo_s}
                             && x_s <  topmost_hi_s;
 
-    logic other_tex_hit_c;
-    always_comb begin
-        other_tex_hit_c = 1'b0;
-        for (int i = 0; i < MAX_ACTIVE; i++) begin
-            if (i < int'(active_count)
-                && active_tex_id[i] != 16'hFFFF
-                && (!topmost_tex_valid || i[4:0] != topmost_tex_idx)
-                && x_s >= $signed({active_dst_x_lo[i][16], active_dst_x_lo[i]})
-                && x_s <  active_dst_x_hi[i]) begin
-                other_tex_hit_c = 1'b1;
-            end
-        end
-    end
-
-    // Pipeline register between the 16-deep scans and the blend
+    // Pipeline register between the 8-deep scans and the blend
     // math. Every signal that lands in the final r/g/b/sync/de
     // register stage gets the matching 1-cycle delay here so the
     // output beat for pixel X is fully consistent.
@@ -324,7 +314,6 @@ module compositor #(
     logic [4:0]  solid_idx_q1;
     logic [31:0] solid_color_q1;
     logic        topmost_tex_range_q1;
-    logic        other_tex_hit_q1;
     logic [31:0] tex_pixel_q1;
     logic        h_in_sync_q1, v_in_sync_q1;
     logic        h_active_q1,  v_active_q1;
@@ -335,7 +324,6 @@ module compositor #(
             solid_idx_q1         <= 5'd0;
             solid_color_q1       <= 32'd0;
             topmost_tex_range_q1 <= 1'b0;
-            other_tex_hit_q1     <= 1'b0;
             tex_pixel_q1         <= 32'd0;
             h_in_sync_q1         <= 1'b0;
             v_in_sync_q1         <= 1'b0;
@@ -346,7 +334,6 @@ module compositor #(
             solid_idx_q1         <= solid_idx_c;
             solid_color_q1       <= solid_color_c;
             topmost_tex_range_q1 <= topmost_tex_range_c;
-            other_tex_hit_q1     <= other_tex_hit_c;
             tex_pixel_q1         <= tex_pixel;
             h_in_sync_q1         <= h_in_sync;
             v_in_sync_q1         <= v_in_sync;
@@ -383,8 +370,6 @@ module compositor #(
     always_comb begin
         if (topmost_tex_covers) begin
             pix_color = blended_color;
-        end else if (other_tex_hit_q1) begin
-            pix_color = DEBUG_TEX_COLOR;
         end else if (solid_hit_q1) begin
             pix_color = solid_color_q1;
         end else begin
