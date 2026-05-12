@@ -782,12 +782,11 @@ wire [9:0]  line_buf_wr_addr;
 wire [63:0] line_buf_wr_data;
 wire        line_buf_we_shared;
 wire [1:0]  tex_unit_buffer_sel;
-wire        line_buf_we [3:0];
-genvar lbk;
-generate for (lbk = 0; lbk < 4; lbk++) begin : g_lb_we
-    assign line_buf_we[lbk] = line_buf_we_shared
-                           && (tex_unit_buffer_sel == lbk[1:0]);
-end endgenerate
+wire [3:0]  line_buf_we;
+assign line_buf_we[0] = line_buf_we_shared && (tex_unit_buffer_sel == 2'd0);
+assign line_buf_we[1] = line_buf_we_shared && (tex_unit_buffer_sel == 2'd1);
+assign line_buf_we[2] = line_buf_we_shared && (tex_unit_buffer_sel == 2'd2);
+assign line_buf_we[3] = line_buf_we_shared && (tex_unit_buffer_sel == 2'd3);
 
 line_buffer u_line_buffer_0 (
     .wr_clk    (clk_sys),

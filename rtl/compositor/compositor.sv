@@ -401,7 +401,8 @@ module compositor #(
     // 64-bit BRAM word holds the desired pixel) so stage 2 can
     // half-select without recomputing the offset.
     logic buf_lsb_c [MAX_TEXTURED-1:0];
-    generate for (genvar gk = 0; gk < MAX_TEXTURED; gk++) begin : g_lb_addr
+    genvar gk;
+    generate for (gk = 0; gk < MAX_TEXTURED; gk++) begin : g_lb_addr
         wire [4:0]  slot_for_k    = active_for_buf[gk];
         wire [10:0] k_dst_x_lo    = active_dst_x_lo[slot_for_k][10:0];
         wire [11:0] k_x_off       = next_hcount - {1'b0, k_dst_x_lo};
