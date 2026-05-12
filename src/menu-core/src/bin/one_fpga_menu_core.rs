@@ -1388,28 +1388,29 @@ fn layer_multitex_probe(base: u32) -> Result<(), DeviceError> {
 }
 
 /// Realistic menu over the layer protocol: solid background +
-/// translucent panel with title and items + softly-glowing selection
-/// highlight.
+/// translucent panel with title, item labels and a selection
+/// highlight all baked into the same panel texture.
 ///
 /// Layer stack (slot 0 = back, native-1080p coords):
-///   0  navy      1920×1080 solid background
-///   1  panel     PANEL_W×PANEL_H textured (rendered into via the
-///                FPGA blit engine: translucent fill + per-glyph
-///                A8 atlas blits for the title and item labels)
-///   2  highlight HIGHLIGHT_W×item_h textured (uniform translucent
-///                accent strip; dst_y is rewritten as the selection
-///                cycles)
+///   0  navy   1920×1080 solid background
+///   1  panel  PANEL_W×PANEL_H textured (rendered into via the FPGA
+///             blit engine: translucent body + title-bar overlay +
+///             translucent highlight rect under the selected row +
+///             per-glyph A8 atlas blits for the title and items)
 ///
-/// Only layer 2 changes per "tick" — the panel texture is rendered
-/// once. Selection cycles every second to demonstrate the
-/// dirty-redraw model (one set_layer + commit_layers, no blits).
+/// One textured layer per scanline → comfortably fits HBlank. On
+/// each tick the panel is re-rendered with a new selected_idx (a
+/// fill_rect for the highlight band and full re-blit of the
+/// glyphs); the layer table itself never changes.
 ///
-/// No textured wallpaper: a 1920-wide BGRA scanline burst takes
-/// ~1920 `clk_video` cycles to read off the 50 MHz Avalon master,
-/// which exceeds the 1500-cycle HBlank budget. A full-screen photo
-/// background needs either a wider HBlank (fps cost) or moving
-/// texture_unit to `clk_video` (CDC rewrite). Out of scope for this
-/// demo.
+/// HBlank budget: a single 760-wide BGRA scanline burst is ~790
+/// `clk_video` cycles + filter wait + dispatcher overhead, well
+/// under the 1500-cycle HBlank window. Adding a second textured
+/// layer (highlight) pushes the total over 1800 and the dispatcher
+/// can't finish before active scanout, which produces a flickering
+/// black/bg picture — hence baking the highlight in instead.
+/// A full-width wallpaper layer hits the same wall harder (1920
+/// wide ≈ 1920 cycles alone).
 fn menu_text_demo(base: u32) -> Result<(), Box<dyn std::error::Error>> {
     let mut device = open_ready(base)?;
     let info = device.video_info();
@@ -1467,98 +1468,80 @@ fn menu_text_demo(base: u32) -> Result<(), Box<dyn std::error::Error>> {
         PANEL_W, PANEL_H, panel.id, panel.phys_addr
     );
 
-    // Fill the panel: dark translucent body + slightly darker title bar.
     let panel_bg = Rgba::new(0x0A, 0x10, 0x1A, 0xD0);
     let title_bar_bg = Rgba::new(0x06, 0x0A, 0x14, 0xE8);
+    let highlight_color = Rgba::new(0xFF, 0xC8, 0x60, 0xA0);
     let title_color = Rgba::new(0xFF, 0xC8, 0x60, 0xFF);
     let item_color = Rgba::new(0xF0, 0xF0, 0xF8, 0xFF);
-
     let title = "1FPGA Menu";
 
-    let mut frame = device
-        .begin_frame()
-        .set_target(&panel)?
-        .fill_rect_unclipped(Rect::new(0, 0, PANEL_W, PANEL_H), panel_bg, BlendMode::Opaque)?
-        .fill_rect_unclipped(
-            Rect::new(0, 0, PANEL_W, TITLE_BAR_H),
-            title_bar_bg,
-            BlendMode::Opaque,
-        )?;
+    let render_panel = |dev: &mut Device, selected: usize| -> Result<(), DeviceError> {
+        let mut frame = dev
+            .begin_frame()
+            .set_target(&panel)?
+            .fill_rect_unclipped(Rect::new(0, 0, PANEL_W, PANEL_H), panel_bg, BlendMode::Opaque)?
+            .fill_rect_unclipped(
+                Rect::new(0, 0, PANEL_W, TITLE_BAR_H),
+                title_bar_bg,
+                BlendMode::Opaque,
+            )?
+            .fill_rect_unclipped(
+                Rect::new(
+                    12,
+                    ITEMS_Y0 - 2 + (selected as u16) * ITEM_H,
+                    PANEL_W - 24,
+                    ITEM_H - 4,
+                ),
+                highlight_color,
+                BlendMode::SrcAlpha,
+            )?;
 
-    // Title centered in the title bar.
-    let title_w = title_atlas.measure(title) as i32;
-    let title_pen_x = ((PANEL_W as i32) - title_w) / 2;
-    frame = draw_text(
-        frame,
-        &title_tex,
-        &title_atlas,
-        title,
-        title_pen_x,
-        TITLE_Y as i32,
-        title_color,
-    )?;
-
-    // Items.
-    for (i, label) in items.iter().enumerate() {
-        let y = (ITEMS_Y0 + (i as u16) * ITEM_H) as i32;
+        // Title centered in the title bar.
+        let title_w = title_atlas.measure(title) as i32;
+        let title_pen_x = ((PANEL_W as i32) - title_w) / 2;
         frame = draw_text(
             frame,
-            &item_tex,
-            &item_atlas,
-            label,
-            ITEM_PAD_X as i32,
-            y,
-            item_color,
+            &title_tex,
+            &title_atlas,
+            title,
+            title_pen_x,
+            TITLE_Y as i32,
+            title_color,
         )?;
-    }
 
-    frame
-        .set_target_framebuffer()?
-        .submit()?
-        .wait(Duration::from_millis(2_000))?;
+        // Items.
+        for (i, label) in items.iter().enumerate() {
+            let y = (ITEMS_Y0 + (i as u16) * ITEM_H) as i32;
+            frame = draw_text(
+                frame,
+                &item_tex,
+                &item_atlas,
+                label,
+                ITEM_PAD_X as i32,
+                y,
+                item_color,
+            )?;
+        }
 
-    // --- Selection highlight: small BGRA texture, uniform low-alpha
-    // accent. The same texture is bound at different dst_y per tick.
-    const HIGHLIGHT_W: u16 = PANEL_W - 24;
-    const HIGHLIGHT_H: u16 = ITEM_H - 4;
-    let hi_color = Rgba::new(0xFF, 0xC8, 0x60, 0x50);
-    let hi_word = hi_color.to_u32().to_le_bytes();
-    let mut hi_bytes = vec![0u8; (HIGHLIGHT_W as usize) * (HIGHLIGHT_H as usize) * 4];
-    for px in hi_bytes.chunks_exact_mut(4) {
-        px.copy_from_slice(&hi_word);
-    }
-    let highlight = device.upload_texture(&TextureSpec {
-        format: TextureFormat::Rgba8888,
-        width: HIGHLIGHT_W,
-        height: HIGHLIGHT_H,
-        stride: (HIGHLIGHT_W as u32) * 4,
-        data: &hi_bytes,
-    })?;
-
-    // --- Place the panel and the initial highlight.
-    let panel_x = (1920_i32 - PANEL_W as i32) / 2;
-    let panel_y = (1080_i32 - PANEL_H as i32) / 2;
-    let highlight_x = panel_x + 12;
-    let highlight_y_for = |idx: usize| -> i16 {
-        (panel_y + (ITEMS_Y0 as i32) - 2 + (idx as i32) * (ITEM_H as i32)) as i16
+        frame
+            .set_target_framebuffer()?
+            .submit()?
+            .wait(Duration::from_millis(2_000))?;
+        Ok(())
     };
 
     let mut selected: usize = 0;
+    render_panel(&mut device, selected)?;
+
+    // --- Layer table: just two layers, navy bg behind the panel. The
+    // highlight is baked into the panel itself.
+    let panel_x = (1920_i32 - PANEL_W as i32) / 2;
+    let panel_y = (1080_i32 - PANEL_H as i32) / 2;
     let bg_navy = 0xFF_05_10_28u32;
     device.set_layer(0, &protocol::LayerDescriptor::solid(bg_navy, 0, 0, 1920, 1080))?;
     device.set_layer(
         1,
         &protocol::LayerDescriptor::textured(panel.id, panel_x as i16, panel_y as i16, PANEL_W, PANEL_H),
-    )?;
-    device.set_layer(
-        2,
-        &protocol::LayerDescriptor::textured(
-            highlight.id,
-            highlight_x as i16,
-            highlight_y_for(selected),
-            HIGHLIGHT_W,
-            HIGHLIGHT_H,
-        ),
     )?;
     device.commit_layers();
 
@@ -1579,17 +1562,7 @@ fn menu_text_demo(base: u32) -> Result<(), Box<dyn std::error::Error>> {
     while running.load(Ordering::SeqCst) && start.elapsed() < max_dur {
         if last_change.elapsed() >= Duration::from_secs(1) {
             selected = (selected + 1) % items.len();
-            device.set_layer(
-                2,
-                &protocol::LayerDescriptor::textured(
-                    highlight.id,
-                    highlight_x as i16,
-                    highlight_y_for(selected),
-                    HIGHLIGHT_W,
-                    HIGHLIGHT_H,
-                ),
-            )?;
-            device.commit_layers();
+            render_panel(&mut device, selected)?;
             last_change = Instant::now();
         }
         std::thread::sleep(Duration::from_millis(33));
