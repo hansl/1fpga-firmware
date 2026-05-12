@@ -144,6 +144,14 @@ pub enum Command {
     /// blended-on-white) demonstrating each pipeline stage's
     /// SrcAlpha composition.
     LayerMultiTexProbe,
+
+    /// Realistic menu using the layer protocol: a wallpaper texture
+    /// underneath a translucent panel with a title and a list of
+    /// items, plus a softly glowing selection highlight that cycles
+    /// through the items every second. Demonstrates the full
+    /// "host blits into textures, FPGA composites layers" model with
+    /// honest text content.
+    MenuTextDemo,
 }
 
 fn parse_u32_hex_or_dec(s: &str) -> Result<u32, std::num::ParseIntError> {
@@ -213,6 +221,7 @@ fn main() {
         Some(Command::LayerTexProbe) => layer_tex_probe(base).map_err(Into::into),
         Some(Command::LayerA8Probe) => layer_a8_probe(base).map_err(Into::into),
         Some(Command::LayerMultiTexProbe) => layer_multitex_probe(base).map_err(Into::into),
+        Some(Command::MenuTextDemo) => menu_text_demo(base),
         None => {
             info!(
                 "no subcommand given — re-run with `probe`, `ring-test`, `draw-test`, …, or `--print-layout`"
@@ -537,6 +546,7 @@ fn blend_test(base: u32) -> Result<(), DeviceError> {
 
 /// Bundled Latin Noto Sans, SIL OFL — ~27 KB.
 const NOTO_SANS: &[u8] = include_bytes!("../../fonts/NotoSans-Regular.ttf");
+const BACKGROUND_JPG: &[u8] = include_bytes!("../../../firmware-script/assets/background.jpg");
 
 fn build_text_atlas() -> Result<menu_core::text::FontAtlas, Box<dyn std::error::Error>> {
     let charset: String = (b' '..=b'~').map(|b| b as char).collect();
@@ -1376,6 +1386,280 @@ fn layer_multitex_probe(base: u32) -> Result<(), DeviceError> {
     device.commit_layers();
     println!("Cleared layers (count=0). Screen returns to black.");
     Ok(())
+}
+
+/// Realistic menu over the layer protocol: wallpaper + translucent
+/// panel with title and items + softly-glowing selection highlight.
+///
+/// Layer stack (slot 0 = back, native-1080p coords):
+///   0  black     1920×1080 fallback solid (never visible in practice)
+///   1  wallpaper 1920×1080 textured (BGRA, decoded from the embedded
+///                background.jpg, center-cropped to 1080)
+///   2  panel     PANEL_W×PANEL_H textured (rendered into via the
+///                FPGA blit engine: translucent fill + per-glyph
+///                A8 atlas blits for the title and item labels)
+///   3  highlight HIGHLIGHT_W×item_h textured (uniform translucent
+///                accent strip; dst_y is rewritten as the selection
+///                cycles)
+///
+/// Only layer 3 changes per "tick" — the panel texture is rendered
+/// once. Selection cycles every second to demonstrate the
+/// dirty-redraw model (one set_layer + commit_layers, no blits).
+fn menu_text_demo(base: u32) -> Result<(), Box<dyn std::error::Error>> {
+    let mut device = open_ready(base)?;
+    let info = device.video_info();
+    println!("Video: {}×{}", info.width, info.height);
+
+    // --- Wallpaper: decode the embedded JPEG, center-crop to 1920×1080,
+    // repack as BGRA, upload as a texture.
+    let img = image::load_from_memory(BACKGROUND_JPG)?.to_rgba8();
+    let (src_w, src_h) = (img.width(), img.height());
+    let target_w = 1920u32.min(src_w);
+    let target_h = 1080u32.min(src_h);
+    let crop_x = (src_w - target_w) / 2;
+    let crop_y = (src_h - target_h) / 2;
+    let mut wp_bytes = vec![0u8; (target_w * target_h * 4) as usize];
+    for y in 0..target_h {
+        for x in 0..target_w {
+            let p = img.get_pixel(crop_x + x, crop_y + y);
+            let off = ((y * target_w + x) * 4) as usize;
+            wp_bytes[off] = p[2];     // B
+            wp_bytes[off + 1] = p[1]; // G
+            wp_bytes[off + 2] = p[0]; // R
+            wp_bytes[off + 3] = 0xFF; // A
+        }
+    }
+    let wallpaper = device.upload_texture(&TextureSpec {
+        format: TextureFormat::Rgba8888,
+        width: target_w as u16,
+        height: target_h as u16,
+        stride: target_w * 4,
+        data: &wp_bytes,
+    })?;
+    println!(
+        "Wallpaper: {}×{} BGRA, tex_id={}, base={:#010X}",
+        target_w, target_h, wallpaper.id, wallpaper.phys_addr
+    );
+
+    // --- Font atlases: a larger one for the title, smaller for items.
+    let title_atlas = menu_core::text::build_atlas(NOTO_SANS, 56.0, &ascii_charset(), 512, 256)?;
+    let item_atlas  = menu_core::text::build_atlas(NOTO_SANS, 36.0, &ascii_charset(), 512, 256)?;
+    let title_tex = device.upload_texture(&TextureSpec {
+        format: TextureFormat::A8,
+        width: title_atlas.width,
+        height: title_atlas.height,
+        stride: title_atlas.width as u32,
+        data: &title_atlas.bytes,
+    })?;
+    let item_tex = device.upload_texture(&TextureSpec {
+        format: TextureFormat::A8,
+        width: item_atlas.width,
+        height: item_atlas.height,
+        stride: item_atlas.width as u32,
+        data: &item_atlas.bytes,
+    })?;
+
+    // --- Panel: render-target texture with translucent dark fill and
+    // rendered glyphs for title + items.
+    const PANEL_W: u16 = 760;
+    const PANEL_H: u16 = 640;
+    const ITEM_H: u16 = 56;
+    const ITEM_PAD_X: u16 = 48;
+    const TITLE_Y: u16 = 36;
+    const TITLE_BAR_H: u16 = 116;
+    const ITEMS_Y0: u16 = TITLE_BAR_H + 12;
+
+    let items: &[&str] = &[
+        "Play",
+        "Cores",
+        "Settings",
+        "Audio",
+        "Display",
+        "Network",
+        "Updates",
+        "About",
+    ];
+
+    let panel = device.create_render_target(PANEL_W, PANEL_H)?;
+    println!(
+        "Panel RT: {}×{}, tex_id={}, base={:#010X}",
+        PANEL_W, PANEL_H, panel.id, panel.phys_addr
+    );
+
+    // Fill the panel: dark translucent body + slightly darker title bar.
+    let panel_bg = Rgba::new(0x0A, 0x10, 0x1A, 0xD0);
+    let title_bar_bg = Rgba::new(0x06, 0x0A, 0x14, 0xE8);
+    let title_color = Rgba::new(0xFF, 0xC8, 0x60, 0xFF);
+    let item_color = Rgba::new(0xF0, 0xF0, 0xF8, 0xFF);
+
+    let title = "1FPGA Menu";
+
+    let mut frame = device
+        .begin_frame()
+        .set_target(&panel)?
+        .fill_rect_unclipped(Rect::new(0, 0, PANEL_W, PANEL_H), panel_bg, BlendMode::Opaque)?
+        .fill_rect_unclipped(
+            Rect::new(0, 0, PANEL_W, TITLE_BAR_H),
+            title_bar_bg,
+            BlendMode::Opaque,
+        )?;
+
+    // Title centered in the title bar.
+    let title_w = title_atlas.measure(title) as i32;
+    let title_pen_x = ((PANEL_W as i32) - title_w) / 2;
+    frame = draw_text(
+        frame,
+        &title_tex,
+        &title_atlas,
+        title,
+        title_pen_x,
+        TITLE_Y as i32,
+        title_color,
+    )?;
+
+    // Items.
+    for (i, label) in items.iter().enumerate() {
+        let y = (ITEMS_Y0 + (i as u16) * ITEM_H) as i32;
+        frame = draw_text(
+            frame,
+            &item_tex,
+            &item_atlas,
+            label,
+            ITEM_PAD_X as i32,
+            y,
+            item_color,
+        )?;
+    }
+
+    frame
+        .set_target_framebuffer()?
+        .submit()?
+        .wait(Duration::from_millis(2_000))?;
+
+    // --- Selection highlight: small BGRA texture, uniform low-alpha
+    // accent. The same texture is bound at different dst_y per tick.
+    const HIGHLIGHT_W: u16 = PANEL_W - 24;
+    const HIGHLIGHT_H: u16 = ITEM_H - 4;
+    let hi_color = Rgba::new(0xFF, 0xC8, 0x60, 0x50);
+    let hi_word = hi_color.to_u32().to_le_bytes();
+    let mut hi_bytes = vec![0u8; (HIGHLIGHT_W as usize) * (HIGHLIGHT_H as usize) * 4];
+    for px in hi_bytes.chunks_exact_mut(4) {
+        px.copy_from_slice(&hi_word);
+    }
+    let highlight = device.upload_texture(&TextureSpec {
+        format: TextureFormat::Rgba8888,
+        width: HIGHLIGHT_W,
+        height: HIGHLIGHT_H,
+        stride: (HIGHLIGHT_W as u32) * 4,
+        data: &hi_bytes,
+    })?;
+
+    // --- Place the panel and the initial highlight.
+    let panel_x = (1920_i32 - PANEL_W as i32) / 2;
+    let panel_y = (1080_i32 - PANEL_H as i32) / 2;
+    let highlight_x = panel_x + 12;
+    let highlight_y_for = |idx: usize| -> i16 {
+        (panel_y + (ITEMS_Y0 as i32) - 2 + (idx as i32) * (ITEM_H as i32)) as i16
+    };
+
+    let mut selected: usize = 0;
+    let black = 0xFF_00_00_00u32;
+    device.set_layer(0, &protocol::LayerDescriptor::solid(black, 0, 0, 1920, 1080))?;
+    device.set_layer(
+        1,
+        &protocol::LayerDescriptor::textured(wallpaper.id, 0, 0, target_w as u16, target_h as u16),
+    )?;
+    device.set_layer(
+        2,
+        &protocol::LayerDescriptor::textured(panel.id, panel_x as i16, panel_y as i16, PANEL_W, PANEL_H),
+    )?;
+    device.set_layer(
+        3,
+        &protocol::LayerDescriptor::textured(
+            highlight.id,
+            highlight_x as i16,
+            highlight_y_for(selected),
+            HIGHLIGHT_W,
+            HIGHLIGHT_H,
+        ),
+    )?;
+    device.commit_layers();
+
+    println!(
+        "Menu committed. Selection auto-cycles every 1 s — Ctrl-C to exit (max 60 s)."
+    );
+
+    let running = Arc::new(AtomicBool::new(true));
+    {
+        let r = running.clone();
+        ctrlc::set_handler(move || r.store(false, Ordering::SeqCst))
+            .map_err(|e| DeviceError::Io(std::io::Error::other(e.to_string())))?;
+    }
+
+    let start = Instant::now();
+    let mut last_change = start;
+    let max_dur = Duration::from_secs(60);
+    while running.load(Ordering::SeqCst) && start.elapsed() < max_dur {
+        if last_change.elapsed() >= Duration::from_secs(1) {
+            selected = (selected + 1) % items.len();
+            device.set_layer(
+                3,
+                &protocol::LayerDescriptor::textured(
+                    highlight.id,
+                    highlight_x as i16,
+                    highlight_y_for(selected),
+                    HIGHLIGHT_W,
+                    HIGHLIGHT_H,
+                ),
+            )?;
+            device.commit_layers();
+            last_change = Instant::now();
+        }
+        std::thread::sleep(Duration::from_millis(33));
+    }
+
+    device.commit_layers();
+    println!("Cleared layers.");
+    Ok(())
+}
+
+fn ascii_charset() -> String {
+    (b' '..=b'~').map(|b| b as char).collect()
+}
+
+fn draw_text<'a>(
+    mut frame: menu_core_host::frame::Frame<'a>,
+    atlas_tex: &menu_core_host::texture::TextureHandle,
+    atlas: &menu_core::text::FontAtlas,
+    text: &str,
+    pen_x: i32,
+    pen_y_top: i32,
+    color: Rgba,
+) -> Result<menu_core_host::frame::Frame<'a>, DeviceError> {
+    let mut x = pen_x;
+    for ch in text.chars() {
+        let g = match atlas.glyph(ch) {
+            Some(g) => *g,
+            None => continue,
+        };
+        if g.width > 0 && g.height > 0 {
+            let dst_x = (x + g.bearing_x as i32).max(0) as u16;
+            let dst_y_off = (atlas.ascent as i32) - (g.ymin as i32) - (g.height as i32);
+            let dst_y = (pen_y_top + dst_y_off).max(0) as u16;
+            frame = frame.copy_rect(
+                atlas_tex,
+                Rect::new(g.atlas_x, g.atlas_y, g.width, g.height),
+                Rect::new(dst_x, dst_y, g.width, g.height),
+                CopyOpts {
+                    blend: BlendMode::SrcAlpha,
+                    tint: Some(color),
+                    ..CopyOpts::default()
+                },
+            )?;
+        }
+        x += g.advance as i32;
+    }
+    Ok(frame)
 }
 
 fn print_layout(base: u32) {

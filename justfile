@@ -95,6 +95,7 @@ deploy-menu-core: build-menu-core
 # than what the main firmware's bookworm-based image links against.
 build-menu-core-host mode="release-dev":
     docker run --rm -t \
+        -e RUSTUP_AUTO_INSTALL=0 \
         -v "{{justfile_directory()}}":/home/rust/src \
         messense/rust-musl-cross:armv7-musleabihf \
         cargo build --target armv7-unknown-linux-musleabihf --bin one_fpga_menu_core --profile {{mode}} --no-default-features --features=platform_de10
