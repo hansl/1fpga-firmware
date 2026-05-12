@@ -260,6 +260,7 @@ wire [15:0]  comp_tex_id;
 wire [15:0]  comp_tex_src_x;
 wire [15:0]  comp_tex_ty;
 wire [11:0]  comp_tex_dst_w;
+wire [31:0]  comp_tex_tint;
 // Line buffer read port (clk_video).
 wire [9:0]   comp_line_buf_addr;
 wire [63:0]  comp_line_buf_data;
@@ -313,6 +314,7 @@ compositor u_compositor (
 	.tex_src_x_o     (comp_tex_src_x),
 	.tex_ty_o        (comp_tex_ty),
 	.tex_dst_w_o     (comp_tex_dst_w),
+	.tex_tint_color_o(comp_tex_tint),
 	.line_buf_addr_o (comp_line_buf_addr),
 	.line_buf_data_i (comp_line_buf_data)
 );
@@ -743,11 +745,13 @@ wire tex_kick_rising = tex_kick_sync_1 & ~tex_kick_sync_2;
 (* preserve *) logic [15:0] tex_src_x_sync_0, tex_src_x_sync_1;
 (* preserve *) logic [15:0] tex_ty_sync_0,    tex_ty_sync_1;
 (* preserve *) logic [11:0] tex_dst_w_sync_0, tex_dst_w_sync_1;
+(* preserve *) logic [31:0] tex_tint_sync_0,  tex_tint_sync_1;
 always_ff @(posedge clk_sys) begin
     tex_id_sync_0    <= comp_tex_id;    tex_id_sync_1    <= tex_id_sync_0;
     tex_src_x_sync_0 <= comp_tex_src_x; tex_src_x_sync_1 <= tex_src_x_sync_0;
     tex_ty_sync_0    <= comp_tex_ty;    tex_ty_sync_1    <= tex_ty_sync_0;
     tex_dst_w_sync_0 <= comp_tex_dst_w; tex_dst_w_sync_1 <= tex_dst_w_sync_0;
+    tex_tint_sync_0  <= comp_tex_tint;  tex_tint_sync_1  <= tex_tint_sync_0;
 end
 
 // Line buffer: wr_clk = clk_sys (texture_unit), rd_clk = clk_video
@@ -782,6 +786,7 @@ texture_unit u_texture_unit (
     .ty_i             (tex_ty_sync_1),
     .src_x_i          (tex_src_x_sync_1),
     .dst_w_i          (tex_dst_w_sync_1),
+    .tint_color_i     (tex_tint_sync_1),
     .tex_table_addr_i (reg_tex_table_addr),
     .line_buf_addr_o  (line_buf_wr_addr),
     .line_buf_data_o  (line_buf_wr_data),

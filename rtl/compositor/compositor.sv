@@ -86,6 +86,9 @@ module compositor #(
     output logic [15:0] tex_src_x_o,
     output logic [15:0] tex_ty_o,
     output logic [11:0] tex_dst_w_o,
+    // Tint colour for A8 textures (= layer.color). Ignored by
+    // texture_unit when format = BGRA8888.
+    output logic [31:0] tex_tint_color_o,
 
     // Line buffer read port (painter side). Address = (x - dst_x_lo)
     // >> 1 — each 64-bit word holds 2 pixels.
@@ -225,12 +228,13 @@ module compositor #(
     // on the clk_sys side to catch the rising edge.
     wire kick_window = (hcount >= 12'(H_ACTIVE + 280))
                     && (hcount <  12'(H_ACTIVE + 340));
-    assign tex_kick_o  = kick_window && topmost_tex_valid;
-    assign tex_id_o    = active_tex_id [topmost_tex_idx];
-    assign tex_src_x_o = active_src_x  [topmost_tex_idx];
-    assign tex_ty_o    = active_ty     [topmost_tex_idx];
-    assign tex_dst_w_o = active_dst_x_hi[topmost_tex_idx][11:0]
-                       - active_dst_x_lo[topmost_tex_idx][11:0];
+    assign tex_kick_o       = kick_window && topmost_tex_valid;
+    assign tex_id_o         = active_tex_id [topmost_tex_idx];
+    assign tex_src_x_o      = active_src_x  [topmost_tex_idx];
+    assign tex_ty_o         = active_ty     [topmost_tex_idx];
+    assign tex_tint_color_o = active_color  [topmost_tex_idx];
+    assign tex_dst_w_o      = active_dst_x_hi[topmost_tex_idx][11:0]
+                            - active_dst_x_lo[topmost_tex_idx][11:0];
 
     // ---- Per-pixel painter ------------------------------------------
     // Two-pass logic. First pass (combinational): find the topmost
