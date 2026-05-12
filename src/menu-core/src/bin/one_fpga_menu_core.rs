@@ -136,12 +136,15 @@ pub enum Command {
     /// into the navy background, no fringing or color shifts.
     LayerA8Probe,
 
-    /// Phase 2c step 3 visual: four textured discs side-by-side at
-    /// the same vertical position — exercising the compositor's
-    /// per-scanline multi-textured pipeline (4 line buffers,
-    /// dispatcher walking the active list, painter picking per-pixel).
-    /// PASS = three red BGRA discs + one white A8 disc, all four
-    /// visible in a row across the middle of the screen.
+    /// Phase 2c step 3 visual: three BGRA red discs in a row plus an
+    /// A8 white disc *overlapping* the middle red one — exercising
+    /// the compositor's per-scanline multi-textured pipeline AND its
+    /// back-to-front blend chain (4-deep pipeline that composites
+    /// textured layers onto each other in z-order).
+    /// PASS = three red discs visible, with the middle one having a
+    /// white disc blending over (not replacing) it. The overlap
+    /// region shows the red disc tinted lighter where the white disc
+    /// is most opaque.
     LayerMultiTexProbe,
 }
 
@@ -1213,26 +1216,23 @@ fn layer_a8_probe(base: u32) -> Result<(), DeviceError> {
     Ok(())
 }
 
-/// Phase 2c step 3 verification — multi-textured per scanline.
+/// Phase 2c step 3 verification — multi-textured per scanline with
+/// back-to-front blending.
 ///
-/// Scene: 4 textured discs side-by-side at the same vertical band
-/// (no horizontal overlap between them). 3 BGRA red discs + 1 A8
-/// white disc — different textures, both formats, all on the same
-/// scanlines. Exercises the dispatcher's 4-kick fanout AND the
-/// painter's per-pixel buffer-mux.
+/// Scene: 3 BGRA red discs side-by-side at the same vertical band,
+/// plus 1 A8 white disc *overlapping the middle red one*. The
+/// painter's 4-deep blend pipeline composites every textured
+/// layer onto its predecessors in z-order, so the overlap region
+/// shows the red disc with the white disc blended on top — not
+/// white-only (which would mean back-to-front compositing isn't
+/// working).
 ///
-/// Note on limitations: the painter does at most ONE textured-
-/// over-solid blend per pixel; it picks the topmost textured at
-/// that x and blends it over the topmost SOLID. It does NOT
-/// composite multiple textured layers against each other, so if
-/// you change this demo to overlap two textured layers, only the
-/// topmost (highest active slot) will show in the overlap.
-///
-/// PASS = all four discs visible in a row across the middle of
-/// the screen (3 red + 1 white).
-/// FAIL = some discs missing (dispatcher / per-pixel mux bug),
-/// discs in wrong place / wrong colour (active_for_buf mapping
-/// inverted), or torn pixels (line-buffer write race).
+/// PASS = three red discs visible; the middle one has a white
+/// disc smoothly blending into it (red shading into pinkish-white
+/// where the alpha is high).
+/// FAIL = some discs missing (dispatcher bug), white disc fully
+/// replaces middle red (back-to-front pipeline not working),
+/// torn pixels (line-buffer race).
 fn layer_multitex_probe(base: u32) -> Result<(), DeviceError> {
     let mut device = Device::open_with(DeviceConfig {
         base_phys_addr: base,
@@ -1306,16 +1306,15 @@ fn layer_multitex_probe(base: u32) -> Result<(), DeviceError> {
     let header = 0xFF_10_30_80u32;
     let white  = 0xFF_FF_FF_FFu32;
 
-    // y=440 for all four discs — same vertical band so per-scanline
-    // the compositor needs to handle up to 4 simultaneous textured
-    // layers. Discs spaced 420px apart so they don't overlap; each
-    // is 200px wide.
+    // y=440 for all four discs. Middle red and white A8 share x=860
+    // → the white disc overlaps the middle red disc and tests the
+    // back-to-front blend pipeline.
     let y_band: i16 = 440;
     let a8_layer = protocol::LayerDescriptor {
         flags:    protocol::layer::flag::ENABLED
                 | protocol::layer::flag::TINT_FROM_A8,
         tex_id:   tex_a8.id,
-        dst_x:    960, dst_y: y_band,
+        dst_x:    860, dst_y: y_band,
         dst_w:    A8_W, dst_h: A8_H,
         src_x:    0,    src_y: 0,
         src_w:    A8_W, src_h: A8_H,
@@ -1326,17 +1325,18 @@ fn layer_multitex_probe(base: u32) -> Result<(), DeviceError> {
 
     device.set_layer(0, &protocol::LayerDescriptor::solid(navy,   0, 0, 1920, 1080))?;
     device.set_layer(1, &protocol::LayerDescriptor::solid(header, 0, 0, 1920,  120))?;
-    device.set_layer(2, &protocol::LayerDescriptor::textured(tex_bgra.id,  120, y_band, BGRA_W, BGRA_H))?;
-    device.set_layer(3, &protocol::LayerDescriptor::textured(tex_bgra.id,  540, y_band, BGRA_W, BGRA_H))?;
-    device.set_layer(4, &a8_layer)?;
-    device.set_layer(5, &protocol::LayerDescriptor::textured(tex_bgra.id, 1380, y_band, BGRA_W, BGRA_H))?;
+    device.set_layer(2, &protocol::LayerDescriptor::textured(tex_bgra.id,  300, y_band, BGRA_W, BGRA_H))?;
+    device.set_layer(3, &protocol::LayerDescriptor::textured(tex_bgra.id,  860, y_band, BGRA_W, BGRA_H))?;
+    device.set_layer(4, &protocol::LayerDescriptor::textured(tex_bgra.id, 1420, y_band, BGRA_W, BGRA_H))?;
+    device.set_layer(5, &a8_layer)?;
     device.commit_layers();
     const COUNT: u32 = 6;
 
     println!(
-        "Committed 6 layers: 2 solid + 3 BGRA red discs + 1 A8 white disc \n\
-         at y={} (spaced across the screen, no overlap). \n\
-         Expect: 4 discs in a row — red, red, white, red — fading into navy.\n\
+        "Committed 6 layers: 2 solid + 3 BGRA red discs at y={} \n\
+         (left/center/right) + 1 A8 white disc overlapping the centre \n\
+         red disc. Expect: 3 red discs with the middle one having a \n\
+         white disc smoothly blending into it (back-to-front compositing). \n\
          Ctrl-C to exit (max 60 s).",
         y_band
     );
