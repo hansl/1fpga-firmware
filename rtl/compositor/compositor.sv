@@ -27,9 +27,15 @@
 //  resolution lets text/UI keep their pixel-perfect crispness on a
 //  1080p HDMI sink.
 //
-//    H: 1920 active + 600 blank = 2520 total
-//    V: 1080 active +  20 blank = 1100 total
-//    => 100 MHz / (2520 × 1100) ≈ 36.0 Hz
+//    H: 1920 active + 1500 blank = 3420 total
+//    V: 1080 active +   20 blank = 1100 total
+//    => 100 MHz / (3420 × 1100) ≈ 26.6 Hz
+//
+//  HBlank widened from 600 -> 1500 in Phase 2c step 3 to fit the
+//  dispatcher's worst-case 4-textured pass. Future optimisation:
+//  descriptor caching in texture_unit (same-tex_id glyphs share one
+//  descriptor fetch) would let us shrink HBlank back to ~600 for
+//  text-heavy scenes and push fps back to ~36.
 //
 //  HBlank is set just wide enough to fit the worst-case `scanline_filter`
 //  walk of all 256 layer slots (count + 2 = 258 cycles) plus a small
@@ -46,7 +52,12 @@ module compositor #(
     // is enough for a typical UI scene; if we ever need more, the
     // first move is pipelining the scan into stages of 8 (each stage
     // half the LUT depth), not bumping this further.
-    parameter int MAX_ACTIVE = 8
+    parameter int MAX_ACTIVE = 8,
+    // Per-scanline limit on textured layers. Each one consumes a
+    // dedicated line buffer and a sequential texture_unit pass.
+    // Excess textured layers (beyond the first 4 found in active
+    // list order) are silently dropped.
+    parameter int MAX_TEXTURED = 4
 ) (
     input  logic        clk,        // CLK_VIDEO == pixel clock (100 MHz)
     input  logic        rst_n,
@@ -73,13 +84,12 @@ module compositor #(
     // HBlank start; 0 means "no layers", and the painter emits black.
     input  logic [8:0]   layer_count_i,
 
-    // Texture sampler interface (Phase 2b step 2). The compositor
-    // identifies the topmost textured layer in the active list after
-    // the filter completes, and pulses `tex_kick_o` with the
-    // descriptor params. The texture_unit on clk_sys responds by
-    // fetching the texel row into the line buffer; the painter then
-    // reads `line_buf_data_i` at half-resolution addresses (each
-    // entry holds 2 BGRA pixels). All multi-bit kick params are
+    // Texture sampler interface (Phase 2c step 3). The compositor's
+    // dispatcher state machine walks the active list during HBlank,
+    // fires up to MAX_TEXTURED kicks (one per textured slot), and
+    // waits for each texture_unit pass to complete before the next.
+    // `tex_buffer_sel_o` selects which of the 4 line buffers the
+    // current pass writes into. All kick params + buffer_sel are
     // expected to be held stable while `tex_kick_o` is high.
     output logic        tex_kick_o,
     output logic [15:0] tex_id_o,
@@ -89,27 +99,32 @@ module compositor #(
     // Tint colour for A8 textures (= layer.color). Ignored by
     // texture_unit when format = BGRA8888.
     output logic [31:0] tex_tint_color_o,
+    output logic [1:0]  tex_buffer_sel_o,
 
-    // Line buffer read port (painter side). Address = (x - dst_x_lo)
-    // >> 1 — each 64-bit word holds 2 pixels.
-    output logic [9:0]  line_buf_addr_o,
-    input  logic [63:0] line_buf_data_i
+    // texture_unit busy signal, sync'd into the clk_video domain by
+    // menu_core. The dispatcher uses this for handshaking — wait
+    // for busy to rise (kick accepted) then fall (pass complete).
+    input  logic        tex_unit_busy_sync_i,
+
+    // Line buffer read ports — 4 ports, one per buffer slot. The
+    // painter issues 4 reads in parallel each cycle (one per slot's
+    // own dst_x_lo offset) and selects the data from whichever
+    // slot's topmost-textured covers the current pixel.
+    output logic [9:0]  line_buf_addr_o [MAX_TEXTURED-1:0],
+    input  logic [63:0] line_buf_data_i [MAX_TEXTURED-1:0]
 );
 
     // ---- Timing constants (1920×1080, 100 MHz pixel clock).
-    // HBlank widened in Phase 2b step 2 to fit:
-    //   - scanline_filter worst case (count=256): ~260 cycles
-    //   - kick-to-clk_sys CDC: ~10 cycles
-    //   - texture_unit (descriptor + 256-pixel row burst): ~290 cycles
-    //   - margin: ~40 cycles
-    // Total HBlank ≈ 600 cycles.
+    // HBlank widened to 1500 cycles in Phase 2c step 3 to fit the
+    // dispatcher's worst case (4 textured layers × ~300 cycles each
+    // for moderately-sized BGRA + filter 260 + walk + margin).
     // VBlank = 20 lines (unchanged; layer_dma fits comfortably).
-    // fps = 100 MHz / (2520 × 1100) ≈ 36.0 Hz.
+    // fps = 100 MHz / (3420 × 1100) ≈ 26.6 Hz.
     localparam int H_ACTIVE = 1920;
     localparam int H_FP     = 60;
     localparam int H_SYNC   = 40;
-    localparam int H_BP     = 500;
-    localparam int H_TOTAL  = H_ACTIVE + H_FP + H_SYNC + H_BP; // 2520
+    localparam int H_BP     = 1400;
+    localparam int H_TOTAL  = H_ACTIVE + H_FP + H_SYNC + H_BP; // 3420
 
     localparam int V_ACTIVE = 1080;
     localparam int V_FP     = 4;
@@ -189,52 +204,122 @@ module compositor #(
         .active_ty_o      (active_ty)
     );
 
-    // ---- Topmost-textured selector + kick generator -----------------
-    // After the filter completes, find the highest-index entry whose
-    // tex_id != 0xFFFF. The 16-deep priority scan is too long to
-    // chain into the painter's already 16-deep mux loop at 100 MHz
-    // (-1.1 ns slack observed), so the combinational result is
-    // captured into registers each cycle. The active list is stable
-    // for the duration of the active scanout, so a 1-cycle delay is
-    // invisible.
-    logic       topmost_tex_valid_c;
-    logic [4:0] topmost_tex_idx_c;
-    always_comb begin
-        topmost_tex_valid_c = 1'b0;
-        topmost_tex_idx_c   = 5'd0;
-        for (int i = 0; i < MAX_ACTIVE; i++) begin
-            if (i < int'(active_count) && active_tex_id[i] != 16'hFFFF) begin
-                topmost_tex_valid_c = 1'b1;
-                topmost_tex_idx_c   = i[4:0];
-            end
-        end
-    end
+    // ---- Multi-textured dispatcher ----------------------------------
+    // After the filter completes, scan the active list and fire
+    // texture_unit kicks for up to MAX_TEXTURED textured slots
+    // (each kick fills a different line buffer). Z-order is
+    // preserved: textured slots are processed in active-list order
+    // (slot 0 first = lowest z), and the painter walks all of them
+    // per pixel to pick the topmost match.
+    //
+    // Handshake: tex_kick_o is held high until tex_unit_busy_sync_i
+    // goes high (kick accepted by texture_unit on clk_sys via the
+    // 2-flop sync); then dropped, and we wait for busy to go low
+    // again (texture_unit done) before advancing to the next slot.
 
-    logic       topmost_tex_valid;
-    logic [4:0] topmost_tex_idx;
+    typedef enum logic [2:0] {
+        D_IDLE,
+        D_WAIT_FILTER,
+        D_WALK,
+        D_KICK_WAIT_BUSY_HI,
+        D_KICK_WAIT_BUSY_LO
+    } disp_state_t;
+
+    disp_state_t disp_state;
+    logic [9:0]  disp_wait_counter;
+    logic [3:0]  disp_walk_i;          // 0..MAX_ACTIVE
+    logic [2:0]  disp_buf_count;       // 0..MAX_TEXTURED
+    logic        kick_q;
+    logic [1:0]  buf_sel_q;
+    logic [4:0]  active_for_buf [MAX_TEXTURED-1:0]; // which active slot per buffer
+    // Reverse map for the painter: 0..MAX_TEXTURED for "this active
+    // slot maps to buffer K"; MAX_TEXTURED (= 4) is the "no buffer"
+    // sentinel.
+    logic [2:0]  buffer_for_active [MAX_ACTIVE-1:0];
+
+    // Kick params indexed by the current active slot being dispatched.
+    wire [2:0] cur_active = disp_walk_i[2:0];
+
+    assign tex_kick_o       = kick_q;
+    assign tex_buffer_sel_o = buf_sel_q;
+    assign tex_id_o         = active_tex_id  [cur_active];
+    assign tex_src_x_o      = active_src_x   [cur_active];
+    assign tex_ty_o         = active_ty      [cur_active];
+    assign tex_tint_color_o = active_color   [cur_active];
+    assign tex_dst_w_o      = active_dst_x_hi[cur_active][11:0]
+                            - active_dst_x_lo[cur_active][11:0];
+
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            topmost_tex_valid <= 1'b0;
-            topmost_tex_idx   <= 5'd0;
+            disp_state        <= D_IDLE;
+            disp_wait_counter <= 10'd0;
+            disp_walk_i       <= 4'd0;
+            disp_buf_count    <= 3'd0;
+            kick_q            <= 1'b0;
+            buf_sel_q         <= 2'd0;
+            for (int i = 0; i < MAX_TEXTURED; i++) active_for_buf[i] <= 5'h1F;
+            for (int i = 0; i < MAX_ACTIVE; i++)   buffer_for_active[i] <= 3'd4;
         end else begin
-            topmost_tex_valid <= topmost_tex_valid_c;
-            topmost_tex_idx   <= topmost_tex_idx_c;
+            unique case (disp_state)
+                D_IDLE: begin
+                    if (build_start) begin
+                        disp_state        <= D_WAIT_FILTER;
+                        disp_wait_counter <= 10'd0;
+                        disp_walk_i       <= 4'd0;
+                        disp_buf_count    <= 3'd0;
+                        kick_q            <= 1'b0;
+                        // Reset mappings — gets refilled each scanline.
+                        for (int i = 0; i < MAX_TEXTURED; i++) active_for_buf[i] <= 5'h1F;
+                        for (int i = 0; i < MAX_ACTIVE; i++)   buffer_for_active[i] <= 3'd4;
+                    end
+                end
+
+                D_WAIT_FILTER: begin
+                    // scanline_filter takes count+2 cycles for the worst
+                    // case (count = MAX_LAYER_COUNT = 256). Wait 270.
+                    disp_wait_counter <= disp_wait_counter + 10'd1;
+                    if (disp_wait_counter >= 10'd270) begin
+                        disp_state <= D_WALK;
+                    end
+                end
+
+                D_WALK: begin
+                    if (disp_walk_i >= MAX_ACTIVE[3:0]
+                        || disp_walk_i[3:0] >= active_count[3:0]
+                        || disp_buf_count >= MAX_TEXTURED[2:0]) begin
+                        disp_state <= D_IDLE;
+                    end else if (active_tex_id[cur_active] != 16'hFFFF) begin
+                        // Textured — fire kick with this buffer index.
+                        buf_sel_q                  <= disp_buf_count[1:0];
+                        active_for_buf[disp_buf_count[1:0]] <= {2'd0, cur_active};
+                        buffer_for_active[cur_active]       <= {1'b0, disp_buf_count[1:0]};
+                        kick_q                              <= 1'b1;
+                        disp_state                          <= D_KICK_WAIT_BUSY_HI;
+                    end else begin
+                        // Solid — skip.
+                        disp_walk_i <= disp_walk_i + 4'd1;
+                    end
+                end
+
+                D_KICK_WAIT_BUSY_HI: begin
+                    if (tex_unit_busy_sync_i) begin
+                        kick_q     <= 1'b0;
+                        disp_state <= D_KICK_WAIT_BUSY_LO;
+                    end
+                end
+
+                D_KICK_WAIT_BUSY_LO: begin
+                    if (!tex_unit_busy_sync_i) begin
+                        disp_walk_i    <= disp_walk_i + 4'd1;
+                        disp_buf_count <= disp_buf_count + 3'd1;
+                        disp_state     <= D_WALK;
+                    end
+                end
+
+                default: disp_state <= D_IDLE;
+            endcase
         end
     end
-
-    // Kick window: hold tex_kick_o high for a chunk of HBlank after
-    // the filter has had time to complete (~260 cycles). 60 clk_video
-    // cycles ≈ 30 clk_sys cycles — plenty for the 2-flop synchroniser
-    // on the clk_sys side to catch the rising edge.
-    wire kick_window = (hcount >= 12'(H_ACTIVE + 280))
-                    && (hcount <  12'(H_ACTIVE + 340));
-    assign tex_kick_o       = kick_window && topmost_tex_valid;
-    assign tex_id_o         = active_tex_id [topmost_tex_idx];
-    assign tex_src_x_o      = active_src_x  [topmost_tex_idx];
-    assign tex_ty_o         = active_ty     [topmost_tex_idx];
-    assign tex_tint_color_o = active_color  [topmost_tex_idx];
-    assign tex_dst_w_o      = active_dst_x_hi[topmost_tex_idx][11:0]
-                            - active_dst_x_lo[topmost_tex_idx][11:0];
 
     // ---- Per-pixel painter ------------------------------------------
     // Two-pass logic. First pass (combinational): find the topmost
@@ -259,26 +344,13 @@ module compositor #(
     //     ~150 DSP blocks; trivial to absorb 3 (R/G/B channels).
 
     wire signed [17:0] x_s = $signed({6'b0, hcount});
+    wire [11:0] next_hcount = hcount + 12'd1;
 
-    // Line-buffer prefetch: read for `hcount + 1` so the data arrives
-    // one cycle later, in time for that pixel's painter pass.
-    wire [11:0] next_hcount      = hcount + 12'd1;
-    wire [10:0] topmost_dst_lo_u = active_dst_x_lo[topmost_tex_idx][10:0];
-    wire [11:0] line_buf_x_off   = next_hcount - {1'b0, topmost_dst_lo_u};
-    assign line_buf_addr_o = line_buf_x_off[10:1]; // /2, 10-bit
-
-    // Pixel within the 64-bit line buffer entry (bit 0 of the
-    // x-offset selects upper/lower 32-bit half).
-    wire        tex_pixel_sel = line_buf_x_off[0];
-    wire [31:0] tex_pixel     = tex_pixel_sel ? line_buf_data_i[63:32]
-                                              : line_buf_data_i[31:0];
-
-    // Stage 0 (combinational): scan the active list to find the
-    // topmost SOLID covering this pixel, plus whether the topmost
-    // textured layer covers it, plus whether any non-topmost
-    // textured slot covers it. These three reductions feed Stage 1
-    // through a pipeline register so the 16-deep mux chain doesn't
-    // share a combinational budget with the blend math.
+    // ---- Stage 0: per-pixel scans + 4 parallel line buffer reads ---
+    // Find topmost SOLID and topmost TEXTURED covering this pixel
+    // independently. Both are 8-deep last-wins reductions over the
+    // active list. The textured scan produces the active-slot index
+    // of the topmost textured layer at this x (if any).
     logic        solid_hit_c;
     logic [4:0]  solid_idx_c;
     logic [31:0] solid_color_c;
@@ -298,57 +370,101 @@ module compositor #(
         end
     end
 
-    // Just the x-range portion of the topmost-textured coverage
-    // check. The z-order comparison vs solid_idx (which would otherwise
-    // chain a 16-deep solid scan into the comparator) is deferred to
-    // stage 2 so it runs on _q1 values; the chain is broken at the
-    // pipeline register.
-    wire signed [16:0] topmost_lo_s = {active_dst_x_lo[topmost_tex_idx][16],
-                                       active_dst_x_lo[topmost_tex_idx]};
-    wire signed [17:0] topmost_hi_s = active_dst_x_hi[topmost_tex_idx];
-    wire topmost_tex_range_c = topmost_tex_valid
-                            && x_s >= {topmost_lo_s[16], topmost_lo_s}
-                            && x_s <  topmost_hi_s;
+    logic        tex_hit_c;
+    logic [2:0]  tex_idx_c;       // active slot index (0..7)
+    always_comb begin
+        tex_hit_c = 1'b0;
+        tex_idx_c = 3'd0;
+        for (int i = 0; i < MAX_ACTIVE; i++) begin
+            if (i < int'(active_count)
+                && active_tex_id[i] != 16'hFFFF
+                && x_s >= $signed({active_dst_x_lo[i][16], active_dst_x_lo[i]})
+                && x_s <  active_dst_x_hi[i]) begin
+                tex_hit_c = 1'b1;
+                tex_idx_c = i[2:0];
+            end
+        end
+    end
 
-    // Pipeline register between the 8-deep scans and the blend
-    // math. Every signal that lands in the final r/g/b/sync/de
-    // register stage gets the matching 1-cycle delay here so the
-    // output beat for pixel X is fully consistent.
+    // Look up which line buffer the topmost-textured-at-x belongs to.
+    // bit 2 = 0 means "buffer is valid"; bits 1:0 = the buffer index.
+    // If the textured slot didn't get a buffer (more textured slots
+    // existed than MAX_TEXTURED), we paint as if no texture was
+    // present at this pixel.
+    wire [2:0]  tex_buf_lookup_c = buffer_for_active[tex_idx_c];
+    wire        tex_buf_valid_c  = tex_hit_c && !tex_buf_lookup_c[2];
+    wire [1:0]  tex_buf_K_c      = tex_buf_lookup_c[1:0];
+
+    // Issue 4 parallel line buffer reads. Each buffer K's address is
+    // (next_hcount - dst_x_lo[active_for_buf[K]]) / 2. We also
+    // capture the LSB of that offset (= which 32-bit half of the
+    // 64-bit BRAM word holds the desired pixel) so stage 2 can
+    // half-select without recomputing the offset.
+    logic buf_lsb_c [MAX_TEXTURED-1:0];
+    generate for (genvar gk = 0; gk < MAX_TEXTURED; gk++) begin : g_lb_addr
+        wire [4:0]  slot_for_k    = active_for_buf[gk];
+        wire [10:0] k_dst_x_lo    = active_dst_x_lo[slot_for_k][10:0];
+        wire [11:0] k_x_off       = next_hcount - {1'b0, k_dst_x_lo};
+        assign line_buf_addr_o[gk] = k_x_off[10:1];
+        assign buf_lsb_c[gk]       = k_x_off[0];
+    end endgenerate
+
+    // ---- Stage 1 register --------------------------------------------
+    // Captures stage-0 reductions and the per-buffer LSB selectors so
+    // the blend math + final mux in stage 2 only need the parallel
+    // BRAM data (already registered inside the line buffers).
     logic        solid_hit_q1;
     logic [4:0]  solid_idx_q1;
     logic [31:0] solid_color_q1;
-    logic        topmost_tex_range_q1;
-    logic [31:0] tex_pixel_q1;
+    logic        tex_hit_q1;
+    logic [2:0]  tex_idx_q1;
+    logic        tex_buf_valid_q1;
+    logic [1:0]  tex_buf_K_q1;
+    logic        buf_lsb_q1 [MAX_TEXTURED-1:0];
     logic        h_in_sync_q1, v_in_sync_q1;
     logic        h_active_q1,  v_active_q1;
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            solid_hit_q1         <= 1'b0;
-            solid_idx_q1         <= 5'd0;
-            solid_color_q1       <= 32'd0;
-            topmost_tex_range_q1 <= 1'b0;
-            tex_pixel_q1         <= 32'd0;
-            h_in_sync_q1         <= 1'b0;
-            v_in_sync_q1         <= 1'b0;
-            h_active_q1          <= 1'b0;
-            v_active_q1          <= 1'b0;
+            solid_hit_q1     <= 1'b0;
+            solid_idx_q1     <= 5'd0;
+            solid_color_q1   <= 32'd0;
+            tex_hit_q1       <= 1'b0;
+            tex_idx_q1       <= 3'd0;
+            tex_buf_valid_q1 <= 1'b0;
+            tex_buf_K_q1     <= 2'd0;
+            for (int i = 0; i < MAX_TEXTURED; i++) buf_lsb_q1[i] <= 1'b0;
+            h_in_sync_q1     <= 1'b0;
+            v_in_sync_q1     <= 1'b0;
+            h_active_q1      <= 1'b0;
+            v_active_q1      <= 1'b0;
         end else begin
-            solid_hit_q1         <= solid_hit_c;
-            solid_idx_q1         <= solid_idx_c;
-            solid_color_q1       <= solid_color_c;
-            topmost_tex_range_q1 <= topmost_tex_range_c;
-            tex_pixel_q1         <= tex_pixel;
-            h_in_sync_q1         <= h_in_sync;
-            v_in_sync_q1         <= v_in_sync;
-            h_active_q1          <= h_active;
-            v_active_q1          <= v_active;
+            solid_hit_q1     <= solid_hit_c;
+            solid_idx_q1     <= solid_idx_c;
+            solid_color_q1   <= solid_color_c;
+            tex_hit_q1       <= tex_hit_c;
+            tex_idx_q1       <= tex_idx_c;
+            tex_buf_valid_q1 <= tex_buf_valid_c;
+            tex_buf_K_q1     <= tex_buf_K_c;
+            for (int i = 0; i < MAX_TEXTURED; i++) buf_lsb_q1[i] <= buf_lsb_c[i];
+            h_in_sync_q1     <= h_in_sync;
+            v_in_sync_q1     <= v_in_sync;
+            h_active_q1      <= h_active;
+            v_active_q1      <= v_active;
         end
     end
 
-    // Stage 1 (combinational): SrcAlpha blend and final pixel mux.
-    //   out = src.rgb * a + dst.rgb * (255 - a), then /255 ≈ >>8.
-    // The 0.4% brightness error vs a /255 round is invisible at 8bpc.
+    // ---- Stage 2: select tex pixel, blend, final mux ----------------
+    // line_buf_data_i[tex_buf_K_q1] holds the 64-bit word for the
+    // topmost-textured-at-x, picked from the 4 BRAMs by the
+    // registered selector. The LSB of the x-offset tells us which
+    // 32-bit half is our pixel.
+    wire [63:0] sel_buf_data  = line_buf_data_i[tex_buf_K_q1];
+    wire        sel_lsb       = buf_lsb_q1[tex_buf_K_q1];
+    wire [31:0] tex_pixel_q1  = sel_lsb ? sel_buf_data[63:32]
+                                        : sel_buf_data[31:0];
+
+    // SrcAlpha blend: out = src.rgb * a + dst.rgb * (255 - a), /255 ≈ >>8.
     wire [7:0] tex_a = tex_pixel_q1[31:24];
     wire [7:0] tex_r = tex_pixel_q1[23:16];
     wire [7:0] tex_g = tex_pixel_q1[15:8];
@@ -362,13 +478,11 @@ module compositor #(
     wire [15:0] blend_b = tex_b * tex_a + bg_b * inv_a;
     wire [31:0] blended_color = {8'hFF, blend_r[15:8], blend_g[15:8], blend_b[15:8]};
 
-    // Final topmost-textured coverage: x-range gate from stage 0
-    // (registered) ANDed with the z-order check, which now runs on
-    // registered solid_idx_q1 and the already-registered
-    // topmost_tex_idx. Combinational depth here is just a 5-bit
-    // compare + 2 ANDs — well under the 10 ns budget.
-    wire topmost_tex_covers = topmost_tex_range_q1
-                           && (!solid_hit_q1 || (topmost_tex_idx > solid_idx_q1));
+    // Should the textured pixel render? Only if the textured slot is
+    // above the topmost solid in z-order (active-list index).
+    wire topmost_tex_covers = tex_hit_q1 && tex_buf_valid_q1
+                           && (!solid_hit_q1
+                              || ({2'd0, tex_idx_q1} > solid_idx_q1));
 
     logic [31:0] pix_color;
     always_comb begin

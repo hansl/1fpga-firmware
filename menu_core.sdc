@@ -39,3 +39,6 @@ set_false_path -to [get_registers {emu:emu|tex_src_x_sync_0[*]}]
 set_false_path -to [get_registers {emu:emu|tex_ty_sync_0[*]}]
 set_false_path -to [get_registers {emu:emu|tex_dst_w_sync_0[*]}]
 set_false_path -to [get_registers {emu:emu|tex_tint_sync_0[*]}]
+set_false_path -to [get_registers {emu:emu|tex_bufsel_sync_0[*]}]
+# Reverse-direction: texture_unit busy (clk_sys) -> compositor (clk_video).
+set_false_path -to [get_registers {emu:emu|tex_busy_sync_0}]

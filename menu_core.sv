@@ -261,9 +261,14 @@ wire [15:0]  comp_tex_src_x;
 wire [15:0]  comp_tex_ty;
 wire [11:0]  comp_tex_dst_w;
 wire [31:0]  comp_tex_tint;
-// Line buffer read port (clk_video).
-wire [9:0]   comp_line_buf_addr;
-wire [63:0]  comp_line_buf_data;
+wire [1:0]   comp_tex_buffer_sel;
+// busy-sync from texture_unit (clk_sys → clk_video) for the
+// dispatcher's handshake.
+wire         tex_unit_busy_sync_video;
+// Line buffer read ports (clk_video). 4 parallel reads, one per
+// line buffer.
+wire [9:0]   comp_line_buf_addr [3:0];
+wire [63:0]  comp_line_buf_data [3:0];
 
 // Reset bridge: pll_locked is asynchronous to clk_video, so feeding
 // it raw as rst_n would risk recovery/removal violations at the
@@ -309,14 +314,16 @@ compositor u_compositor (
 	.cache_slot_o    (comp_cache_slot),
 	.cache_data_i    (comp_cache_data),
 	.layer_count_i   (layer_count_sync_1),
-	.tex_kick_o      (comp_tex_kick),
-	.tex_id_o        (comp_tex_id),
-	.tex_src_x_o     (comp_tex_src_x),
-	.tex_ty_o        (comp_tex_ty),
-	.tex_dst_w_o     (comp_tex_dst_w),
-	.tex_tint_color_o(comp_tex_tint),
-	.line_buf_addr_o (comp_line_buf_addr),
-	.line_buf_data_i (comp_line_buf_data)
+	.tex_kick_o          (comp_tex_kick),
+	.tex_id_o            (comp_tex_id),
+	.tex_src_x_o         (comp_tex_src_x),
+	.tex_ty_o            (comp_tex_ty),
+	.tex_dst_w_o         (comp_tex_dst_w),
+	.tex_tint_color_o    (comp_tex_tint),
+	.tex_buffer_sel_o    (comp_tex_buffer_sel),
+	.tex_unit_busy_sync_i(tex_unit_busy_sync_video),
+	.line_buf_addr_o     (comp_line_buf_addr),
+	.line_buf_data_i     (comp_line_buf_data)
 );
 
 // Compositor drives VGA_* directly. CE_PIXEL is held high because
@@ -741,33 +748,82 @@ wire tex_kick_rising = tex_kick_sync_1 & ~tex_kick_sync_2;
 
 // CDC: multi-bit params (stable while comp_tex_kick is high, which
 // is at least 60 clk_video cycles = 30 clk_sys cycles).
-(* preserve *) logic [15:0] tex_id_sync_0,    tex_id_sync_1;
-(* preserve *) logic [15:0] tex_src_x_sync_0, tex_src_x_sync_1;
-(* preserve *) logic [15:0] tex_ty_sync_0,    tex_ty_sync_1;
-(* preserve *) logic [11:0] tex_dst_w_sync_0, tex_dst_w_sync_1;
-(* preserve *) logic [31:0] tex_tint_sync_0,  tex_tint_sync_1;
+(* preserve *) logic [15:0] tex_id_sync_0,     tex_id_sync_1;
+(* preserve *) logic [15:0] tex_src_x_sync_0,  tex_src_x_sync_1;
+(* preserve *) logic [15:0] tex_ty_sync_0,     tex_ty_sync_1;
+(* preserve *) logic [11:0] tex_dst_w_sync_0,  tex_dst_w_sync_1;
+(* preserve *) logic [31:0] tex_tint_sync_0,   tex_tint_sync_1;
+(* preserve *) logic [1:0]  tex_bufsel_sync_0, tex_bufsel_sync_1;
 always_ff @(posedge clk_sys) begin
-    tex_id_sync_0    <= comp_tex_id;    tex_id_sync_1    <= tex_id_sync_0;
-    tex_src_x_sync_0 <= comp_tex_src_x; tex_src_x_sync_1 <= tex_src_x_sync_0;
-    tex_ty_sync_0    <= comp_tex_ty;    tex_ty_sync_1    <= tex_ty_sync_0;
-    tex_dst_w_sync_0 <= comp_tex_dst_w; tex_dst_w_sync_1 <= tex_dst_w_sync_0;
-    tex_tint_sync_0  <= comp_tex_tint;  tex_tint_sync_1  <= tex_tint_sync_0;
+    tex_id_sync_0     <= comp_tex_id;         tex_id_sync_1     <= tex_id_sync_0;
+    tex_src_x_sync_0  <= comp_tex_src_x;      tex_src_x_sync_1  <= tex_src_x_sync_0;
+    tex_ty_sync_0     <= comp_tex_ty;         tex_ty_sync_1     <= tex_ty_sync_0;
+    tex_dst_w_sync_0  <= comp_tex_dst_w;      tex_dst_w_sync_1  <= tex_dst_w_sync_0;
+    tex_tint_sync_0   <= comp_tex_tint;       tex_tint_sync_1   <= tex_tint_sync_0;
+    tex_bufsel_sync_0 <= comp_tex_buffer_sel; tex_bufsel_sync_1 <= tex_bufsel_sync_0;
 end
 
-// Line buffer: wr_clk = clk_sys (texture_unit), rd_clk = clk_video
-// (painter). 64-bit wide (2 pixels per entry).
+// Reverse-direction sync: texture_unit's busy_o (clk_sys) into the
+// compositor's clk_video domain for the dispatcher's kick handshake.
+(* preserve *) logic tex_busy_sync_0;
+(* preserve *) logic tex_busy_sync_1;
+always_ff @(posedge clk_video) begin
+    tex_busy_sync_0 <= tex_unit_busy;
+    tex_busy_sync_1 <= tex_busy_sync_0;
+end
+assign tex_unit_busy_sync_video = tex_busy_sync_1;
+
+// 4 line buffers, one per textured slot. wr_clk = clk_sys (filled by
+// texture_unit), rd_clk = clk_video (read by painter). 64 bits wide
+// (2 pixels per entry). The texture_unit emits a single set of
+// write signals plus `buffer_sel_o` telling us which BRAM to route
+// them to — demux below.
 wire [9:0]  line_buf_wr_addr;
 wire [63:0] line_buf_wr_data;
-wire        line_buf_we;
+wire        line_buf_we_shared;
+wire [1:0]  tex_unit_buffer_sel;
+wire        line_buf_we [3:0];
+genvar lbk;
+generate for (lbk = 0; lbk < 4; lbk++) begin : g_lb_we
+    assign line_buf_we[lbk] = line_buf_we_shared
+                           && (tex_unit_buffer_sel == lbk[1:0]);
+end endgenerate
 
-line_buffer u_line_buffer (
+line_buffer u_line_buffer_0 (
     .wr_clk    (clk_sys),
     .wr_addr_i (line_buf_wr_addr),
     .wr_data_i (line_buf_wr_data),
-    .wr_en_i   (line_buf_we),
+    .wr_en_i   (line_buf_we[0]),
     .rd_clk    (clk_video),
-    .rd_addr_i (comp_line_buf_addr),
-    .rd_data_o (comp_line_buf_data)
+    .rd_addr_i (comp_line_buf_addr[0]),
+    .rd_data_o (comp_line_buf_data[0])
+);
+line_buffer u_line_buffer_1 (
+    .wr_clk    (clk_sys),
+    .wr_addr_i (line_buf_wr_addr),
+    .wr_data_i (line_buf_wr_data),
+    .wr_en_i   (line_buf_we[1]),
+    .rd_clk    (clk_video),
+    .rd_addr_i (comp_line_buf_addr[1]),
+    .rd_data_o (comp_line_buf_data[1])
+);
+line_buffer u_line_buffer_2 (
+    .wr_clk    (clk_sys),
+    .wr_addr_i (line_buf_wr_addr),
+    .wr_data_i (line_buf_wr_data),
+    .wr_en_i   (line_buf_we[2]),
+    .rd_clk    (clk_video),
+    .rd_addr_i (comp_line_buf_addr[2]),
+    .rd_data_o (comp_line_buf_data[2])
+);
+line_buffer u_line_buffer_3 (
+    .wr_clk    (clk_sys),
+    .wr_addr_i (line_buf_wr_addr),
+    .wr_data_i (line_buf_wr_data),
+    .wr_en_i   (line_buf_we[3]),
+    .rd_clk    (clk_video),
+    .rd_addr_i (comp_line_buf_addr[3]),
+    .rd_data_o (comp_line_buf_data[3])
 );
 
 // Texture unit: shares the DDR3 bus through the 4-way arbiter below.
@@ -787,10 +843,12 @@ texture_unit u_texture_unit (
     .src_x_i          (tex_src_x_sync_1),
     .dst_w_i          (tex_dst_w_sync_1),
     .tint_color_i     (tex_tint_sync_1),
+    .buffer_sel_i     (tex_bufsel_sync_1),
     .tex_table_addr_i (reg_tex_table_addr),
+    .buffer_sel_o     (tex_unit_buffer_sel),
     .line_buf_addr_o  (line_buf_wr_addr),
     .line_buf_data_o  (line_buf_wr_data),
-    .line_buf_we_o    (line_buf_we),
+    .line_buf_we_o    (line_buf_we_shared),
     .ddram_addr_o     (tex_unit_addr),
     .ddram_burstcnt_o (tex_unit_burstcnt),
     .ddram_be_o       (tex_unit_be),

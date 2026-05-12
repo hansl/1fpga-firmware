@@ -62,11 +62,19 @@ module texture_unit #(
     input  logic [11:0] dst_w_i,      // pixel count
     // Tint colour for A8 expansion. Ignored for BGRA8888.
     input  logic [31:0] tint_color_i,
+    // Which of the (caller's) line buffers this fetch's pixels are
+    // written into. The texture_unit just rebroadcasts this on
+    // buffer_sel_o so upstream can demux a single set of line-buf
+    // write signals to the right BRAM.
+    input  logic [1:0]  buffer_sel_i,
 
     // Texture descriptor table base (programmed by host).
     input  logic [31:0] tex_table_addr_i,
 
-    // Line buffer write port. Each entry stores 2 pixels.
+    // Line buffer write port. Each entry stores 2 pixels. The
+    // buffer_sel_o passes the caller-provided buffer index through so
+    // a demux upstream can route the writes to one of N line buffers.
+    output logic [1:0]  buffer_sel_o,
     output logic [9:0]  line_buf_addr_o,
     output logic [63:0] line_buf_data_o,
     output logic        line_buf_we_o,
@@ -107,6 +115,7 @@ module texture_unit #(
     logic [15:0]  src_x_latched;
     logic [11:0]  dst_w_clipped;
     logic [31:0]  tint_latched;
+    logic [1:0]   buffer_sel_latched;
     logic [7:0]   format_latched;        // 0 = BGRA8888, 1 = A8
     logic [1:0]   desc_beat_q;
     logic [255:0] desc_beats_q;
@@ -119,9 +128,10 @@ module texture_unit #(
     logic [1:0]   a8_write_idx_q;        // 0..3 (4 cycles per beat)
     logic [11:0]  a8_alpha_off_q;        // alpha-byte offset within the row
 
-    assign ddram_be_o = 8'hFF;
-    assign ddram_rd_o = rd_q;
-    assign busy_o     = (state_q != S_IDLE);
+    assign ddram_be_o   = 8'hFF;
+    assign ddram_rd_o   = rd_q;
+    assign busy_o       = (state_q != S_IDLE);
+    assign buffer_sel_o = buffer_sel_latched;
 
     // Descriptor field extraction (TextureDescriptor layout: data_addr
     // at byte 0, pitch at byte 4, width@8, height@10, format@12).
@@ -162,6 +172,7 @@ module texture_unit #(
             src_x_latched    <= 16'd0;
             dst_w_clipped    <= 12'd0;
             tint_latched     <= 32'd0;
+            buffer_sel_latched <= 2'd0;
             format_latched   <= 8'd0;
             desc_beat_q      <= 2'd0;
             desc_beats_q     <= 256'd0;
@@ -186,14 +197,15 @@ module texture_unit #(
             unique case (state_q)
                 S_IDLE: begin
                     if (kick_i && dst_w_i != 12'd0) begin
-                        tex_id_latched   <= tex_id_i;
-                        ty_latched       <= ty_i;
-                        src_x_latched    <= src_x_i;
-                        dst_w_clipped    <= dst_w_sat;
-                        tint_latched     <= tint_color_i;
-                        row_beats_total  <= beats_needed;
-                        desc_beat_q      <= 2'd0;
-                        state_q          <= S_DESC_REQ;
+                        tex_id_latched     <= tex_id_i;
+                        ty_latched         <= ty_i;
+                        src_x_latched      <= src_x_i;
+                        dst_w_clipped      <= dst_w_sat;
+                        tint_latched       <= tint_color_i;
+                        buffer_sel_latched <= buffer_sel_i;
+                        row_beats_total    <= beats_needed;
+                        desc_beat_q        <= 2'd0;
+                        state_q            <= S_DESC_REQ;
                     end
                 end
 
