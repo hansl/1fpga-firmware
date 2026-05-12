@@ -1442,8 +1442,8 @@ fn menu_text_demo(base: u32) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // --- Font atlases: a larger one for the title, smaller for items.
-    let title_atlas = menu_core::text::build_atlas(NOTO_SANS, 56.0, &ascii_charset(), 512, 256)?;
-    let item_atlas  = menu_core::text::build_atlas(NOTO_SANS, 36.0, &ascii_charset(), 512, 256)?;
+    let title_atlas = menu_core::text::build_atlas(NOTO_SANS, 56.0, &ascii_charset(), 1024, 1024)?;
+    let item_atlas  = menu_core::text::build_atlas(NOTO_SANS, 36.0, &ascii_charset(), 1024, 1024)?;
     let title_tex = device.upload_texture(&TextureSpec {
         format: TextureFormat::A8,
         width: title_atlas.width,
