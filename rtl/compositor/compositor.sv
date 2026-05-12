@@ -55,12 +55,10 @@ module compositor #(
     parameter int MAX_ACTIVE = 8,
     // Per-scanline limit on textured layers. Each one consumes a
     // dedicated line buffer and a sequential texture_unit pass.
-    // Excess textured layers (beyond the first 2 found in active
-    // list order) are silently dropped. Two is enough for the
-    // wallpaper + menu-panel use case; back-to-front compositing
-    // of more layers needs a longer painter pipeline (revisit when
-    // it's actually needed).
-    parameter int MAX_TEXTURED = 2
+    // The painter pipeline blends them back-to-front: stage 2
+    // applies buffer 0 over the solid background, stage 3 applies
+    // buffer 1, stage 4 buffer 2, stage 5 buffer 3.
+    parameter int MAX_TEXTURED = 4
 ) (
     input  logic        clk,        // CLK_VIDEO == pixel clock (100 MHz)
     input  logic        rst_n,
@@ -404,6 +402,36 @@ module compositor #(
     wire               lsb_c_1      = x_off_1[0];
     assign line_buf_addr_o[1] = x_off_1[10:1];
 
+    // Buffer 2
+    wire [4:0]         slot_2       = active_for_buf[2];
+    wire               valid_2      = !slot_2[4];
+    wire [2:0]         slot_idx_2   = slot_2[2:0];
+    wire signed [16:0] lo_s_2       = {active_dst_x_lo[slot_idx_2][16],
+                                       active_dst_x_lo[slot_idx_2]};
+    wire signed [17:0] hi_s_2       = active_dst_x_hi[slot_idx_2];
+    wire [10:0]        dst_x_lo_2   = active_dst_x_lo[slot_idx_2][10:0];
+    wire [11:0]        x_off_2      = next_hcount - {1'b0, dst_x_lo_2};
+    wire               covers_c_2   = valid_2
+                                   && x_s >= {lo_s_2[16], lo_s_2}
+                                   && x_s <  hi_s_2;
+    wire               lsb_c_2      = x_off_2[0];
+    assign line_buf_addr_o[2] = x_off_2[10:1];
+
+    // Buffer 3
+    wire [4:0]         slot_3       = active_for_buf[3];
+    wire               valid_3      = !slot_3[4];
+    wire [2:0]         slot_idx_3   = slot_3[2:0];
+    wire signed [16:0] lo_s_3       = {active_dst_x_lo[slot_idx_3][16],
+                                       active_dst_x_lo[slot_idx_3]};
+    wire signed [17:0] hi_s_3       = active_dst_x_hi[slot_idx_3];
+    wire [10:0]        dst_x_lo_3   = active_dst_x_lo[slot_idx_3][10:0];
+    wire [11:0]        x_off_3      = next_hcount - {1'b0, dst_x_lo_3};
+    wire               covers_c_3   = valid_3
+                                   && x_s >= {lo_s_3[16], lo_s_3}
+                                   && x_s <  hi_s_3;
+    wire               lsb_c_3      = x_off_3[0];
+    assign line_buf_addr_o[3] = x_off_3[10:1];
+
     // ---- Stage 1 register --------------------------------------------
     // Captures stage-0 results so stage 1 combinational + blend stages
     // run on stable values. line_buf_data_i is BRAM-registered and
@@ -411,9 +439,9 @@ module compositor #(
     logic        solid_hit_q1;
     logic [4:0]  solid_idx_q1;
     logic [31:0] solid_color_q1;
-    logic        covers_q1_0,  covers_q1_1;
-    logic [4:0]  slot_q1_0,    slot_q1_1;
-    logic        lsb_q1_0,     lsb_q1_1;
+    logic        covers_q1_0,  covers_q1_1,  covers_q1_2,  covers_q1_3;
+    logic [4:0]  slot_q1_0,    slot_q1_1,    slot_q1_2,    slot_q1_3;
+    logic        lsb_q1_0,     lsb_q1_1,     lsb_q1_2,     lsb_q1_3;
     logic        h_in_sync_q1, v_in_sync_q1;
     logic        h_active_q1,  v_active_q1;
 
@@ -423,8 +451,11 @@ module compositor #(
             solid_idx_q1   <= 5'd0;
             solid_color_q1 <= 32'd0;
             covers_q1_0    <= 1'b0;  covers_q1_1 <= 1'b0;
+            covers_q1_2    <= 1'b0;  covers_q1_3 <= 1'b0;
             slot_q1_0      <= 5'h1F; slot_q1_1   <= 5'h1F;
+            slot_q1_2      <= 5'h1F; slot_q1_3   <= 5'h1F;
             lsb_q1_0       <= 1'b0;  lsb_q1_1    <= 1'b0;
+            lsb_q1_2       <= 1'b0;  lsb_q1_3    <= 1'b0;
             h_in_sync_q1   <= 1'b0;
             v_in_sync_q1   <= 1'b0;
             h_active_q1    <= 1'b0;
@@ -434,8 +465,11 @@ module compositor #(
             solid_idx_q1   <= solid_idx_c;
             solid_color_q1 <= solid_color_c;
             covers_q1_0    <= covers_c_0;  covers_q1_1 <= covers_c_1;
+            covers_q1_2    <= covers_c_2;  covers_q1_3 <= covers_c_3;
             slot_q1_0      <= slot_0;      slot_q1_1   <= slot_1;
+            slot_q1_2      <= slot_2;      slot_q1_3   <= slot_3;
             lsb_q1_0       <= lsb_c_0;     lsb_q1_1    <= lsb_c_1;
+            lsb_q1_2       <= lsb_c_2;     lsb_q1_3    <= lsb_c_3;
             h_in_sync_q1   <= h_in_sync;
             v_in_sync_q1   <= v_in_sync;
             h_active_q1    <= h_active;
@@ -452,10 +486,18 @@ module compositor #(
                                          : line_buf_data_i[0][31:0];
     wire [31:0] buf_pixel_c_1 = lsb_q1_1 ? line_buf_data_i[1][63:32]
                                          : line_buf_data_i[1][31:0];
+    wire [31:0] buf_pixel_c_2 = lsb_q1_2 ? line_buf_data_i[2][63:32]
+                                         : line_buf_data_i[2][31:0];
+    wire [31:0] buf_pixel_c_3 = lsb_q1_3 ? line_buf_data_i[3][63:32]
+                                         : line_buf_data_i[3][31:0];
     wire contributes_c_0 = covers_q1_0
                         && (!solid_hit_q1 || slot_q1_0 > solid_idx_q1);
     wire contributes_c_1 = covers_q1_1
                         && (!solid_hit_q1 || slot_q1_1 > solid_idx_q1);
+    wire contributes_c_2 = covers_q1_2
+                        && (!solid_hit_q1 || slot_q1_2 > solid_idx_q1);
+    wire contributes_c_3 = covers_q1_3
+                        && (!solid_hit_q1 || slot_q1_3 > solid_idx_q1);
 
     // Initial accumulator value: topmost solid or black background.
     wire [31:0] accum_init_c = solid_hit_q1 ? solid_color_q1 : 32'h0000_0000;
@@ -481,16 +523,16 @@ module compositor #(
     //            else solid_init. Carry buf 1's pixel + contribute
     //            bit forward for stage 3, plus the sync set.
     logic [31:0] accum_q2;
-    logic        contributes_q2_1;
-    logic [31:0] buf_pixel_q2_1;
+    logic        contributes_q2_1, contributes_q2_2, contributes_q2_3;
+    logic [31:0] buf_pixel_q2_1,   buf_pixel_q2_2,   buf_pixel_q2_3;
     logic        h_in_sync_q2, v_in_sync_q2;
     logic        h_active_q2,  v_active_q2;
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             accum_q2         <= 32'd0;
-            contributes_q2_1 <= 1'b0;
-            buf_pixel_q2_1   <= 32'd0;
+            contributes_q2_1 <= 1'b0;  contributes_q2_2 <= 1'b0;  contributes_q2_3 <= 1'b0;
+            buf_pixel_q2_1   <= 32'd0; buf_pixel_q2_2   <= 32'd0; buf_pixel_q2_3   <= 32'd0;
             h_in_sync_q2     <= 1'b0;
             v_in_sync_q2     <= 1'b0;
             h_active_q2      <= 1'b0;
@@ -498,7 +540,11 @@ module compositor #(
         end else begin
             accum_q2         <= s2_result;
             contributes_q2_1 <= contributes_c_1;
+            contributes_q2_2 <= contributes_c_2;
+            contributes_q2_3 <= contributes_c_3;
             buf_pixel_q2_1   <= buf_pixel_c_1;
+            buf_pixel_q2_2   <= buf_pixel_c_2;
+            buf_pixel_q2_3   <= buf_pixel_c_3;
             h_in_sync_q2     <= h_in_sync_q1;
             v_in_sync_q2     <= v_in_sync_q1;
             h_active_q2      <= h_active_q1;
@@ -523,35 +569,121 @@ module compositor #(
 
     // ---- Stage 3 register --------------------------------------------
     logic [31:0] accum_q3;
+    logic        contributes_q3_2, contributes_q3_3;
+    logic [31:0] buf_pixel_q3_2,   buf_pixel_q3_3;
     logic        h_in_sync_q3, v_in_sync_q3;
     logic        h_active_q3,  v_active_q3;
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            accum_q3     <= 32'd0;
-            h_in_sync_q3 <= 1'b0;
-            v_in_sync_q3 <= 1'b0;
-            h_active_q3  <= 1'b0;
-            v_active_q3  <= 1'b0;
+            accum_q3         <= 32'd0;
+            contributes_q3_2 <= 1'b0;  contributes_q3_3 <= 1'b0;
+            buf_pixel_q3_2   <= 32'd0; buf_pixel_q3_3   <= 32'd0;
+            h_in_sync_q3     <= 1'b0;
+            v_in_sync_q3     <= 1'b0;
+            h_active_q3      <= 1'b0;
+            v_active_q3      <= 1'b0;
         end else begin
-            accum_q3     <= s3_result;
-            h_in_sync_q3 <= h_in_sync_q2;
-            v_in_sync_q3 <= v_in_sync_q2;
-            h_active_q3  <= h_active_q2;
-            v_active_q3  <= v_active_q2;
+            accum_q3         <= s3_result;
+            contributes_q3_2 <= contributes_q2_2;
+            contributes_q3_3 <= contributes_q2_3;
+            buf_pixel_q3_2   <= buf_pixel_q2_2;
+            buf_pixel_q3_3   <= buf_pixel_q2_3;
+            h_in_sync_q3     <= h_in_sync_q2;
+            v_in_sync_q3     <= v_in_sync_q2;
+            h_active_q3      <= h_active_q2;
+            v_active_q3      <= v_active_q2;
+        end
+    end
+
+    // ---- Stage 4 combinational: blend buffer 2 over accum_q3 --------
+    wire [7:0]  s4_a   = buf_pixel_q3_2[31:24];
+    wire [7:0]  s4_sr  = buf_pixel_q3_2[23:16];
+    wire [7:0]  s4_sg  = buf_pixel_q3_2[15:8];
+    wire [7:0]  s4_sb  = buf_pixel_q3_2[7:0];
+    wire [7:0]  s4_ia  = 8'd255 - s4_a;
+    wire [7:0]  s4_dr  = accum_q3[23:16];
+    wire [7:0]  s4_dg  = accum_q3[15:8];
+    wire [7:0]  s4_db  = accum_q3[7:0];
+    wire [15:0] s4_br  = s4_sr * s4_a + s4_dr * s4_ia;
+    wire [15:0] s4_bg  = s4_sg * s4_a + s4_dg * s4_ia;
+    wire [15:0] s4_bb  = s4_sb * s4_a + s4_db * s4_ia;
+    wire [31:0] s4_blended = {8'hFF, s4_br[15:8], s4_bg[15:8], s4_bb[15:8]};
+    wire [31:0] s4_result   = contributes_q3_2 ? s4_blended : accum_q3;
+
+    // ---- Stage 4 register --------------------------------------------
+    logic [31:0] accum_q4;
+    logic        contributes_q4_3;
+    logic [31:0] buf_pixel_q4_3;
+    logic        h_in_sync_q4, v_in_sync_q4;
+    logic        h_active_q4,  v_active_q4;
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            accum_q4         <= 32'd0;
+            contributes_q4_3 <= 1'b0;
+            buf_pixel_q4_3   <= 32'd0;
+            h_in_sync_q4     <= 1'b0;
+            v_in_sync_q4     <= 1'b0;
+            h_active_q4      <= 1'b0;
+            v_active_q4      <= 1'b0;
+        end else begin
+            accum_q4         <= s4_result;
+            contributes_q4_3 <= contributes_q3_3;
+            buf_pixel_q4_3   <= buf_pixel_q3_3;
+            h_in_sync_q4     <= h_in_sync_q3;
+            v_in_sync_q4     <= v_in_sync_q3;
+            h_active_q4      <= h_active_q3;
+            v_active_q4      <= v_active_q3;
+        end
+    end
+
+    // ---- Stage 5 combinational: blend buffer 3 over accum_q4 --------
+    wire [7:0]  s5_a   = buf_pixel_q4_3[31:24];
+    wire [7:0]  s5_sr  = buf_pixel_q4_3[23:16];
+    wire [7:0]  s5_sg  = buf_pixel_q4_3[15:8];
+    wire [7:0]  s5_sb  = buf_pixel_q4_3[7:0];
+    wire [7:0]  s5_ia  = 8'd255 - s5_a;
+    wire [7:0]  s5_dr  = accum_q4[23:16];
+    wire [7:0]  s5_dg  = accum_q4[15:8];
+    wire [7:0]  s5_db  = accum_q4[7:0];
+    wire [15:0] s5_br  = s5_sr * s5_a + s5_dr * s5_ia;
+    wire [15:0] s5_bg  = s5_sg * s5_a + s5_dg * s5_ia;
+    wire [15:0] s5_bb  = s5_sb * s5_a + s5_db * s5_ia;
+    wire [31:0] s5_blended = {8'hFF, s5_br[15:8], s5_bg[15:8], s5_bb[15:8]};
+    wire [31:0] s5_result   = contributes_q4_3 ? s5_blended : accum_q4;
+
+    // ---- Stage 5 register --------------------------------------------
+    logic [31:0] accum_q5;
+    logic        h_in_sync_q5, v_in_sync_q5;
+    logic        h_active_q5,  v_active_q5;
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            accum_q5     <= 32'd0;
+            h_in_sync_q5 <= 1'b0;
+            v_in_sync_q5 <= 1'b0;
+            h_active_q5  <= 1'b0;
+            v_active_q5  <= 1'b0;
+        end else begin
+            accum_q5     <= s5_result;
+            h_in_sync_q5 <= h_in_sync_q4;
+            v_in_sync_q5 <= v_in_sync_q4;
+            h_active_q5  <= h_active_q4;
+            v_active_q5  <= v_active_q4;
         end
     end
 
     // ---- Output stage -----------------------------------------------
-    // r/g/b lag hcount by 4 cycles now (stage1 + 2 blend stages +
+    // r/g/b lag hcount by 6 cycles now (stage1 + 4 blend stages +
     // output register). All sync/blank signals piped through the
-    // matching _q3 versions.
+    // matching _q5 versions.
     logic [7:0] pix_r, pix_g, pix_b;
     always_comb begin
-        if (h_active_q3 && v_active_q3) begin
-            pix_r = accum_q3[23:16];
-            pix_g = accum_q3[15:8];
-            pix_b = accum_q3[7:0];
+        if (h_active_q5 && v_active_q5) begin
+            pix_r = accum_q5[23:16];
+            pix_g = accum_q5[15:8];
+            pix_b = accum_q5[7:0];
         end else begin
             pix_r = 8'd0;
             pix_g = 8'd0;
@@ -572,10 +704,10 @@ module compositor #(
             r      <= pix_r;
             g      <= pix_g;
             b      <= pix_b;
-            hsync  <= h_in_sync_q3;
-            vsync  <= v_in_sync_q3;
-            hblank <= ~h_active_q3;
-            vblank <= ~v_active_q3;
+            hsync  <= h_in_sync_q5;
+            vsync  <= v_in_sync_q5;
+            hblank <= ~h_active_q5;
+            vblank <= ~v_active_q5;
         end
     end
 
