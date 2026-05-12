@@ -135,6 +135,15 @@ pub enum Command {
     /// against the topmost solid. PASS = a soft white disc fading
     /// into the navy background, no fringing or color shifts.
     LayerA8Probe,
+
+    /// Phase 2c step 3 visual: three textured discs side-by-side at
+    /// the same vertical position, plus an A8 layer overlaid in a
+    /// fourth slot — exercising the compositor's per-scanline
+    /// multi-textured pipeline (4 line buffers, dispatcher walking
+    /// the active list, painter picking per-pixel). PASS = three
+    /// red discs in a row across the middle of the screen with a
+    /// white disc overlapping the middle one.
+    LayerMultiTexProbe,
 }
 
 fn parse_u32_hex_or_dec(s: &str) -> Result<u32, std::num::ParseIntError> {
@@ -203,6 +212,7 @@ fn main() {
         Some(Command::LayerDraw) => layer_draw(base).map_err(Into::into),
         Some(Command::LayerTexProbe) => layer_tex_probe(base).map_err(Into::into),
         Some(Command::LayerA8Probe) => layer_a8_probe(base).map_err(Into::into),
+        Some(Command::LayerMultiTexProbe) => layer_multitex_probe(base).map_err(Into::into),
         None => {
             info!(
                 "no subcommand given — re-run with `probe`, `ring-test`, `draw-test`, …, or `--print-layout`"
@@ -1173,6 +1183,155 @@ fn layer_a8_probe(base: u32) -> Result<(), DeviceError> {
          Expect: navy background, blue header, soft WHITE disc fading \n\
          into the navy. Ctrl-C to exit (max 60 s).",
         tex.id
+    );
+
+    let running = Arc::new(AtomicBool::new(true));
+    {
+        let r = running.clone();
+        ctrlc::set_handler(move || r.store(false, Ordering::SeqCst))
+            .map_err(|e| DeviceError::Io(std::io::Error::other(e.to_string())))?;
+    }
+
+    let start = Instant::now();
+    let mut last_t = start;
+    let mut last_d = device.layer_dma_descriptors();
+    let max_dur = Duration::from_secs(60);
+
+    while running.load(Ordering::SeqCst) && start.elapsed() < max_dur {
+        std::thread::sleep(Duration::from_millis(1000));
+        let now = Instant::now();
+        let d = device.layer_dma_descriptors();
+        let elapsed = (now - last_t).as_secs_f32();
+        let frames = (d.wrapping_sub(last_d) as f32) / (COUNT as f32);
+        let fps = frames / elapsed;
+        println!("compositor: {fps:5.1} fps ({frames:>5.0} frames / {elapsed:.3}s)");
+        last_t = now;
+        last_d = d;
+    }
+
+    device.commit_layers();
+    println!("Cleared layers (count=0). Screen returns to black.");
+    Ok(())
+}
+
+/// Phase 2c step 3 verification — multi-textured per scanline.
+///
+/// Scene: 3 BGRA red discs side-by-side at the same vertical band,
+/// plus one A8 white disc overlapping the middle red one. All four
+/// textured layers are at overlapping y-ranges so the compositor's
+/// per-scanline dispatcher has to fire multiple kicks AND the
+/// painter has to pick per-pixel from multiple line buffers.
+///
+/// PASS = three red discs visible left/center/right, and over the
+/// middle red disc there's a white disc blending over it.
+/// FAIL = only one disc renders (commit A bug), discs in wrong
+/// place / wrong colour (active_for_buf mapping wrong), or torn
+/// pixels (line-buffer write race).
+fn layer_multitex_probe(base: u32) -> Result<(), DeviceError> {
+    let mut device = Device::open_with(DeviceConfig {
+        base_phys_addr: base,
+        ..DeviceConfig::default()
+    })?;
+
+    let info = device.video_info();
+    println!(
+        "Framework HDMI mode (VIDEO_INFO): {}x{}",
+        info.width, info.height
+    );
+
+    // BGRA 200×200 red disc.
+    const BGRA_W: u16 = 200;
+    const BGRA_H: u16 = 200;
+    let cx = (BGRA_W as f32) / 2.0;
+    let cy = (BGRA_H as f32) / 2.0;
+    let r_max = (BGRA_W as f32) / 2.0;
+    let mut bgra_bytes = vec![0u8; (BGRA_W as usize) * (BGRA_H as usize) * 4];
+    for y in 0..BGRA_H {
+        for x in 0..BGRA_W {
+            let dx = (x as f32) - cx;
+            let dy = (y as f32) - cy;
+            let dist = (dx * dx + dy * dy).sqrt();
+            let t = (1.0 - (dist / r_max)).clamp(0.0, 1.0);
+            let alpha = (t * t * 255.0) as u8;
+            let color = protocol::Rgba::new(0xFF, 0x40, 0x40, alpha);
+            let off = ((y as usize) * (BGRA_W as usize) + (x as usize)) * 4;
+            bgra_bytes[off..off + 4].copy_from_slice(&color.to_u32().to_le_bytes());
+        }
+    }
+    let tex_bgra = device.upload_texture(&TextureSpec {
+        format: TextureFormat::Rgba8888,
+        width: BGRA_W,
+        height: BGRA_H,
+        stride: (BGRA_W as u32) * 4,
+        data: &bgra_bytes,
+    })?;
+
+    // A8 200×200 alpha disc (smaller than the BGRA disc so the
+    // overlay is visibly inside the middle red one).
+    const A8_W: u16 = 200;
+    const A8_H: u16 = 200;
+    let cx = (A8_W as f32) / 2.0;
+    let cy = (A8_H as f32) / 2.0;
+    let r_max = (A8_W as f32) / 2.0;
+    let mut a8_bytes = vec![0u8; (A8_W as usize) * (A8_H as usize)];
+    for y in 0..A8_H {
+        for x in 0..A8_W {
+            let dx = (x as f32) - cx;
+            let dy = (y as f32) - cy;
+            let dist = (dx * dx + dy * dy).sqrt();
+            let t = (1.0 - (dist / r_max)).clamp(0.0, 1.0);
+            a8_bytes[(y as usize) * (A8_W as usize) + (x as usize)] =
+                (t * t * 255.0) as u8;
+        }
+    }
+    let tex_a8 = device.upload_texture(&TextureSpec {
+        format: TextureFormat::A8,
+        width: A8_W,
+        height: A8_H,
+        stride: A8_W as u32,
+        data: &a8_bytes,
+    })?;
+    println!(
+        "Uploaded textures: BGRA disc id={} @{:#X}, A8 disc id={} @{:#X}",
+        tex_bgra.id, tex_bgra.phys_addr, tex_a8.id, tex_a8.phys_addr
+    );
+
+    let navy   = 0xFF_05_10_40u32;
+    let header = 0xFF_10_30_80u32;
+    let white  = 0xFF_FF_FF_FFu32;
+
+    // y=440 for all four discs — same vertical band so per-scanline
+    // the compositor needs to handle up to 4 simultaneous textured
+    // layers.
+    let y_band: i16 = 440;
+    let a8_layer = protocol::LayerDescriptor {
+        flags:    protocol::layer::flag::ENABLED
+                | protocol::layer::flag::TINT_FROM_A8,
+        tex_id:   tex_a8.id,
+        dst_x:    860, dst_y: y_band,
+        dst_w:    A8_W, dst_h: A8_H,
+        src_x:    0,    src_y: 0,
+        src_w:    A8_W, src_h: A8_H,
+        color:    white,
+        opacity:  0xFF,
+        _reserved: [0; 7],
+    };
+
+    device.set_layer(0, &protocol::LayerDescriptor::solid(navy,   0, 0, 1920, 1080))?;
+    device.set_layer(1, &protocol::LayerDescriptor::solid(header, 0, 0, 1920,  120))?;
+    device.set_layer(2, &protocol::LayerDescriptor::textured(tex_bgra.id,  300, y_band, BGRA_W, BGRA_H))?;
+    device.set_layer(3, &protocol::LayerDescriptor::textured(tex_bgra.id,  860, y_band, BGRA_W, BGRA_H))?;
+    device.set_layer(4, &protocol::LayerDescriptor::textured(tex_bgra.id, 1420, y_band, BGRA_W, BGRA_H))?;
+    device.set_layer(5, &a8_layer)?;
+    device.commit_layers();
+    const COUNT: u32 = 6;
+
+    println!(
+        "Committed 6 layers: 2 solid + 3 BGRA red discs at y={} (left/center/right) \n\
+         + 1 A8 white disc overlapping the centre red disc. \n\
+         Expect: 3 red discs in a row, white disc visible inside the middle one.\n\
+         Ctrl-C to exit (max 60 s).",
+        y_band
     );
 
     let running = Arc::new(AtomicBool::new(true));
