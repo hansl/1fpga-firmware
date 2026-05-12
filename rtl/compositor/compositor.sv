@@ -55,9 +55,12 @@ module compositor #(
     parameter int MAX_ACTIVE = 8,
     // Per-scanline limit on textured layers. Each one consumes a
     // dedicated line buffer and a sequential texture_unit pass.
-    // Excess textured layers (beyond the first 4 found in active
-    // list order) are silently dropped.
-    parameter int MAX_TEXTURED = 4
+    // Excess textured layers (beyond the first 2 found in active
+    // list order) are silently dropped. Two is enough for the
+    // wallpaper + menu-panel use case; back-to-front compositing
+    // of more layers needs a longer painter pipeline (revisit when
+    // it's actually needed).
+    parameter int MAX_TEXTURED = 2
 ) (
     input  logic        clk,        // CLK_VIDEO == pixel clock (100 MHz)
     input  logic        rst_n,
@@ -346,11 +349,12 @@ module compositor #(
     wire signed [17:0] x_s = $signed({6'b0, hcount});
     wire [11:0] next_hcount = hcount + 12'd1;
 
-    // ---- Stage 0: per-pixel scans + 4 parallel line buffer reads ---
-    // Find topmost SOLID and topmost TEXTURED covering this pixel
-    // independently. Both are 8-deep last-wins reductions over the
-    // active list. The textured scan produces the active-slot index
-    // of the topmost textured layer at this x (if any).
+    // ---- Stage 0 combinational ---------------------------------------
+    // Find the topmost SOLID covering this pixel (existing 8-deep
+    // last-wins scan), plus per-buffer (covers, owning slot, x-offset
+    // LSB) info. The per-buffer signals are kept as scalars (not
+    // unpacked arrays) so Quartus doesn't get confused indexing them
+    // through pipeline registers.
     logic        solid_hit_c;
     logic [4:0]  solid_idx_c;
     logic [31:0] solid_color_c;
@@ -370,138 +374,184 @@ module compositor #(
         end
     end
 
-    logic        tex_hit_c;
-    logic [2:0]  tex_idx_c;       // active slot index (0..7)
-    always_comb begin
-        tex_hit_c = 1'b0;
-        tex_idx_c = 3'd0;
-        for (int i = 0; i < MAX_ACTIVE; i++) begin
-            if (i < int'(active_count)
-                && active_tex_id[i] != 16'hFFFF
-                && x_s >= $signed({active_dst_x_lo[i][16], active_dst_x_lo[i]})
-                && x_s <  active_dst_x_hi[i]) begin
-                tex_hit_c = 1'b1;
-                tex_idx_c = i[2:0];
-            end
-        end
-    end
+    // Buffer 0
+    wire [4:0]         slot_0       = active_for_buf[0];
+    wire               valid_0      = !slot_0[4]; // 5'h1F sentinel
+    wire [2:0]         slot_idx_0   = slot_0[2:0];
+    wire signed [16:0] lo_s_0       = {active_dst_x_lo[slot_idx_0][16],
+                                       active_dst_x_lo[slot_idx_0]};
+    wire signed [17:0] hi_s_0       = active_dst_x_hi[slot_idx_0];
+    wire [10:0]        dst_x_lo_0   = active_dst_x_lo[slot_idx_0][10:0];
+    wire [11:0]        x_off_0      = next_hcount - {1'b0, dst_x_lo_0};
+    wire               covers_c_0   = valid_0
+                                   && x_s >= {lo_s_0[16], lo_s_0}
+                                   && x_s <  hi_s_0;
+    wire               lsb_c_0      = x_off_0[0];
+    assign line_buf_addr_o[0] = x_off_0[10:1];
 
-    // Look up which line buffer the topmost-textured-at-x belongs to.
-    // bit 2 = 0 means "buffer is valid"; bits 1:0 = the buffer index.
-    // If the textured slot didn't get a buffer (more textured slots
-    // existed than MAX_TEXTURED), we paint as if no texture was
-    // present at this pixel.
-    wire [2:0]  tex_buf_lookup_c = buffer_for_active[tex_idx_c];
-    wire        tex_buf_valid_c  = tex_hit_c && !tex_buf_lookup_c[2];
-    wire [1:0]  tex_buf_K_c      = tex_buf_lookup_c[1:0];
-
-    // Issue 4 parallel line buffer reads. Each buffer K's address is
-    // (next_hcount - dst_x_lo[active_for_buf[K]]) / 2. We also
-    // capture the LSB of that offset (= which 32-bit half of the
-    // 64-bit BRAM word holds the desired pixel) so stage 2 can
-    // half-select without recomputing the offset.
-    logic buf_lsb_c [MAX_TEXTURED-1:0];
-    genvar gk;
-    generate for (gk = 0; gk < MAX_TEXTURED; gk++) begin : g_lb_addr
-        wire [4:0]  slot_for_k    = active_for_buf[gk];
-        wire [10:0] k_dst_x_lo    = active_dst_x_lo[slot_for_k][10:0];
-        wire [11:0] k_x_off       = next_hcount - {1'b0, k_dst_x_lo};
-        assign line_buf_addr_o[gk] = k_x_off[10:1];
-        assign buf_lsb_c[gk]       = k_x_off[0];
-    end endgenerate
+    // Buffer 1
+    wire [4:0]         slot_1       = active_for_buf[1];
+    wire               valid_1      = !slot_1[4];
+    wire [2:0]         slot_idx_1   = slot_1[2:0];
+    wire signed [16:0] lo_s_1       = {active_dst_x_lo[slot_idx_1][16],
+                                       active_dst_x_lo[slot_idx_1]};
+    wire signed [17:0] hi_s_1       = active_dst_x_hi[slot_idx_1];
+    wire [10:0]        dst_x_lo_1   = active_dst_x_lo[slot_idx_1][10:0];
+    wire [11:0]        x_off_1      = next_hcount - {1'b0, dst_x_lo_1};
+    wire               covers_c_1   = valid_1
+                                   && x_s >= {lo_s_1[16], lo_s_1}
+                                   && x_s <  hi_s_1;
+    wire               lsb_c_1      = x_off_1[0];
+    assign line_buf_addr_o[1] = x_off_1[10:1];
 
     // ---- Stage 1 register --------------------------------------------
-    // Captures stage-0 reductions and the per-buffer LSB selectors so
-    // the blend math + final mux in stage 2 only need the parallel
-    // BRAM data (already registered inside the line buffers).
+    // Captures stage-0 results so stage 1 combinational + blend stages
+    // run on stable values. line_buf_data_i is BRAM-registered and
+    // becomes valid this cycle.
     logic        solid_hit_q1;
     logic [4:0]  solid_idx_q1;
     logic [31:0] solid_color_q1;
-    logic        tex_hit_q1;
-    logic [2:0]  tex_idx_q1;
-    logic        tex_buf_valid_q1;
-    logic [1:0]  tex_buf_K_q1;
-    logic        buf_lsb_q1 [MAX_TEXTURED-1:0];
+    logic        covers_q1_0,  covers_q1_1;
+    logic [4:0]  slot_q1_0,    slot_q1_1;
+    logic        lsb_q1_0,     lsb_q1_1;
     logic        h_in_sync_q1, v_in_sync_q1;
     logic        h_active_q1,  v_active_q1;
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            solid_hit_q1     <= 1'b0;
-            solid_idx_q1     <= 5'd0;
-            solid_color_q1   <= 32'd0;
-            tex_hit_q1       <= 1'b0;
-            tex_idx_q1       <= 3'd0;
-            tex_buf_valid_q1 <= 1'b0;
-            tex_buf_K_q1     <= 2'd0;
-            for (int i = 0; i < MAX_TEXTURED; i++) buf_lsb_q1[i] <= 1'b0;
-            h_in_sync_q1     <= 1'b0;
-            v_in_sync_q1     <= 1'b0;
-            h_active_q1      <= 1'b0;
-            v_active_q1      <= 1'b0;
+            solid_hit_q1   <= 1'b0;
+            solid_idx_q1   <= 5'd0;
+            solid_color_q1 <= 32'd0;
+            covers_q1_0    <= 1'b0;  covers_q1_1 <= 1'b0;
+            slot_q1_0      <= 5'h1F; slot_q1_1   <= 5'h1F;
+            lsb_q1_0       <= 1'b0;  lsb_q1_1    <= 1'b0;
+            h_in_sync_q1   <= 1'b0;
+            v_in_sync_q1   <= 1'b0;
+            h_active_q1    <= 1'b0;
+            v_active_q1    <= 1'b0;
         end else begin
-            solid_hit_q1     <= solid_hit_c;
-            solid_idx_q1     <= solid_idx_c;
-            solid_color_q1   <= solid_color_c;
-            tex_hit_q1       <= tex_hit_c;
-            tex_idx_q1       <= tex_idx_c;
-            tex_buf_valid_q1 <= tex_buf_valid_c;
-            tex_buf_K_q1     <= tex_buf_K_c;
-            for (int i = 0; i < MAX_TEXTURED; i++) buf_lsb_q1[i] <= buf_lsb_c[i];
-            h_in_sync_q1     <= h_in_sync;
-            v_in_sync_q1     <= v_in_sync;
-            h_active_q1      <= h_active;
-            v_active_q1      <= v_active;
+            solid_hit_q1   <= solid_hit_c;
+            solid_idx_q1   <= solid_idx_c;
+            solid_color_q1 <= solid_color_c;
+            covers_q1_0    <= covers_c_0;  covers_q1_1 <= covers_c_1;
+            slot_q1_0      <= slot_0;      slot_q1_1   <= slot_1;
+            lsb_q1_0       <= lsb_c_0;     lsb_q1_1    <= lsb_c_1;
+            h_in_sync_q1   <= h_in_sync;
+            v_in_sync_q1   <= v_in_sync;
+            h_active_q1    <= h_active;
+            v_active_q1    <= v_active;
         end
     end
 
-    // ---- Stage 2: select tex pixel, blend, final mux ----------------
-    // line_buf_data_i[tex_buf_K_q1] holds the 64-bit word for the
-    // topmost-textured-at-x, picked from the 4 BRAMs by the
-    // registered selector. The LSB of the x-offset tells us which
-    // 32-bit half is our pixel.
-    wire [63:0] sel_buf_data  = line_buf_data_i[tex_buf_K_q1];
-    wire        sel_lsb       = buf_lsb_q1[tex_buf_K_q1];
-    wire [31:0] tex_pixel_q1  = sel_lsb ? sel_buf_data[63:32]
-                                        : sel_buf_data[31:0];
+    // ---- Stage 1 combinational: per-buffer pixel + contributes ------
+    // Half-select the 32-bit pixel out of each buffer's 64-bit BRAM
+    // word using the registered LSB. A buffer "contributes" iff its
+    // owning slot covers x AND is above the topmost solid in z-order
+    // (the solid is otherwise fully opaque and would hide it).
+    wire [31:0] buf_pixel_c_0 = lsb_q1_0 ? line_buf_data_i[0][63:32]
+                                         : line_buf_data_i[0][31:0];
+    wire [31:0] buf_pixel_c_1 = lsb_q1_1 ? line_buf_data_i[1][63:32]
+                                         : line_buf_data_i[1][31:0];
+    wire contributes_c_0 = covers_q1_0
+                        && (!solid_hit_q1 || slot_q1_0 > solid_idx_q1);
+    wire contributes_c_1 = covers_q1_1
+                        && (!solid_hit_q1 || slot_q1_1 > solid_idx_q1);
 
-    // SrcAlpha blend: out = src.rgb * a + dst.rgb * (255 - a), /255 ≈ >>8.
-    wire [7:0] tex_a = tex_pixel_q1[31:24];
-    wire [7:0] tex_r = tex_pixel_q1[23:16];
-    wire [7:0] tex_g = tex_pixel_q1[15:8];
-    wire [7:0] tex_b = tex_pixel_q1[7:0];
-    wire [7:0] inv_a = 8'd255 - tex_a;
-    wire [7:0] bg_r  = solid_color_q1[23:16];
-    wire [7:0] bg_g  = solid_color_q1[15:8];
-    wire [7:0] bg_b  = solid_color_q1[7:0];
-    wire [15:0] blend_r = tex_r * tex_a + bg_r * inv_a;
-    wire [15:0] blend_g = tex_g * tex_a + bg_g * inv_a;
-    wire [15:0] blend_b = tex_b * tex_a + bg_b * inv_a;
-    wire [31:0] blended_color = {8'hFF, blend_r[15:8], blend_g[15:8], blend_b[15:8]};
+    // Initial accumulator value: topmost solid or black background.
+    wire [31:0] accum_init_c = solid_hit_q1 ? solid_color_q1 : 32'h0000_0000;
 
-    // Should the textured pixel render? Only if the textured slot is
-    // above the topmost solid in z-order (active-list index).
-    wire topmost_tex_covers = tex_hit_q1 && tex_buf_valid_q1
-                           && (!solid_hit_q1
-                              || ({2'd0, tex_idx_q1} > solid_idx_q1));
+    // ---- Stage 2 combinational: blend buffer 0 over accum_init -----
+    // Inline SrcAlpha. out = src.rgb*a + dst.rgb*(255-a), /255 ≈ >>8.
+    wire [7:0]  s2_a   = buf_pixel_c_0[31:24];
+    wire [7:0]  s2_sr  = buf_pixel_c_0[23:16];
+    wire [7:0]  s2_sg  = buf_pixel_c_0[15:8];
+    wire [7:0]  s2_sb  = buf_pixel_c_0[7:0];
+    wire [7:0]  s2_ia  = 8'd255 - s2_a;
+    wire [7:0]  s2_dr  = accum_init_c[23:16];
+    wire [7:0]  s2_dg  = accum_init_c[15:8];
+    wire [7:0]  s2_db  = accum_init_c[7:0];
+    wire [15:0] s2_br  = s2_sr * s2_a + s2_dr * s2_ia;
+    wire [15:0] s2_bg  = s2_sg * s2_a + s2_dg * s2_ia;
+    wire [15:0] s2_bb  = s2_sb * s2_a + s2_db * s2_ia;
+    wire [31:0] s2_blended = {8'hFF, s2_br[15:8], s2_bg[15:8], s2_bb[15:8]};
+    wire [31:0] s2_result   = contributes_c_0 ? s2_blended : accum_init_c;
 
-    logic [31:0] pix_color;
-    always_comb begin
-        if (topmost_tex_covers) begin
-            pix_color = blended_color;
-        end else if (solid_hit_q1) begin
-            pix_color = solid_color_q1;
+    // ---- Stage 2 register --------------------------------------------
+    // accum_q2 = (solid_init blended with buf 0) if contributes,
+    //            else solid_init. Carry buf 1's pixel + contribute
+    //            bit forward for stage 3, plus the sync set.
+    logic [31:0] accum_q2;
+    logic        contributes_q2_1;
+    logic [31:0] buf_pixel_q2_1;
+    logic        h_in_sync_q2, v_in_sync_q2;
+    logic        h_active_q2,  v_active_q2;
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            accum_q2         <= 32'd0;
+            contributes_q2_1 <= 1'b0;
+            buf_pixel_q2_1   <= 32'd0;
+            h_in_sync_q2     <= 1'b0;
+            v_in_sync_q2     <= 1'b0;
+            h_active_q2      <= 1'b0;
+            v_active_q2      <= 1'b0;
         end else begin
-            pix_color = 32'h0000_0000;
+            accum_q2         <= s2_result;
+            contributes_q2_1 <= contributes_c_1;
+            buf_pixel_q2_1   <= buf_pixel_c_1;
+            h_in_sync_q2     <= h_in_sync_q1;
+            v_in_sync_q2     <= v_in_sync_q1;
+            h_active_q2      <= h_active_q1;
+            v_active_q2      <= v_active_q1;
         end
     end
 
+    // ---- Stage 3 combinational: blend buffer 1 over accum_q2 --------
+    wire [7:0]  s3_a   = buf_pixel_q2_1[31:24];
+    wire [7:0]  s3_sr  = buf_pixel_q2_1[23:16];
+    wire [7:0]  s3_sg  = buf_pixel_q2_1[15:8];
+    wire [7:0]  s3_sb  = buf_pixel_q2_1[7:0];
+    wire [7:0]  s3_ia  = 8'd255 - s3_a;
+    wire [7:0]  s3_dr  = accum_q2[23:16];
+    wire [7:0]  s3_dg  = accum_q2[15:8];
+    wire [7:0]  s3_db  = accum_q2[7:0];
+    wire [15:0] s3_br  = s3_sr * s3_a + s3_dr * s3_ia;
+    wire [15:0] s3_bg  = s3_sg * s3_a + s3_dg * s3_ia;
+    wire [15:0] s3_bb  = s3_sb * s3_a + s3_db * s3_ia;
+    wire [31:0] s3_blended = {8'hFF, s3_br[15:8], s3_bg[15:8], s3_bb[15:8]};
+    wire [31:0] s3_result   = contributes_q2_1 ? s3_blended : accum_q2;
+
+    // ---- Stage 3 register --------------------------------------------
+    logic [31:0] accum_q3;
+    logic        h_in_sync_q3, v_in_sync_q3;
+    logic        h_active_q3,  v_active_q3;
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            accum_q3     <= 32'd0;
+            h_in_sync_q3 <= 1'b0;
+            v_in_sync_q3 <= 1'b0;
+            h_active_q3  <= 1'b0;
+            v_active_q3  <= 1'b0;
+        end else begin
+            accum_q3     <= s3_result;
+            h_in_sync_q3 <= h_in_sync_q2;
+            v_in_sync_q3 <= v_in_sync_q2;
+            h_active_q3  <= h_active_q2;
+            v_active_q3  <= v_active_q2;
+        end
+    end
+
+    // ---- Output stage -----------------------------------------------
+    // r/g/b lag hcount by 4 cycles now (stage1 + 2 blend stages +
+    // output register). All sync/blank signals piped through the
+    // matching _q3 versions.
     logic [7:0] pix_r, pix_g, pix_b;
     always_comb begin
-        if (h_active_q1 && v_active_q1) begin
-            pix_r = pix_color[23:16];
-            pix_g = pix_color[15:8];
-            pix_b = pix_color[7:0];
+        if (h_active_q3 && v_active_q3) begin
+            pix_r = accum_q3[23:16];
+            pix_g = accum_q3[15:8];
+            pix_b = accum_q3[7:0];
         end else begin
             pix_r = 8'd0;
             pix_g = 8'd0;
@@ -509,10 +559,6 @@ module compositor #(
         end
     end
 
-    // ---- Output register ---------------------------------------------
-    // r/g/b lag hcount by 2 cycles now (stage-1 register + this
-    // output register). Sync / blank signals likewise go through the
-    // _q1 stage to stay aligned with the pixel data.
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             r      <= 8'd0;
@@ -526,10 +572,10 @@ module compositor #(
             r      <= pix_r;
             g      <= pix_g;
             b      <= pix_b;
-            hsync  <= h_in_sync_q1;
-            vsync  <= v_in_sync_q1;
-            hblank <= ~h_active_q1;
-            vblank <= ~v_active_q1;
+            hsync  <= h_in_sync_q3;
+            vsync  <= v_in_sync_q3;
+            hblank <= ~h_active_q3;
+            vblank <= ~v_active_q3;
         end
     end
 

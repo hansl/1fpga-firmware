@@ -265,10 +265,10 @@ wire [1:0]   comp_tex_buffer_sel;
 // busy-sync from texture_unit (clk_sys → clk_video) for the
 // dispatcher's handshake.
 wire         tex_unit_busy_sync_video;
-// Line buffer read ports (clk_video). 4 parallel reads, one per
-// line buffer.
-wire [9:0]   comp_line_buf_addr [3:0];
-wire [63:0]  comp_line_buf_data [3:0];
+// Line buffer read ports (clk_video). 2 parallel reads, one per
+// line buffer. MAX_TEXTURED = 2.
+wire [9:0]   comp_line_buf_addr [1:0];
+wire [63:0]  comp_line_buf_data [1:0];
 
 // Reset bridge: pll_locked is asynchronous to clk_video, so feeding
 // it raw as rst_n would risk recovery/removal violations at the
@@ -773,20 +773,18 @@ always_ff @(posedge clk_video) begin
 end
 assign tex_unit_busy_sync_video = tex_busy_sync_1;
 
-// 4 line buffers, one per textured slot. wr_clk = clk_sys (filled by
+// 2 line buffers, one per textured slot. wr_clk = clk_sys (filled by
 // texture_unit), rd_clk = clk_video (read by painter). 64 bits wide
 // (2 pixels per entry). The texture_unit emits a single set of
 // write signals plus `buffer_sel_o` telling us which BRAM to route
-// them to — demux below.
+// them to — demux below. MAX_TEXTURED = 2.
 wire [9:0]  line_buf_wr_addr;
 wire [63:0] line_buf_wr_data;
 wire        line_buf_we_shared;
 wire [1:0]  tex_unit_buffer_sel;
-wire [3:0]  line_buf_we;
+wire [1:0]  line_buf_we;
 assign line_buf_we[0] = line_buf_we_shared && (tex_unit_buffer_sel == 2'd0);
 assign line_buf_we[1] = line_buf_we_shared && (tex_unit_buffer_sel == 2'd1);
-assign line_buf_we[2] = line_buf_we_shared && (tex_unit_buffer_sel == 2'd2);
-assign line_buf_we[3] = line_buf_we_shared && (tex_unit_buffer_sel == 2'd3);
 
 line_buffer u_line_buffer_0 (
     .wr_clk    (clk_sys),
@@ -805,24 +803,6 @@ line_buffer u_line_buffer_1 (
     .rd_clk    (clk_video),
     .rd_addr_i (comp_line_buf_addr[1]),
     .rd_data_o (comp_line_buf_data[1])
-);
-line_buffer u_line_buffer_2 (
-    .wr_clk    (clk_sys),
-    .wr_addr_i (line_buf_wr_addr),
-    .wr_data_i (line_buf_wr_data),
-    .wr_en_i   (line_buf_we[2]),
-    .rd_clk    (clk_video),
-    .rd_addr_i (comp_line_buf_addr[2]),
-    .rd_data_o (comp_line_buf_data[2])
-);
-line_buffer u_line_buffer_3 (
-    .wr_clk    (clk_sys),
-    .wr_addr_i (line_buf_wr_addr),
-    .wr_data_i (line_buf_wr_data),
-    .wr_en_i   (line_buf_we[3]),
-    .rd_clk    (clk_video),
-    .rd_addr_i (comp_line_buf_addr[3]),
-    .rd_data_o (comp_line_buf_data[3])
 );
 
 // Texture unit: shares the DDR3 bus through the 4-way arbiter below.
