@@ -19,7 +19,6 @@ use clap_verbosity_flag as _;
 use core_affinity as _;
 use ctrlc as _;
 use cyclone_v as _;
-use image as _;
 #[cfg(test)]
 use pretty_assertions as _;
 use thiserror as _;

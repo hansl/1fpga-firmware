@@ -3398,7 +3398,6 @@ dependencies = [
  "ctrlc",
  "cyclone-v",
  "fontdue",
- "image",
  "menu-core-host",
  "pretty_assertions",
  "thiserror 2.0.18",

@@ -546,7 +546,6 @@ fn blend_test(base: u32) -> Result<(), DeviceError> {
 
 /// Bundled Latin Noto Sans, SIL OFL — ~27 KB.
 const NOTO_SANS: &[u8] = include_bytes!("../../fonts/NotoSans-Regular.ttf");
-const BACKGROUND_JPG: &[u8] = include_bytes!("../../../firmware-script/assets/background.jpg");
 
 fn build_text_atlas() -> Result<menu_core::text::FontAtlas, Box<dyn std::error::Error>> {
     let charset: String = (b' '..=b'~').map(|b| b as char).collect();
@@ -1388,58 +1387,40 @@ fn layer_multitex_probe(base: u32) -> Result<(), DeviceError> {
     Ok(())
 }
 
-/// Realistic menu over the layer protocol: wallpaper + translucent
-/// panel with title and items + softly-glowing selection highlight.
+/// Realistic menu over the layer protocol: solid background +
+/// translucent panel with title and items + softly-glowing selection
+/// highlight.
 ///
 /// Layer stack (slot 0 = back, native-1080p coords):
-///   0  black     1920×1080 fallback solid (never visible in practice)
-///   1  wallpaper 1920×1080 textured (BGRA, decoded from the embedded
-///                background.jpg, center-cropped to 1080)
-///   2  panel     PANEL_W×PANEL_H textured (rendered into via the
+///   0  navy      1920×1080 solid background
+///   1  panel     PANEL_W×PANEL_H textured (rendered into via the
 ///                FPGA blit engine: translucent fill + per-glyph
 ///                A8 atlas blits for the title and item labels)
-///   3  highlight HIGHLIGHT_W×item_h textured (uniform translucent
+///   2  highlight HIGHLIGHT_W×item_h textured (uniform translucent
 ///                accent strip; dst_y is rewritten as the selection
 ///                cycles)
 ///
-/// Only layer 3 changes per "tick" — the panel texture is rendered
+/// Only layer 2 changes per "tick" — the panel texture is rendered
 /// once. Selection cycles every second to demonstrate the
 /// dirty-redraw model (one set_layer + commit_layers, no blits).
+///
+/// No textured wallpaper: a 1920-wide BGRA scanline burst takes
+/// ~1920 `clk_video` cycles to read off the 50 MHz Avalon master,
+/// which exceeds the 1500-cycle HBlank budget. A full-screen photo
+/// background needs either a wider HBlank (fps cost) or moving
+/// texture_unit to `clk_video` (CDC rewrite). Out of scope for this
+/// demo.
 fn menu_text_demo(base: u32) -> Result<(), Box<dyn std::error::Error>> {
     let mut device = open_ready(base)?;
     let info = device.video_info();
     println!("Video: {}×{}", info.width, info.height);
 
-    // --- Wallpaper: decode the embedded JPEG, center-crop to 1920×1080,
-    // repack as BGRA, upload as a texture.
-    let img = image::load_from_memory(BACKGROUND_JPG)?.to_rgba8();
-    let (src_w, src_h) = (img.width(), img.height());
-    let target_w = 1920u32.min(src_w);
-    let target_h = 1080u32.min(src_h);
-    let crop_x = (src_w - target_w) / 2;
-    let crop_y = (src_h - target_h) / 2;
-    let mut wp_bytes = vec![0u8; (target_w * target_h * 4) as usize];
-    for y in 0..target_h {
-        for x in 0..target_w {
-            let p = img.get_pixel(crop_x + x, crop_y + y);
-            let off = ((y * target_w + x) * 4) as usize;
-            wp_bytes[off] = p[2];     // B
-            wp_bytes[off + 1] = p[1]; // G
-            wp_bytes[off + 2] = p[0]; // R
-            wp_bytes[off + 3] = 0xFF; // A
-        }
-    }
-    let wallpaper = device.upload_texture(&TextureSpec {
-        format: TextureFormat::Rgba8888,
-        width: target_w as u16,
-        height: target_h as u16,
-        stride: target_w * 4,
-        data: &wp_bytes,
-    })?;
-    println!(
-        "Wallpaper: {}×{} BGRA, tex_id={}, base={:#010X}",
-        target_w, target_h, wallpaper.id, wallpaper.phys_addr
-    );
+    // No textured wallpaper: a 1920-wide BGRA texture row takes
+    // ~1920 clk_video to burst over the 50 MHz Avalon master, but
+    // HBlank is only 1500 — texture_unit can't finish before the
+    // painter starts reading, so the wallpaper layer desyncs the
+    // dispatcher. Use a solid dark background instead; the demo's
+    // point is layer compositing + text, not a full-screen photo.
 
     // --- Font atlases: a larger one for the title, smaller for items.
     let title_atlas = menu_core::text::build_atlas(NOTO_SANS, 56.0, &ascii_charset(), 1024, 1024)?;
@@ -1563,18 +1544,14 @@ fn menu_text_demo(base: u32) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut selected: usize = 0;
-    let black = 0xFF_00_00_00u32;
-    device.set_layer(0, &protocol::LayerDescriptor::solid(black, 0, 0, 1920, 1080))?;
+    let bg_navy = 0xFF_05_10_28u32;
+    device.set_layer(0, &protocol::LayerDescriptor::solid(bg_navy, 0, 0, 1920, 1080))?;
     device.set_layer(
         1,
-        &protocol::LayerDescriptor::textured(wallpaper.id, 0, 0, target_w as u16, target_h as u16),
-    )?;
-    device.set_layer(
-        2,
         &protocol::LayerDescriptor::textured(panel.id, panel_x as i16, panel_y as i16, PANEL_W, PANEL_H),
     )?;
     device.set_layer(
-        3,
+        2,
         &protocol::LayerDescriptor::textured(
             highlight.id,
             highlight_x as i16,
@@ -1603,7 +1580,7 @@ fn menu_text_demo(base: u32) -> Result<(), Box<dyn std::error::Error>> {
         if last_change.elapsed() >= Duration::from_secs(1) {
             selected = (selected + 1) % items.len();
             device.set_layer(
-                3,
+                2,
                 &protocol::LayerDescriptor::textured(
                     highlight.id,
                     highlight_x as i16,
