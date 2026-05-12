@@ -126,6 +126,15 @@ pub enum Command {
     /// near its edges (SrcAlpha blend). Sharp solid panels above /
     /// below the disc, FPS readout to confirm timing closure.
     LayerTexProbe,
+
+    /// Phase 2c step 2 visual: uploads a 256×256 A8 texture (single-
+    /// channel alpha disc) and commits one tinted-A8 textured layer
+    /// over a navy background + header. The layer's `color` field is
+    /// the tint colour — texture_unit pre-bakes (tint.rgb, alpha) per
+    /// pixel into the line buffer, and the painter SrcAlpha-blends
+    /// against the topmost solid. PASS = a soft white disc fading
+    /// into the navy background, no fringing or color shifts.
+    LayerA8Probe,
 }
 
 fn parse_u32_hex_or_dec(s: &str) -> Result<u32, std::num::ParseIntError> {
@@ -193,6 +202,7 @@ fn main() {
         Some(Command::LayerProbe) => layer_probe(base).map_err(Into::into),
         Some(Command::LayerDraw) => layer_draw(base).map_err(Into::into),
         Some(Command::LayerTexProbe) => layer_tex_probe(base).map_err(Into::into),
+        Some(Command::LayerA8Probe) => layer_a8_probe(base).map_err(Into::into),
         None => {
             info!(
                 "no subcommand given — re-run with `probe`, `ring-test`, `draw-test`, …, or `--print-layout`"
@@ -1051,6 +1061,117 @@ fn layer_tex_probe(base: u32) -> Result<(), DeviceError> {
          Expect: navy bg, blue header, soft red disc fading into the navy \n\
          around the centre (SrcAlpha blend), cyan panel bottom-left. \n\
          Ctrl-C to exit (max 60 s).",
+        tex.id
+    );
+
+    let running = Arc::new(AtomicBool::new(true));
+    {
+        let r = running.clone();
+        ctrlc::set_handler(move || r.store(false, Ordering::SeqCst))
+            .map_err(|e| DeviceError::Io(std::io::Error::other(e.to_string())))?;
+    }
+
+    let start = Instant::now();
+    let mut last_t = start;
+    let mut last_d = device.layer_dma_descriptors();
+    let max_dur = Duration::from_secs(60);
+
+    while running.load(Ordering::SeqCst) && start.elapsed() < max_dur {
+        std::thread::sleep(Duration::from_millis(1000));
+        let now = Instant::now();
+        let d = device.layer_dma_descriptors();
+        let elapsed = (now - last_t).as_secs_f32();
+        let frames = (d.wrapping_sub(last_d) as f32) / (COUNT as f32);
+        let fps = frames / elapsed;
+        println!("compositor: {fps:5.1} fps ({frames:>5.0} frames / {elapsed:.3}s)");
+        last_t = now;
+        last_d = d;
+    }
+
+    device.commit_layers();
+    println!("Cleared layers (count=0). Screen returns to black.");
+    Ok(())
+}
+
+/// Phase 2c step 2 verification — A8 textures + tint.
+///
+/// Uploads a 256×256 A8 alpha-disc texture (same shape as
+/// layer-tex-probe's BGRA disc but only the alpha channel — one byte
+/// per pixel). The textured layer's `color` field is the tint
+/// (white). The on-FPGA texture_unit pre-bakes each pixel as
+/// `(tint.rgb, alpha)` into the line buffer; the painter
+/// SrcAlpha-blends that over the topmost solid (the navy background).
+/// PASS = a soft white disc fading smoothly into navy, no fringing.
+fn layer_a8_probe(base: u32) -> Result<(), DeviceError> {
+    let mut device = Device::open_with(DeviceConfig {
+        base_phys_addr: base,
+        ..DeviceConfig::default()
+    })?;
+
+    let info = device.video_info();
+    println!(
+        "Framework HDMI mode (VIDEO_INFO): {}x{}",
+        info.width, info.height
+    );
+
+    // Build a 256×256 A8 disc (alpha varies with radial distance).
+    const TEX_W: u16 = 256;
+    const TEX_H: u16 = 256;
+    let cx: f32 = (TEX_W as f32) / 2.0;
+    let cy: f32 = (TEX_H as f32) / 2.0;
+    let r_max: f32 = (TEX_W as f32) / 2.0;
+    let mut tex_bytes = vec![0u8; (TEX_W as usize) * (TEX_H as usize)];
+    for y in 0..TEX_H {
+        for x in 0..TEX_W {
+            let dx = (x as f32) - cx;
+            let dy = (y as f32) - cy;
+            let dist = (dx * dx + dy * dy).sqrt();
+            let t = (1.0 - (dist / r_max)).clamp(0.0, 1.0);
+            tex_bytes[(y as usize) * (TEX_W as usize) + (x as usize)] =
+                (t * t * 255.0) as u8;
+        }
+    }
+    let tex = device.upload_texture(&TextureSpec {
+        format: TextureFormat::A8,
+        width: TEX_W,
+        height: TEX_H,
+        stride: TEX_W as u32, // 1 byte/pixel
+        data: &tex_bytes,
+    })?;
+    println!(
+        "Uploaded 256×256 A8 alpha-disc texture: id={}, base={:#010X}",
+        tex.id, tex.phys_addr
+    );
+
+    let navy   = 0xFF_05_10_40u32;
+    let header = 0xFF_10_30_80u32;
+    // Tint colour for the A8 layer (white = R=FF G=FF B=FF). The
+    // top byte (alpha) is overwritten by the per-pixel A8 sample
+    // inside texture_unit.
+    let tint   = 0xFF_FF_FF_FFu32;
+
+    device.set_layer(0, &protocol::LayerDescriptor::solid(navy,   0,   0, 1920, 1080))?;
+    device.set_layer(1, &protocol::LayerDescriptor::solid(header, 0,   0, 1920,  120))?;
+    let a8_layer = protocol::LayerDescriptor {
+        flags:    protocol::layer::flag::ENABLED
+                | protocol::layer::flag::TINT_FROM_A8,
+        tex_id:   tex.id,
+        dst_x:    832, dst_y: 412,
+        dst_w:    256, dst_h: 256,
+        src_x:    0,   src_y: 0,
+        src_w:    256, src_h: 256,
+        color:    tint,
+        opacity:  0xFF,
+        _reserved: [0; 7],
+    };
+    device.set_layer(2, &a8_layer)?;
+    device.commit_layers();
+    const COUNT: u32 = 3;
+
+    println!(
+        "Committed 3 layers (slot 2 is A8-tinted, tex_id={}, tint=#FFFFFFFF). \n\
+         Expect: navy background, blue header, soft WHITE disc fading \n\
+         into the navy. Ctrl-C to exit (max 60 s).",
         tex.id
     );
 
