@@ -21,15 +21,17 @@
 //  Textured layers are dropped by `scanline_filter`; they light up
 //  in Phase 2b.
 //
-//  Timing: native 1920×1080 with minimum-blanking, 100 MHz pixel
-//  clock (= clk_video, separate from clk_sys via a second PLL output).
-//  ASCAL still accepts arbitrary core-side timing; producing pixels at
-//  native resolution lets text/UI keep their pixel-perfect crispness
-//  on a 1080p HDMI sink.
+//  Timing: native 1920×1080, 90 MHz pixel clock (= clk_video,
+//  separate from clk_sys via a second PLL output). ASCAL still
+//  accepts arbitrary core-side timing; producing pixels at native
+//  resolution lets text/UI keep their pixel-perfect crispness on a
+//  1080p HDMI sink. Pixel clock dropped from 100 MHz when the
+//  painter grew the SrcAlpha blend + second 16-deep scan — see
+//  pll.v for the timing-closure rationale.
 //
-//    H: 1920 active + 280 blank = 2200 total
+//    H: 1920 active + 600 blank = 2520 total
 //    V: 1080 active +  20 blank = 1100 total
-//    => 100 MHz / (2200 × 1100) ≈ 41.3 Hz
+//    => 90 MHz / (2520 × 1100) ≈ 32.5 Hz
 //
 //  HBlank is set just wide enough to fit the worst-case `scanline_filter`
 //  walk of all 256 layer slots (count + 2 = 258 cycles) plus a small
@@ -43,7 +45,7 @@
 module compositor #(
     parameter int MAX_ACTIVE = 16
 ) (
-    input  logic        clk,        // CLK_VIDEO == pixel clock (100 MHz)
+    input  logic        clk,        // CLK_VIDEO == pixel clock (90 MHz)
     input  logic        rst_n,
 
     // CE_PIXEL for the framework — always 1 (we run at pixel rate).
@@ -88,7 +90,7 @@ module compositor #(
     input  logic [63:0] line_buf_data_i
 );
 
-    // ---- Timing constants (1920×1080, 100 MHz pixel clock).
+    // ---- Timing constants (1920×1080, 90 MHz pixel clock).
     // HBlank widened in Phase 2b step 2 to fit:
     //   - scanline_filter worst case (count=256): ~260 cycles
     //   - kick-to-clk_sys CDC: ~10 cycles
@@ -96,7 +98,7 @@ module compositor #(
     //   - margin: ~40 cycles
     // Total HBlank ≈ 600 cycles.
     // VBlank = 20 lines (unchanged; layer_dma fits comfortably).
-    // fps = 100 MHz / (2520 × 1100) ≈ 36.1 Hz.
+    // fps = 90 MHz / (2520 × 1100) ≈ 32.5 Hz.
     localparam int H_ACTIVE = 1920;
     localparam int H_FP     = 60;
     localparam int H_SYNC   = 40;

@@ -210,15 +210,17 @@ assign BUTTONS   = 2'b00;
 // inclk[3] (synthesis error 15836 if driven by a raw input pin). Two
 // outputs from the core PLL:
 //   clk_sys (50 MHz)   — blit engine, ring fetcher, regs, layer_dma
-//   clk_video (100 MHz) — compositor + scanline_filter, also exposed
+//   clk_video (90 MHz)  — compositor + scanline_filter, also exposed
 //                          to the framework as CLK_VIDEO so ASCAL
 //                          captures at the native-1080p pixel rate.
+//                          (Dropped from 100 MHz when the painter
+//                          grew Phase 2c's blend math; see pll.v.)
 // The two are related clocks (same PLL); CDC paths are confined to
 // the synchronisers below, which menu_core.sdc marks as false_paths.
 ////////////////////////////////////////////////////////////////////////////
 
 wire clk_sys;     // 50 MHz: blit engine, ring fetcher, regs, layer_dma
-wire clk_video;   // 100 MHz: compositor + scanline_filter
+wire clk_video;   // 90 MHz: compositor + scanline_filter
 wire pll_locked;
 
 pll pll_inst (

@@ -13,11 +13,13 @@
 //   outclk_0 = 50 MHz  → clk_sys. Drives the blit engine, ring
 //              fetcher, register file, and layer_dma. Proven stable
 //              at 50 MHz with positive slack on all paths.
-//   outclk_1 = 100 MHz → clk_video. Drives the compositor and
-//              scanline_filter (Phase 2a step 4 / native 1080p
-//              scanout). The compositor's combinational logic is
-//              simple enough to close timing comfortably at 100 MHz
-//              on Cyclone V SE-A6.
+//   outclk_1 = 90 MHz  → clk_video. Drives the compositor and
+//              scanline_filter (native 1080p scanout). Dropped from
+//              100 MHz to 90 MHz once Phase 2c step 1 added a second
+//              16-deep scan (`other_tex_hit_c`) and the SrcAlpha
+//              blend math to the painter — the two simultaneous
+//              scans + blend just barely missed 10 ns timing on
+//              Cyclone V SE-A6. 11.1 ns is comfortable.
 //
 // The two are related (same PLL); Quartus times paths between them as
 // synchronous unless menu_core.sdc explicitly marks CDC synchronizers
@@ -39,7 +41,7 @@ altera_pll #(
 	.output_clock_frequency0    ("50.000000 MHz"),
 	.phase_shift0               ("0 ps"),
 	.duty_cycle0                (50),
-	.output_clock_frequency1    ("100.000000 MHz"),
+	.output_clock_frequency1    ("90.000000 MHz"),
 	.phase_shift1               ("0 ps"),
 	.duty_cycle1                (50),
 	.output_clock_frequency2    ("0 MHz"),
