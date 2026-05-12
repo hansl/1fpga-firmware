@@ -908,7 +908,7 @@ fn layer_draw(base: u32) -> Result<(), DeviceError> {
         info.width, info.height
     );
     println!(
-        "Compositor native:                 1920x1080 @ ~41 Hz (100 MHz pixel clock)"
+        "Compositor native:                 1920x1080 @ ~32.5 Hz (90 MHz pixel clock)"
     );
     if info.width != 1920 || info.height != 1080 {
         println!(
