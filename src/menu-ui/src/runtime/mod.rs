@@ -652,9 +652,31 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         // drive HDMI through commit_layers, not the framebuffer
         // scanout path.
         let fence_token = frame.submit()?;
+        let fence_value_expected = fence_token.fence_value();
         let fence_start = Instant::now();
-        fence_token.wait(timeout)?;
+        let wait_result = fence_token.wait(timeout);
         let fence_dt = fence_start.elapsed();
+        if let Err(e) = wait_result {
+            // Dump fetcher state so we can see WHERE in the ring the
+            // error happened. Especially useful for BadOpcode — tells
+            // us if the fetcher's ring-read returned the wrong bytes
+            // (response-routing hole) or if the host wrote garbage to
+            // the ring.
+            let regs = device.register_block();
+            let status = regs.read32(menu_core_host::protocol::registers::STATUS);
+            let ring_head = regs.read32(menu_core_host::protocol::registers::RING_HEAD);
+            let ring_tail = regs.read32(menu_core_host::protocol::registers::RING_TAIL);
+            let fence_val = regs.read32(menu_core_host::protocol::registers::FENCE_VALUE);
+            let error_info = regs.read32(menu_core_host::protocol::registers::ERROR_INFO);
+            let vsync = regs.read32(menu_core_host::protocol::registers::VSYNC_COUNT);
+            error!(
+                "fence error: expected fence={fence_value_expected:#010X}, got={fence_val:#010X}; \
+                 STATUS={status:#010X} ERROR_INFO={error_info:#010X} \
+                 RING_HEAD={ring_head:#010X} RING_TAIL={ring_tail:#010X} \
+                 VSYNC_COUNT={vsync}; frame_idx={frame_idx}"
+            );
+            return Err(e.into());
+        }
         // After blits retire, commit two layers:
         //   slot 0 = full-screen solid bg (letterbox around canvas).
         //   slot 1 = textured RT centred at (canvas_x, canvas_y),
