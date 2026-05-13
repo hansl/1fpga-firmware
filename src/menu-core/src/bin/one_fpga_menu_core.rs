@@ -293,6 +293,8 @@ fn probe(base: u32) -> Result<(), DeviceError> {
         registers::RING_HEAD,
         registers::RING_KICK,
         registers::FENCE_VALUE,
+        // descriptors_o counter from layer_dma — read-only by design.
+        registers::LAYER_DEBUG,
     ];
     let mut tested = 0usize;
     let mut failed = 0usize;
