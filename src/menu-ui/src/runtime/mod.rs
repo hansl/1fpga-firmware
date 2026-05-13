@@ -348,13 +348,14 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     // the one the compositor is currently displaying.
     let mut host_idx: usize = 0;
 
-    // Initial commit so HDMI shows a defined color. Single solid
-    // layer covering full screen — replaced by the textured canvas
-    // layer once the first frame's paint completes.
+    // Initial commit so HDMI shows a defined color. Bright magenta
+    // during diagnostic — easy to tell apart from "compositor isn't
+    // displaying anything = black" and "compositor showed our
+    // intended dark navy = also looks black".
     device.set_layer(
         0,
         &protocol::LayerDescriptor::solid(
-            0xFF_10_10_18, // dark navy, BGRA
+            0xFF_FF_00_FF, // BGRA: B=FF G=00 R=FF A=FF = magenta
             0,
             0,
             fb.width,
@@ -362,6 +363,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         ),
     )?;
     device.commit_layers();
+    info!("initial commit: magenta solid full-screen layer");
 
     // 2. Load the JS bundle.
     let bundle: Vec<u8> = match cfg.bundle_override.as_ref() {
