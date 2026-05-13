@@ -330,14 +330,16 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     );
 
     // 1b. Allocate two render targets sized to the content canvas.
-    //     We render at canvas size rather than full screen because
-    //     1920-wide textured layers at 1080p60 exceed the per-scanline
-    //     fetch budget (~740 clk_sys cycles vs 960 beats needed),
-    //     producing visible flicker. 1280×720 (= 640 beats per row)
-    //     fits comfortably, leaving headroom for blit and layer_dma
-    //     contention. The compositor displays the canvas centred on
-    //     screen with a solid bg filling the surrounding letterbox.
-    let canvas_w: u16 = 1280;
+    //     Render at canvas size rather than full screen because the
+    //     compositor's per-scanline tex_unit fetch is bounded by the
+    //     previous-scanline period (~740 clk_sys cycles at 1080p60).
+    //     1280×720 (= 640 beats per row) sits right at the edge of
+    //     that budget once burst-split latencies (3 × ~30 cycles)
+    //     and per-scanline descriptor reads are counted — DDRAM
+    //     controller jitter then causes per-frame variation that
+    //     reads as flicker. 1024 (= 512 beats, ~645 cycles total)
+    //     fits with margin and is stable.
+    let canvas_w: u16 = 1024;
     let canvas_h: u16 = 720;
     let canvas_x: i16 = ((fb.width as i32 - canvas_w as i32) / 2) as i16;
     let canvas_y: i16 = ((fb.height as i32 - canvas_h as i32) / 2) as i16;

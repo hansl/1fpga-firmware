@@ -23,16 +23,17 @@ const ITEMS: Item[] = [
   { name: 'Atari', accent: '#d09040' },
 ];
 
-// Menu-ui currently renders into a 1280×720 canvas RT centred on
+// Menu-ui currently renders into a 1024×720 canvas RT centred on
 // screen with a dark-navy letterbox around it. The Rust runtime
 // caps the textured layer here to keep the per-scanline fetch inside
-// the HBlank budget; once we widen that (RBF work) the canvas can
-// grow to full screen.
+// the compositor's per-scanline budget (~740 clk_sys cycles at
+// 1080p60); once we widen that (multi-line-buffer prefetch in
+// tex_unit, RBF work) the canvas can grow to full screen.
 const root: CSSProperties = {
   position: 'relative',
   display: 'flex',
   flexDirection: 'column',
-  width: 1280,
+  width: 1024,
   height: 720,
   justifyContent: 'space-between',
   alignItems: 'center',
@@ -48,7 +49,7 @@ const bgStyle: CSSProperties = {
   position: 'absolute',
   top: 0,
   left: 0,
-  width: 1280,
+  width: 1024,
   height: 720,
 };
 
@@ -79,7 +80,7 @@ const listStyle: CSSProperties = {
 const cardBase: CSSProperties = {
   display: 'flex',
   flexDirection: 'column',
-  width: 240,
+  width: 170,
   height: 240,
   alignItems: 'center',
   justifyContent: 'flex-end',
