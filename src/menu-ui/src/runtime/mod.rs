@@ -636,28 +636,14 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
 
         let t7 = Instant::now();
 
-        // Submit blits and wait for the fence. No present() — we
-        // drive HDMI through commit_layers, not the framebuffer
-        // scanout path.
+        // DIAGNOSTIC: skip the per-frame layer-table swap entirely.
+        // Just submit + fence wait. If THIS still times out we know
+        // the issue is in the blit path; if it stops timing out, the
+        // commit_layers / mirror_active_to_back race is the problem.
         let fence_token = frame.submit()?;
         let fence_start = Instant::now();
         fence_token.wait(timeout)?;
         let fence_dt = fence_start.elapsed();
-        // After blits retire, point the textured display layer at
-        // the freshly-painted RT and commit. The atomic
-        // LAYER_COMMIT register store is what makes the new buffer
-        // visible; the next vsync's layer_dma reads it.
-        device.set_layer(
-            0,
-            &protocol::LayerDescriptor::textured(
-                display_rts[host_idx].id,
-                0,
-                0,
-                fb.width,
-                fb.height,
-            ),
-        )?;
-        device.commit_layers();
         // Scanout latency is now sub-vsync (the compositor latches
         // on the next vsync edge), so we leave the scanout-timing
         // tally at zero rather than synthesising a value.
