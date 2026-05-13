@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use crate::allocator::{AllocError, BumpAllocator};
 use crate::bridge;
-use crate::devmem::{DevMemMap, volatile_copy_to_devmem};
+use crate::devmem::{DevMemMap, volatile_copy_to_devmem, volatile_copy_within_devmem};
 use crate::error::{DeviceError, HardwareError};
 use crate::mem;
 use crate::protocol::descriptors::{DESCRIPTOR_SIZE, TextureDescriptor};
@@ -482,17 +482,24 @@ impl Device {
     /// FPGA latches both fields on the same clock edge, so a scanline
     /// in flight cannot observe a torn commit (PROTOCOL.md §11.2).
     ///
-    /// **Immediate-mode contract (Phase 2a)**: every frame, the
-    /// caller is expected to re-issue [`set_layer`] for every slot
-    /// `0..N` it wants active that frame, in increasing order, and
-    /// then call this. Slots `>= N` are gated out by the `count`
-    /// field of `LAYER_COMMIT` so their (stale) bytes are never
-    /// read. We deliberately do NOT zero the back table after
-    /// flipping — a host-driven memset would race with the FPGA's
-    /// in-flight DMA reads of the just-now-old-active table, since
-    /// the host has no signal that the DMA pass for the previous
-    /// frame has completed. Stale data in slots within `0..N` is
-    /// the caller's problem; just rewrite them.
+    /// **Retained-mode contract**: after the swap, this mirrors the
+    /// just-committed (now-active) table into the new back table so
+    /// the next [`set_layer`] sees the previous frame's state and
+    /// only needs to write the slots that actually change. Callers
+    /// who want to clear all layers should call [`Self::clear_layers`]
+    /// instead — issuing `commit_layers` with no intervening
+    /// `set_layer` calls re-commits the same state.
+    ///
+    /// The mirror copies `count` descriptors (where `count` is the
+    /// committed valid-layer count). It reads from the new active
+    /// table — which the FPGA also reads, but concurrent readers do
+    /// not conflict — and writes to the new back table. If a prior
+    /// frame's `layer_dma` is still draining when this is called,
+    /// it is reading the now-new-back; the writes here could
+    /// theoretically race that read for a single descriptor on a
+    /// single frame. Even-rate UIs (≤30 Hz) leave more than enough
+    /// idle time between vsync and the next commit for this to be a
+    /// non-issue in practice.
     pub fn commit_layers(&mut self) {
         // Pair with the volatile descriptor writes above: the DDR3
         // stores must be globally visible before the FPGA observes
@@ -509,7 +516,55 @@ impl Device {
         self.regs.write32(registers::LAYER_COMMIT, commit);
 
         self.layer_back_idx ^= 1;
+        self.mirror_active_to_back(count as u16);
+    }
+
+    /// Atomically clear all layers (count = 0). The previously-active
+    /// table is gated out by the count field; layer_dma stays in
+    /// S_IDLE on the next vsync. Resets the host's retained state so
+    /// the next [`set_layer`] starts from a blank table.
+    pub fn clear_layers(&mut self) {
+        fence(Ordering::Release);
+        let new_active: u32 = self.layer_back_idx as u32;
+        let commit: u32 = new_active << 31; // count = 0
+        self.regs.write32(registers::LAYER_COMMIT, commit);
+        self.layer_back_idx ^= 1;
         self.back_valid_count = 0;
+    }
+
+    /// Copy the first `count` descriptors from the new active table
+    /// into the new back table so the next frame's `set_layer` calls
+    /// see the just-committed state. No-op when `count == 0` or
+    /// when the layer storage hasn't been mapped yet (e.g. caller
+    /// committed without ever writing a layer).
+    fn mirror_active_to_back(&mut self, count: u16) {
+        if count == 0 {
+            self.back_valid_count = 0;
+            return;
+        }
+        let Some(map) = self.layer_table_map.as_mut() else {
+            self.back_valid_count = 0;
+            return;
+        };
+        // After the flip, `layer_back_idx` points at the new back. The
+        // new active sits in the opposite half of the layer region.
+        let (active_off, back_off) = if self.layer_back_idx == 0 {
+            (mem::LAYER_TABLE_SIZE, 0)
+        } else {
+            (0, mem::LAYER_TABLE_SIZE)
+        };
+        let bytes = (count as usize) * mem::LAYER_DESCRIPTOR_SIZE;
+        // SAFETY: layer_table_map covers LAYER_REGION_SIZE bytes; each
+        // table is LAYER_TABLE_SIZE bytes, and `count <=
+        // LAYERS_PER_TABLE` is enforced by set_layer's bounds check
+        // bumping back_valid_count. Both offsets are 32-byte aligned
+        // (a descriptor boundary), so the 4-byte alignment requirement
+        // of `volatile_copy_within_devmem` is satisfied.
+        unsafe {
+            let base = map.as_mut_ptr();
+            volatile_copy_within_devmem(base.add(active_off), base.add(back_off), bytes);
+        }
+        self.back_valid_count = count;
     }
 
     /// Diagnostic: which layer table the host will write to next

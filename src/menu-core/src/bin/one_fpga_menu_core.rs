@@ -885,9 +885,10 @@ fn layer_probe(base: u32) -> Result<(), DeviceError> {
         return Ok(());
     }
 
-    // Step 3: re-commit with count=0 (no intervening set_layer means
-    // back_valid_count is still 0 after the previous commit reset it).
-    device.commit_layers();
+    // Step 3: drop to count=0 explicitly. clear_layers commits a zero
+    // count without inheriting the just-active table, so layer_dma
+    // stays in S_IDLE on the next vsync.
+    device.clear_layers();
     println!("Committed: 0 layers (count=0). DMA should halt.");
 
     let s2 = device.layer_dma_descriptors();
@@ -997,7 +998,7 @@ fn layer_draw(base: u32) -> Result<(), DeviceError> {
     }
 
     // Clean exit: black screen.
-    device.commit_layers();
+    device.clear_layers();
     println!("Cleared layers (count=0). Screen returns to black.");
     Ok(())
 }
@@ -1107,7 +1108,7 @@ fn layer_tex_probe(base: u32) -> Result<(), DeviceError> {
         last_d = d;
     }
 
-    device.commit_layers();
+    device.clear_layers();
     println!("Cleared layers (count=0). Screen returns to black.");
     Ok(())
 }
@@ -1218,7 +1219,7 @@ fn layer_a8_probe(base: u32) -> Result<(), DeviceError> {
         last_d = d;
     }
 
-    device.commit_layers();
+    device.clear_layers();
     println!("Cleared layers (count=0). Screen returns to black.");
     Ok(())
 }
@@ -1382,7 +1383,7 @@ fn layer_multitex_probe(base: u32) -> Result<(), DeviceError> {
         last_d = d;
     }
 
-    device.commit_layers();
+    device.clear_layers();
     println!("Cleared layers (count=0). Screen returns to black.");
     Ok(())
 }
@@ -1578,11 +1579,6 @@ fn menu_text_demo(base: u32) -> Result<(), Box<dyn std::error::Error>> {
     while running.load(Ordering::SeqCst) && start.elapsed() < max_dur {
         if last_change.elapsed() >= Duration::from_secs(1) {
             selected = (selected + 1) % items.len();
-            // Write BOTH slots every iteration. The layer table is
-            // double-buffered, so writing slot 0 only at startup leaves
-            // the second buffer's slot 0 stale — commits then alternate
-            // between "navy bg present" and "navy bg missing" frames.
-            device.set_layer(0, &protocol::LayerDescriptor::solid(bg_navy, 0, 0, 1920, 1080))?;
             device.set_layer(
                 1,
                 &protocol::LayerDescriptor::textured(
@@ -1599,7 +1595,7 @@ fn menu_text_demo(base: u32) -> Result<(), Box<dyn std::error::Error>> {
         std::thread::sleep(Duration::from_millis(33));
     }
 
-    device.commit_layers();
+    device.clear_layers();
     println!("Cleared layers.");
     Ok(())
 }
