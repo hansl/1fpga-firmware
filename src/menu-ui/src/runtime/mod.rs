@@ -618,24 +618,20 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
             continue;
         }
 
-        // 7. Begin frame. Render pending text into their atlas RTs
-        //    first (set_target/glyphs/restore inside the helper),
-        //    then redirect to the active host RT and paint the tree.
+        // 7. DIAGNOSTIC: skip SET_TARGET, paint into the framebuffer
+        //    default. Only emit a SMALL fill_rect (100×100) + canary.
+        //    If THIS fence retires, the basic blit path works and the
+        //    issue is either SET_TARGET-to-RT or full-screen size; if
+        //    not, something more fundamental is broken with blits.
         let frame = device.begin_frame();
-        // DIAGNOSTIC: skip the paint pipeline entirely. Only emit a
-        // SET_TARGET to RT[host_idx] + a single full-screen
-        // fill_rect. If THIS fence retires, our migration's RT path
-        // works and the hang is in the React paint blits. If it
-        // doesn't, the issue is in SET_TARGET to RT or full-screen
-        // fill_rect of a 1920×1080 area.
-        let frame = frame.set_target(&display_rts[host_idx])?;
         let frame = frame.fill_rect_unclipped(
-            Rect::new(0, 0, fb.width, fb.height),
+            Rect::new(50, 50, 100, 100),
             Rgba::new(0x40, 0x80, 0xFF, 0xFF), // sky blue, BGRA
             BlendMode::Opaque,
         )?;
-        let _ = (root, &text_styles, &text_cache, &images, &layouts); // unused under diagnostic
-        let _ = pendings; // ditto
+        let _ = (root, &text_styles, &text_cache, &images, &layouts);
+        let _ = pendings;
+        let _ = &display_rts;
         let frame = paint_canary(frame, &fb, frame_idx)?;
 
         let t7 = Instant::now();
