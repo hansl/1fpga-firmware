@@ -660,48 +660,35 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         let fence_start = Instant::now();
         fence_token.wait(timeout)?;
         let fence_dt = fence_start.elapsed();
-        // After blits retire, commit a single textured layer centred
-        // on screen. Letterbox bg is intentionally dropped here for
-        // bisecting the multi-layer wedge — outside the canvas the
-        // compositor falls through to "no layer covers this pixel"
-        // which renders as black, equivalent to a solid bg for the
-        // user.
-        device.set_layer(
-            0,
-            &protocol::LayerDescriptor::textured(
-                display_rts[host_idx].id,
-                canvas_x,
-                canvas_y,
-                canvas_w,
-                canvas_h,
-            ),
-        )?;
-        device.commit_layers();
-
-        // Wait one vsync before swapping host_idx so the RT we're
-        // about to paint into next is no longer the live scanout
-        // target. Without this, the next frame's paint races the
-        // compositor reading the just-swapped-out RT and we get
-        // visible flicker. Caps the wait so a dropped/slow vsync
-        // doesn't permanently stall the loop.
-        let vsync_before = device.vsync_count();
-        let vsync_start = Instant::now();
-        while device.vsync_count() == vsync_before {
-            if vsync_start.elapsed() > Duration::from_millis(50) {
-                tracing::warn!("vsync wait timed out after 50ms");
-                break;
-            }
-            std::thread::yield_now();
+        // DIAGNOSTIC: commit the textured layer ONCE (on the first
+        // painted frame), then never touch the layer table again.
+        // Continue painting into the same RT every frame. If THIS is
+        // stable visually, the flicker is from the per-frame ping-pong
+        // commit; if it still flickers, the compositor itself is
+        // unstable with our setup.
+        if frame_idx == 0 {
+            device.set_layer(
+                0,
+                &protocol::LayerDescriptor::textured(
+                    display_rts[host_idx].id,
+                    canvas_x,
+                    canvas_y,
+                    canvas_w,
+                    canvas_h,
+                ),
+            )?;
+            device.commit_layers();
         }
+        // Don't swap host_idx — keep painting into the same RT. The
+        // compositor is reading it while we write; tearing is
+        // expected but should be stable (no wholesale flicker).
         // Scanout latency is now sub-vsync (the compositor latches
         // on the next vsync edge), so we leave the scanout-timing
         // tally at zero rather than synthesising a value.
         let scanout_dt = Duration::ZERO;
 
         scene_hash_per_rt[host_idx] = Some(current_hash);
-        // Swap: the RT we just painted is what the compositor will
-        // display next; we paint into the other one next frame.
-        host_idx ^= 1;
+        // DIAGNOSTIC: do not swap host_idx (see one-RT note above).
         ui_state.with_tree_mut(|t| t.clear_dirty());
         fps_counter.record_frame();
 
