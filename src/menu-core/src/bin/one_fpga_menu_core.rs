@@ -1388,20 +1388,23 @@ fn layer_multitex_probe(base: u32) -> Result<(), DeviceError> {
 }
 
 /// Realistic menu over the layer protocol: solid background +
-/// translucent panel with title, item labels and a selection
-/// highlight all baked into the same panel texture.
+/// translucent panel with title, item labels and a baked-in
+/// selection highlight.
 ///
 /// Layer stack (slot 0 = back, native-1080p coords):
 ///   0  navy   1920×1080 solid background
-///   1  panel  PANEL_W×PANEL_H textured (rendered into via the FPGA
-///             blit engine: translucent body + title-bar overlay +
-///             translucent highlight rect under the selected row +
-///             per-glyph A8 atlas blits for the title and items)
+///   1  panel  PANEL_W×PANEL_H textured. Cycles through `items.len()`
+///             pre-rendered RTs, one per highlighted-item position.
 ///
-/// One textured layer per scanline → comfortably fits HBlank. On
-/// each tick the panel is re-rendered with a new selected_idx (a
-/// fill_rect for the highlight band and full re-blit of the
-/// glyphs); the layer table itself never changes.
+/// All blits happen up-front, before commit_layers turns on the
+/// compositor. From then on the tick handler does set_layer +
+/// commit_layers only — no ring activity at all. This works around
+/// a DDRAM bus arbitration race in menu_core.sv where the ring
+/// fetcher's outstanding reads can be cross-captured against
+/// layer_dma / texture_unit responses (shared DDRAM_DOUT_READY with
+/// priority-mux arbitration, no per-requester response tagging).
+/// Until the RBF is fixed, do not blit while the compositor is
+/// active.
 ///
 /// HBlank budget: a single 760-wide BGRA scanline burst is ~790
 /// `clk_video` cycles + filter wait + dispatcher overhead, well
@@ -1409,8 +1412,6 @@ fn layer_multitex_probe(base: u32) -> Result<(), DeviceError> {
 /// layer (highlight) pushes the total over 1800 and the dispatcher
 /// can't finish before active scanout, which produces a flickering
 /// black/bg picture — hence baking the highlight in instead.
-/// A full-width wallpaper layer hits the same wall harder (1920
-/// wide ≈ 1920 cycles alone).
 fn menu_text_demo(base: u32) -> Result<(), Box<dyn std::error::Error>> {
     let mut device = open_ready(base)?;
     let info = device.video_info();
@@ -1462,18 +1463,24 @@ fn menu_text_demo(base: u32) -> Result<(), Box<dyn std::error::Error>> {
         "About",
     ];
 
-    let panel = device.create_render_target(PANEL_W, PANEL_H)?;
+    // Pre-allocate one RT per selected_idx and pre-render all of them
+    // BEFORE commit_layers. Once the compositor is active, the DDRAM
+    // bus arbitration in menu_core.sv has a race: ring_fetcher's
+    // outstanding reads can be cross-captured against layer_dma /
+    // texture_unit responses (shared DDRAM_DOUT_READY with priority-mux
+    // arbitration, no per-requester response tagging). Result is
+    // garbage in the fetcher's decode and a BadOpcode halt. So all
+    // blits happen before the compositor turns on, and per-tick
+    // updates use set_layer alone (no ring activity).
+    let mut panels: Vec<menu_core_host::texture::TextureHandle> = Vec::with_capacity(items.len());
+    for _ in 0..items.len() {
+        panels.push(device.create_render_target(PANEL_W, PANEL_H)?);
+    }
     println!(
-        "Panel RT: {}×{}, tex_id={}, base={:#010X}",
-        PANEL_W, PANEL_H, panel.id, panel.phys_addr
+        "Panel RTs: {} × {}×{}, first tex_id={}, base={:#010X}",
+        panels.len(), PANEL_W, PANEL_H, panels[0].id, panels[0].phys_addr
     );
 
-    // Opaque colors. The "translucent" panel/title-bar appearance is
-    // recovered at compositor time via SrcAlpha on the panel layer
-    // (the alpha byte in each pixel still travels into DDR3). The
-    // highlight is precomputed as dark amber so we don't need a
-    // SrcAlpha fill_rect — the blit engine paths exercised here all
-    // use Opaque, which the test suite has already validated.
     let panel_bg = Rgba::new(0x0A, 0x10, 0x1A, 0xD0);
     let title_bar_bg = Rgba::new(0x06, 0x0A, 0x14, 0xE8);
     let highlight_color = Rgba::new(0x70, 0x5A, 0x30, 0xFF);
@@ -1481,10 +1488,10 @@ fn menu_text_demo(base: u32) -> Result<(), Box<dyn std::error::Error>> {
     let item_color = Rgba::new(0xF0, 0xF0, 0xF8, 0xFF);
     let title = "1FPGA Menu";
 
-    let render_panel = |dev: &mut Device, selected: usize| -> Result<(), DeviceError> {
-        let mut frame = dev
+    for (selected, panel) in panels.iter().enumerate() {
+        let mut frame = device
             .begin_frame()
-            .set_target(&panel)?
+            .set_target(panel)?
             .fill_rect_unclipped(Rect::new(0, 0, PANEL_W, PANEL_H), panel_bg, BlendMode::Opaque)?
             .fill_rect_unclipped(
                 Rect::new(0, 0, PANEL_W, TITLE_BAR_H),
@@ -1502,7 +1509,6 @@ fn menu_text_demo(base: u32) -> Result<(), Box<dyn std::error::Error>> {
                 BlendMode::Opaque,
             )?;
 
-        // Title centered in the title bar.
         let title_w = title_atlas.measure(title) as i32;
         let title_pen_x = ((PANEL_W as i32) - title_w) / 2;
         frame = draw_text(
@@ -1515,7 +1521,6 @@ fn menu_text_demo(base: u32) -> Result<(), Box<dyn std::error::Error>> {
             title_color,
         )?;
 
-        // Items.
         for (i, label) in items.iter().enumerate() {
             let y = (ITEMS_Y0 + (i as u16) * ITEM_H) as i32;
             frame = draw_text(
@@ -1533,21 +1538,26 @@ fn menu_text_demo(base: u32) -> Result<(), Box<dyn std::error::Error>> {
             .set_target_framebuffer()?
             .submit()?
             .wait(Duration::from_millis(2_000))?;
-        Ok(())
-    };
+    }
+    println!("Pre-rendered {} panel variants.", panels.len());
 
-    let mut selected: usize = 0;
-    render_panel(&mut device, selected)?;
-
-    // --- Layer table: just two layers, navy bg behind the panel. The
-    // highlight is baked into the panel itself.
+    // --- Now turn on the compositor. Two layers: navy bg + the panel
+    // for whichever item is currently selected. From here on, no ring
+    // activity at all — just set_layer + commit_layers.
     let panel_x = (1920_i32 - PANEL_W as i32) / 2;
     let panel_y = (1080_i32 - PANEL_H as i32) / 2;
     let bg_navy = 0xFF_05_10_28u32;
+    let mut selected: usize = 0;
     device.set_layer(0, &protocol::LayerDescriptor::solid(bg_navy, 0, 0, 1920, 1080))?;
     device.set_layer(
         1,
-        &protocol::LayerDescriptor::textured(panel.id, panel_x as i16, panel_y as i16, PANEL_W, PANEL_H),
+        &protocol::LayerDescriptor::textured(
+            panels[selected].id,
+            panel_x as i16,
+            panel_y as i16,
+            PANEL_W,
+            PANEL_H,
+        ),
     )?;
     device.commit_layers();
 
@@ -1568,7 +1578,17 @@ fn menu_text_demo(base: u32) -> Result<(), Box<dyn std::error::Error>> {
     while running.load(Ordering::SeqCst) && start.elapsed() < max_dur {
         if last_change.elapsed() >= Duration::from_secs(1) {
             selected = (selected + 1) % items.len();
-            render_panel(&mut device, selected)?;
+            device.set_layer(
+                1,
+                &protocol::LayerDescriptor::textured(
+                    panels[selected].id,
+                    panel_x as i16,
+                    panel_y as i16,
+                    PANEL_W,
+                    PANEL_H,
+                ),
+            )?;
+            device.commit_layers();
             last_change = Instant::now();
         }
         std::thread::sleep(Duration::from_millis(33));
