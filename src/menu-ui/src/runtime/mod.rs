@@ -622,22 +622,20 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         //    first (set_target/glyphs/restore inside the helper),
         //    then redirect to the active host RT and paint the tree.
         let frame = device.begin_frame();
-        let frame = crate::paint::render_pending_text(frame, &pendings, &fonts)?;
-        // render_pending_text leaves the target at the framebuffer;
-        // point it at our compositor RT for the main paint pass.
+        // DIAGNOSTIC: skip the paint pipeline entirely. Only emit a
+        // SET_TARGET to RT[host_idx] + a single full-screen
+        // fill_rect. If THIS fence retires, our migration's RT path
+        // works and the hang is in the React paint blits. If it
+        // doesn't, the issue is in SET_TARGET to RT or full-screen
+        // fill_rect of a 1920×1080 area.
         let frame = frame.set_target(&display_rts[host_idx])?;
-        let frame = ui_state.with_tree(|tree| {
-            crate::paint::paint(
-                tree,
-                root,
-                &fb,
-                &layouts,
-                &text_styles,
-                &text_cache,
-                &images,
-                frame,
-            )
-        })?;
+        let frame = frame.fill_rect_unclipped(
+            Rect::new(0, 0, fb.width, fb.height),
+            Rgba::new(0x40, 0x80, 0xFF, 0xFF), // sky blue, BGRA
+            BlendMode::Opaque,
+        )?;
+        let _ = (root, &text_styles, &text_cache, &images, &layouts); // unused under diagnostic
+        let _ = pendings; // ditto
         let frame = paint_canary(frame, &fb, frame_idx)?;
 
         let t7 = Instant::now();
