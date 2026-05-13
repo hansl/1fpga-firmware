@@ -102,6 +102,8 @@ build-menu-core-host mode="release-dev":
 
 # Deploy the host probe binary to the device
 deploy-menu-core-host mode="release-dev": (build-menu-core-host mode)
+    # Same FAT-doesn't-overwrite-running-exec gotcha as deploy-menu-ui.
+    -ssh root@{{mister_ip}} 'killall one_fpga_menu_core 2>/dev/null; killall MiSTer 2>/dev/null; true'
     scp target/armv7-unknown-linux-musleabihf/{{mode}}/one_fpga_menu_core root@{{mister_ip}}:/media/fat/one_fpga_menu_core
 
 # Cross-compile the menu-core demo binary (bouncing-rect animation)
@@ -113,6 +115,7 @@ build-menu-demo mode="release-dev":
 
 # Deploy the menu-core demo binary to the device
 deploy-menu-demo mode="release-dev": (build-menu-demo mode)
+    -ssh root@{{mister_ip}} 'killall menu_demo 2>/dev/null; killall MiSTer 2>/dev/null; true'
     scp target/armv7-unknown-linux-musleabihf/{{mode}}/menu_demo root@{{mister_ip}}:/media/fat/menu_demo
 
 # Run the menu-core demo on the device (animation loop; Ctrl+C to stop)
@@ -128,6 +131,11 @@ build-menu-ui mode="release-dev":
 
 # Deploy the menu-ui binary to the device
 deploy-menu-ui mode="release-dev": (build-menu-ui mode)
+    # /media/fat is FAT; you can't overwrite a running executable
+    # there. Kill any in-flight menu_ui first or scp fails with
+    # "dest open ... Failure". MiSTer too, in case something handed
+    # off to it.
+    -ssh root@{{mister_ip}} 'killall menu_ui 2>/dev/null; killall MiSTer 2>/dev/null; true'
     scp target/armv7-unknown-linux-musleabihf/{{mode}}/menu_ui root@{{mister_ip}}:/media/fat/menu_ui
 
 # Deploy the menu-ui JS bundle to the device (used with --bundle for dev iteration)
