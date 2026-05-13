@@ -142,6 +142,11 @@ deploy-menu-ui-bundle:
 deploy-menu-ui-test-png:
     scp docs/assets/osd/line_array.png root@{{mister_ip}}:/media/fat/menu_ui_test.png
 
+# Deploy a wallpaper PNG for menu-ui (the App's full-screen bg <img>).
+# Pass any 1920×1080 (or smaller, will be stretched) PNG file.
+deploy-menu-ui-bg path:
+    scp {{path}} root@{{mister_ip}}:/media/fat/menu_ui_bg.png
+
 # Run the menu-ui launcher on the device, loading the deployed JS bundle
 run-menu-ui:
     ssh -t root@{{mister_ip}} '/media/fat/menu_ui --bundle /media/fat/menu_ui_app.js'

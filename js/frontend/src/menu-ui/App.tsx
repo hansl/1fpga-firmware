@@ -24,6 +24,7 @@ const ITEMS: Item[] = [
 ];
 
 const root: CSSProperties = {
+  position: 'relative',
   display: 'flex',
   flexDirection: 'column',
   width: 1920,
@@ -33,6 +34,18 @@ const root: CSSProperties = {
   paddingTop: 80,
   paddingBottom: 80,
   backgroundColor: '#0a0a14',
+};
+
+// Full-screen wallpaper PNG. Placed as the first child of the root
+// with absolute positioning so it lives behind every other element
+// in DOM order. The fallback solid backgroundColor on the root shows
+// through if the file is missing.
+const bgStyle: CSSProperties = {
+  position: 'absolute',
+  top: 0,
+  left: 0,
+  width: 1920,
+  height: 1080,
 };
 
 const headerWrap: CSSProperties = {
@@ -169,6 +182,7 @@ export function App() {
 
   return (
     <div style={root}>
+      <img src="/media/fat/menu_ui_bg.png" style={bgStyle} />
       <div style={fpsStyle}>{`${fps.toFixed(1)} fps`}</div>
       <div style={headerWrap}>
         <div style={titleStyle}>menu-ui · N9 demo</div>
