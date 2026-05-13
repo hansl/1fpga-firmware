@@ -348,14 +348,12 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     // the one the compositor is currently displaying.
     let mut host_idx: usize = 0;
 
-    // Initial commit so HDMI shows a defined color. Bright magenta
-    // during diagnostic — easy to tell apart from "compositor isn't
-    // displaying anything = black" and "compositor showed our
-    // intended dark navy = also looks black".
+    // Initial commit so HDMI shows a defined color until the first
+    // React frame commits. Dark navy full-screen solid layer.
     device.set_layer(
         0,
         &protocol::LayerDescriptor::solid(
-            0xFF_FF_00_FF, // BGRA: B=FF G=00 R=FF A=FF = magenta
+            0xFF_10_10_18, // dark navy, BGRA
             0,
             0,
             fb.width,
@@ -363,7 +361,6 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         ),
     )?;
     device.commit_layers();
-    info!("initial commit: magenta solid full-screen layer");
 
     // 2. Load the JS bundle.
     let bundle: Vec<u8> = match cfg.bundle_override.as_ref() {
@@ -602,23 +599,18 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
 
         let t6 = Instant::now();
 
-        // DIAGNOSTIC: force-skip every iteration. Initial commit
-        // (dark navy solid) is what should be displayed. If the
-        // screen is steady navy with no flicker, the compositor and
-        // arbiter are clean and the flicker is paint-related. If
-        // navy flickers, the compositor's scanout is itself unstable.
+        // Skip submit when nothing has changed since the last
+        // paint. Per-RT scene-hash table — if the next RT to paint
+        // already has the current scene, the compositor is already
+        // showing the right pixels (from a previous commit) and we
+        // can sleep one vsync without touching the FPGA.
         let current_hash = ui_state.with_tree(|tree| {
             damage::scene_hash(tree, root, &layouts, &text_styles)
         });
-        let _ = current_hash;
-        let _ = scene_hash_per_rt;
-        fps_counter.record_frame();
-        std::thread::sleep(Duration::from_millis(16));
-        continue;
-        #[allow(unreachable_code)]
-        {
-            // — code below stays compiled but unreachable while the
-            //   diagnostic above is active.
+        if scene_hash_per_rt[host_idx] == Some(current_hash) {
+            fps_counter.record_frame();
+            std::thread::sleep(Duration::from_millis(16));
+            continue;
         }
 
         // 7. Begin frame. Render pending text into their atlas RTs
@@ -661,35 +653,54 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         let fence_start = Instant::now();
         fence_token.wait(timeout)?;
         let fence_dt = fence_start.elapsed();
-        // DIAGNOSTIC: commit the textured layer ONCE (on the first
-        // painted frame), then never touch the layer table again.
-        // Continue painting into the same RT every frame. If THIS is
-        // stable visually, the flicker is from the per-frame ping-pong
-        // commit; if it still flickers, the compositor itself is
-        // unstable with our setup.
-        if frame_idx == 0 {
-            device.set_layer(
+        // After blits retire, commit two layers:
+        //   slot 0 = full-screen solid bg (letterbox around canvas).
+        //   slot 1 = textured RT centred at (canvas_x, canvas_y),
+        //            canvas_w × canvas_h.
+        device.set_layer(
+            0,
+            &protocol::LayerDescriptor::solid(
+                0xFF_10_10_18, // dark navy BGRA
                 0,
-                &protocol::LayerDescriptor::textured(
-                    display_rts[host_idx].id,
-                    canvas_x,
-                    canvas_y,
-                    canvas_w,
-                    canvas_h,
-                ),
-            )?;
-            device.commit_layers();
+                0,
+                fb.width,
+                fb.height,
+            ),
+        )?;
+        device.set_layer(
+            1,
+            &protocol::LayerDescriptor::textured(
+                display_rts[host_idx].id,
+                canvas_x,
+                canvas_y,
+                canvas_w,
+                canvas_h,
+            ),
+        )?;
+        device.commit_layers();
+
+        // Wait one vsync before swapping host_idx so the RT we're
+        // about to paint into next is no longer the live scanout
+        // target. Without this, the next frame's paint races the
+        // compositor reading the just-swapped-out RT.
+        let vsync_before = device.vsync_count();
+        let vsync_start = Instant::now();
+        while device.vsync_count() == vsync_before {
+            if vsync_start.elapsed() > Duration::from_millis(50) {
+                tracing::warn!("vsync wait timed out after 50ms");
+                break;
+            }
+            std::thread::yield_now();
         }
-        // Don't swap host_idx — keep painting into the same RT. The
-        // compositor is reading it while we write; tearing is
-        // expected but should be stable (no wholesale flicker).
         // Scanout latency is now sub-vsync (the compositor latches
         // on the next vsync edge), so we leave the scanout-timing
         // tally at zero rather than synthesising a value.
         let scanout_dt = Duration::ZERO;
 
         scene_hash_per_rt[host_idx] = Some(current_hash);
-        // DIAGNOSTIC: do not swap host_idx (see one-RT note above).
+        // Swap: the RT we just painted is what the compositor will
+        // display next; we paint into the other one next frame.
+        host_idx ^= 1;
         ui_state.with_tree_mut(|t| t.clear_dirty());
         fps_counter.record_frame();
 
