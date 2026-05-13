@@ -15,7 +15,7 @@ use menu_core_host::device::{Device, DeviceConfig, FramebufferConfig};
 use menu_core_host::error::DeviceError;
 use menu_core_host::frame::Frame;
 use menu_core_host::mem;
-use menu_core_host::protocol::{BlendMode, Rect, Rgba};
+use menu_core_host::protocol::{self, BlendMode, Rect, Rgba};
 
 use crate::font::{FontError, FontRegistry};
 use crate::host::UiState;
@@ -329,6 +329,35 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         BUILD_ID, info.width, info.height
     );
 
+    // 1b. Allocate two screen-sized render targets for the compositor
+    //     ping-pong. Per frame the host paints into one while the
+    //     compositor scans out the other; commit_layers swaps which is
+    //     active. This replaces the legacy MISTER_FB scanout (which
+    //     menu-core's RBF gates off — FB_EN = 0) with the layer
+    //     pipeline that owns HDMI via VGA_* → ASCAL.
+    let rt_a = device.create_render_target(fb.width, fb.height)?;
+    let rt_b = device.create_render_target(fb.width, fb.height)?;
+    let display_rts: [menu_core_host::texture::TextureHandle; 2] = [rt_a, rt_b];
+    // `host_idx` = which RT the host paints into next; the other is
+    // the one the compositor is currently displaying.
+    let mut host_idx: usize = 0;
+
+    // Initial commit so HDMI shows a defined color rather than
+    // whatever the compositor sees with count = 0 (typically black,
+    // but it's nicer to be explicit). One solid layer covering the
+    // whole screen.
+    device.set_layer(
+        0,
+        &protocol::LayerDescriptor::solid(
+            0xFF_10_10_18, // dark navy, replaced as soon as the first frame commits
+            0,
+            0,
+            fb.width,
+            fb.height,
+        ),
+    )?;
+    device.commit_layers();
+
     // 2. Load the JS bundle.
     let bundle: Vec<u8> = match cfg.bundle_override.as_ref() {
         Some(p) => {
@@ -441,12 +470,14 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     // shape close enough for our use cases.
     let raf_epoch = std::time::Instant::now();
 
-    // Per-FB content hash. Tracks "what's currently painted on each
-    // of the three FB slots" as a single u64 hash of the scene.
+    // Per-RT content hash. Tracks "what's currently painted on each
+    // of the two compositor RTs" as a single u64 hash of the scene.
     // None = never painted (forces a full paint when first targeted).
-    // We pick the matching slot via the FPGA's render_idx, compute
-    // the current scene hash, and skip submit when they match.
-    let mut scene_hash_per_fb: [Option<u64>; 3] = [None, None, None];
+    // We pick the matching slot via `host_idx`, compute the current
+    // scene hash, and skip submit when it matches what's already
+    // there — the previous commit's layer descriptor still points at
+    // the right pixels.
+    let mut scene_hash_per_rt: [Option<u64>; 2] = [None, None];
     // Per-stage timing accumulators. Every TIMING_LOG_PERIOD frames
     // we log the average per-stage cost. Tells us where the frame
     // budget actually goes (so we can tell tick_jobs from layout
@@ -560,17 +591,16 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
 
         // 6. Skip submit when nothing has changed since the last
         //    paint. We diff a hash of the current scene against
-        //    what we last painted on EACH FB; if all three have
-        //    the current scene, the displayed pixels are already
-        //    correct and we can skip the whole paint+present
-        //    pipeline. fb_swapper holds the displayed buffer
-        //    steady when we don't issue a PRESENT.
-        let render_idx = (device.fb_state().render as usize).min(2);
+        //    what we last painted on each RT; if the next RT to
+        //    paint already has the current scene, the displayed
+        //    pixels are still valid (the previous commit's layer
+        //    descriptor still points at the right buffer) and we
+        //    can skip the whole paint pipeline.
         let current_hash = ui_state.with_tree(|tree| {
             damage::scene_hash(tree, root, &layouts, &text_styles)
         });
-        if scene_hash_per_fb[render_idx] == Some(current_hash) {
-            // This FB already has the desired content. Sleep ~one
+        if scene_hash_per_rt[host_idx] == Some(current_hash) {
+            // This RT already has the desired content. Sleep ~one
             // vsync to bound the loop and continue. Update fps
             // counter on the loop tick (not paint tick) so the
             // displayed value stays meaningful during idle periods.
@@ -579,11 +609,14 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
             continue;
         }
 
-        // 7. Begin frame: render pending text into their RTs first
-        //    (target = RT, glyphs, target = framebuffer), then paint
-        //    the normal tree using the cached RTs and images.
+        // 7. Begin frame. Render pending text into their atlas RTs
+        //    first (set_target/glyphs/restore inside the helper),
+        //    then redirect to the active host RT and paint the tree.
         let frame = device.begin_frame();
         let frame = crate::paint::render_pending_text(frame, &pendings, &fonts)?;
+        // render_pending_text leaves the target at the framebuffer;
+        // point it at our compositor RT for the main paint pass.
+        let frame = frame.set_target(&display_rts[host_idx])?;
         let frame = ui_state.with_tree(|tree| {
             crate::paint::paint(
                 tree,
@@ -600,10 +633,37 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
 
         let t7 = Instant::now();
 
-        let (_count, fence_dt, scanout_dt) =
-            frame.present()?.submit()?.wait_presented_timed(timeout)?;
+        // Submit blits and wait for the fence. No present() — we
+        // drive HDMI through commit_layers, not the framebuffer
+        // scanout path.
+        let fence_token = frame.submit()?;
+        let fence_start = Instant::now();
+        fence_token.wait(timeout)?;
+        let fence_dt = fence_start.elapsed();
+        // After blits retire, point the textured display layer at
+        // the freshly-painted RT and commit. The atomic
+        // LAYER_COMMIT register store is what makes the new buffer
+        // visible; the next vsync's layer_dma reads it.
+        device.set_layer(
+            0,
+            &protocol::LayerDescriptor::textured(
+                display_rts[host_idx].id,
+                0,
+                0,
+                fb.width,
+                fb.height,
+            ),
+        )?;
+        device.commit_layers();
+        // Scanout latency is now sub-vsync (the compositor latches
+        // on the next vsync edge), so we leave the scanout-timing
+        // tally at zero rather than synthesising a value.
+        let scanout_dt = Duration::ZERO;
 
-        scene_hash_per_fb[render_idx] = Some(current_hash);
+        scene_hash_per_rt[host_idx] = Some(current_hash);
+        // Swap: the RT we just painted is what the compositor will
+        // display next; we paint into the other one next frame.
+        host_idx ^= 1;
         ui_state.with_tree_mut(|t| t.clear_dirty());
         fps_counter.record_frame();
 
