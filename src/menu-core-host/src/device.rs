@@ -716,10 +716,22 @@ impl Device {
     }
 
     /// Read `FRAME_COUNT` directly. The framework increments this on
-    /// every successful display swap (PROTOCOL.md §3.2).
+    /// every successful display swap (PROTOCOL.md §3.2) — i.e. once
+    /// per `present` opcode. Stays at 0 in compositor-only workflows
+    /// that never issue a framebuffer present; use [`Self::vsync_count`]
+    /// for those.
     #[inline]
     pub fn frame_count(&self) -> u32 {
         self.regs.read32(registers::FRAME_COUNT)
+    }
+
+    /// Read `VSYNC_COUNT` directly. Increments unconditionally on every
+    /// vsync regardless of whether the host has issued a present. This
+    /// is the right counter to use for compositor scanout fps when the
+    /// framebuffer pipeline is bypassed (layer-driven output).
+    #[inline]
+    pub fn vsync_count(&self) -> u32 {
+        self.regs.read32(registers::VSYNC_COUNT)
     }
 
     /// Decoded snapshot of `FB_STATE`.

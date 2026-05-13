@@ -1576,7 +1576,10 @@ fn menu_text_demo(base: u32) -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
     let mut last_change = start;
     let mut last_fps_t = start;
-    let mut last_fps_frames = device.frame_count();
+    // VSYNC_COUNT, not FRAME_COUNT: the compositor's scanout pipeline
+    // bypasses the framebuffer-present path, so FRAME_COUNT stays at 0
+    // for layer-only workflows. VSYNC_COUNT ticks once per real vsync.
+    let mut last_fps_frames = device.vsync_count();
     let max_dur = Duration::from_secs(60);
     while running.load(Ordering::SeqCst) && start.elapsed() < max_dur {
         if last_change.elapsed() >= Duration::from_secs(1) {
@@ -1595,10 +1598,10 @@ fn menu_text_demo(base: u32) -> Result<(), Box<dyn std::error::Error>> {
             last_change = Instant::now();
 
             // Roll the FPS report into the per-item tick so the log
-            // doesn't drown the menu. frame_count is the compositor's
-            // vsync counter, so this is true scanout fps.
+            // doesn't drown the menu. vsync_count ticks once per real
+            // vsync, so this is true scanout fps.
             let now = Instant::now();
-            let frames_now = device.frame_count();
+            let frames_now = device.vsync_count();
             let elapsed = (now - last_fps_t).as_secs_f32();
             let frames = frames_now.wrapping_sub(last_fps_frames) as f32;
             let fps = frames / elapsed;
