@@ -636,14 +636,29 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
 
         let t7 = Instant::now();
 
-        // DIAGNOSTIC: skip the per-frame layer-table swap entirely.
-        // Just submit + fence wait. If THIS still times out we know
-        // the issue is in the blit path; if it stops timing out, the
-        // commit_layers / mirror_active_to_back race is the problem.
+        // DIAGNOSTIC: per-frame commit, but with a SOLID layer (not
+        // textured). If this hangs, the per-frame commit_layers
+        // itself is the problem (mirror race or LAYER_COMMIT
+        // register write side-effect). If it succeeds, the hang is
+        // specific to the textured layer / compositor's texture_unit
+        // reading our uninitialized RT.
         let fence_token = frame.submit()?;
         let fence_start = Instant::now();
         fence_token.wait(timeout)?;
         let fence_dt = fence_start.elapsed();
+        // Cycle through a few solid colors so we see whether commits
+        // are landing at all.
+        let color = match frame_idx % 4 {
+            0 => 0xFF_FF_00_FF, // magenta
+            1 => 0xFF_00_FF_FF, // cyan-ish (BGRA)
+            2 => 0xFF_FF_FF_00, // yellow (BGRA)
+            _ => 0xFF_80_80_FF, // pink
+        };
+        device.set_layer(
+            0,
+            &protocol::LayerDescriptor::solid(color, 0, 0, fb.width, fb.height),
+        )?;
+        device.commit_layers();
         // Scanout latency is now sub-vsync (the compositor latches
         // on the next vsync edge), so we leave the scanout-timing
         // tally at zero rather than synthesising a value.
