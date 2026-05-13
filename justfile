@@ -119,7 +119,7 @@ deploy-menu-demo mode="release-dev": (build-menu-demo mode)
     scp target/armv7-unknown-linux-musleabihf/{{mode}}/menu_demo root@{{mister_ip}}:/media/fat/menu_demo
 
 # Run the menu-core demo on the device (animation loop; Ctrl+C to stop)
-demo-menu-core:
+demo-menu-core: _kill-fpga-users
     ssh -t root@{{mister_ip}} '/media/fat/menu_demo'
 
 # Cross-compile the menu-ui launcher (React-on-Boa UI framework)
@@ -155,49 +155,55 @@ deploy-menu-ui-test-png:
 deploy-menu-ui-bg path:
     scp {{path}} root@{{mister_ip}}:/media/fat/menu_ui_bg.png
 
+# Kill anything that might be holding the FPGA registers (MiSTer
+# auto-starts after a reboot, the previous menu_ui run may still be
+# attached, etc.). Best-effort.
+_kill-fpga-users:
+    -ssh root@{{mister_ip}} 'killall MiSTer 2>/dev/null; killall menu_ui 2>/dev/null; killall one_fpga_menu_core 2>/dev/null; killall menu_demo 2>/dev/null; true'
+
 # Run the menu-ui launcher on the device, loading the deployed JS bundle
-run-menu-ui:
+run-menu-ui: _kill-fpga-users
     ssh -t root@{{mister_ip}} '/media/fat/menu_ui --bundle /media/fat/menu_ui_app.js'
 
 # Build everything menu-ui needs and deploy + run in one shot
 demo-menu-ui: deploy-menu-ui deploy-menu-ui-bundle run-menu-ui
 
 # Run the probe on the device (assumes the menu-core .rbf is loaded and the binary is deployed)
-probe-menu-core:
+probe-menu-core: _kill-fpga-users
     ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core probe'
 
 # Run the M2b ring round-trip test on the device
-ring-test-menu-core:
+ring-test-menu-core: _kill-fpga-users
     ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core ring-test'
 
 # Run the M2c1 FILL_RECT visual test on the device (look at HDMI)
-draw-test-menu-core:
+draw-test-menu-core: _kill-fpga-users
     ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core draw-test'
 
 # Run the M2c3.1 COPY_RECT visual test on the device (look at HDMI)
-texture-test-menu-core:
+texture-test-menu-core: _kill-fpga-users
     ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core texture-test'
 
 # Run the M2c3.2 A8 + tint visual test on the device (look at HDMI)
-a8-test-menu-core:
+a8-test-menu-core: _kill-fpga-users
     ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core a8-test'
 
 # Run the M2c3.3 SrcAlpha blend visual test on the device (look at HDMI)
-blend-test-menu-core:
+blend-test-menu-core: _kill-fpga-users
     ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core blend-test'
 
 # Run the TTF text-rendering visual test on the device (look at HDMI)
-text-test-menu-core:
+text-test-menu-core: _kill-fpga-users
     ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core text-test'
 
 # Run the TTF text animation perf test on the device (look at HDMI; reports FPS)
-text-anim-menu-core:
+text-anim-menu-core: _kill-fpga-users
     ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core text-anim'
 
 # Run the M2c2 SET_CLIP / CLEAR_CLIP visual test on the device (look at HDMI)
-clip-test-menu-core:
+clip-test-menu-core: _kill-fpga-users
     ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core clip-test'
 
 # Run the N4.5 SET_RENDER_TARGET visual test on the device (look at HDMI)
-rtt-test-menu-core:
+rtt-test-menu-core: _kill-fpga-users
     ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core rtt-test'
