@@ -182,7 +182,7 @@ export function App() {
 
   return (
     <div style={root}>
-      <img src="/media/fat/menu_ui_bg.png" style={bgStyle} />
+      {/* <img src="/media/fat/menu_ui_bg.png" style={bgStyle} /> */}
       <div style={fpsStyle}>{`${fps.toFixed(1)} fps`}</div>
       <div style={headerWrap}>
         <div style={titleStyle}>menu-ui · N9 demo</div>
