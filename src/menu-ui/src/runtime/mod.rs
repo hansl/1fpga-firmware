@@ -600,24 +600,23 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
 
         let t6 = Instant::now();
 
-        // 6. Skip submit when nothing has changed since the last
-        //    paint. We diff a hash of the current scene against
-        //    what we last painted on each RT; if the next RT to
-        //    paint already has the current scene, the displayed
-        //    pixels are still valid (the previous commit's layer
-        //    descriptor still points at the right buffer) and we
-        //    can skip the whole paint pipeline.
+        // DIAGNOSTIC: force-skip every iteration. Initial commit
+        // (dark navy solid) is what should be displayed. If the
+        // screen is steady navy with no flicker, the compositor and
+        // arbiter are clean and the flicker is paint-related. If
+        // navy flickers, the compositor's scanout is itself unstable.
         let current_hash = ui_state.with_tree(|tree| {
             damage::scene_hash(tree, root, &layouts, &text_styles)
         });
-        if scene_hash_per_rt[host_idx] == Some(current_hash) {
-            // This RT already has the desired content. Sleep ~one
-            // vsync to bound the loop and continue. Update fps
-            // counter on the loop tick (not paint tick) so the
-            // displayed value stays meaningful during idle periods.
-            fps_counter.record_frame();
-            std::thread::sleep(Duration::from_millis(16));
-            continue;
+        let _ = current_hash;
+        let _ = scene_hash_per_rt;
+        fps_counter.record_frame();
+        std::thread::sleep(Duration::from_millis(16));
+        continue;
+        #[allow(unreachable_code)]
+        {
+            // — code below stays compiled but unreachable while the
+            //   diagnostic above is active.
         }
 
         // 7. Begin frame. Render pending text into their atlas RTs
