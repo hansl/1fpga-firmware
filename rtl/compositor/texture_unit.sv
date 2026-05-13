@@ -45,10 +45,14 @@
 //============================================================================
 
 module texture_unit #(
-    // Hard cap on per-scanline pixel count. 512 pixels = 256 64-bit
-    // beats (BGRA), well under the 255 burstcnt limit AND the HBlank
-    // budget. For A8 it's 512 alphas = 64 single-beat reads.
-    parameter int MAX_TEX_WIDTH = 512
+    // Hard cap on per-scanline pixel count. 510 BGRA pixels = 255
+    // 64-bit beats, the largest value that fits in an 8-bit Avalon-MM
+    // burstcount field without aliasing to 0 (which the bus mux's
+    // outstanding-beats counter would account as 0 even though the
+    // controller delivers 256 beats, locking the pipe). For A8 it's
+    // 510 alphas = 64 single-beat reads (alphas are 1 byte each so
+    // the alignment doesn't bite there).
+    parameter int MAX_TEX_WIDTH = 510
 ) (
     input  logic        clk,
     input  logic        rst_n,
