@@ -82,33 +82,3 @@ pub fn volatile_copy_to_devmem(dst: *mut u8, src: &[u8]) {
     }
 }
 
-/// Volatile copy between two regions of the same `/dev/mem` mapping
-/// (or between two mappings — the function makes no assumptions).
-///
-/// Reads `len` bytes from `src` as volatile u32 words and writes them
-/// to `dst` as volatile u32 words. Used for in-DDR housekeeping like
-/// mirroring the active layer table into the back table.
-///
-/// # Safety
-///
-/// - `src` and `dst` must each be readable / writable for `len` bytes
-///   and originate from valid `/dev/mem` mmaps (or anything where
-///   volatile word-sized accesses are well-defined).
-/// - `src`, `dst`, and `len` must all be 4-byte aligned.
-/// - The regions may not overlap (callers are not expected to need
-///   this; assert in debug to catch misuse).
-#[inline]
-pub unsafe fn volatile_copy_within_devmem(src: *const u8, dst: *mut u8, len: usize) {
-    debug_assert_eq!(src.align_offset(4), 0, "src must be 4-byte aligned");
-    debug_assert_eq!(dst.align_offset(4), 0, "dst must be 4-byte aligned");
-    debug_assert_eq!(len % 4, 0, "len must be a multiple of 4");
-    let words = len / 4;
-    let src_w = src as *const u32;
-    let dst_w = dst as *mut u32;
-    for i in 0..words {
-        // SAFETY: caller guarantees the regions are valid for `len`
-        // bytes and aligned to 4 bytes.
-        let v = unsafe { core::ptr::read_volatile(src_w.add(i)) };
-        unsafe { core::ptr::write_volatile(dst_w.add(i), v) };
-    }
-}

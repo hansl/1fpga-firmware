@@ -1586,6 +1586,11 @@ fn menu_text_demo(base: u32) -> Result<(), Box<dyn std::error::Error>> {
     while running.load(Ordering::SeqCst) && start.elapsed() < max_dur {
         if last_change.elapsed() >= Duration::from_secs(1) {
             selected = (selected + 1) % items.len();
+            // commit_layers is immediate-mode: write every slot we
+            // want active each frame. Slot 0 (the navy bg) doesn't
+            // change but must be re-set so it's present in the back
+            // table after the swap.
+            device.set_layer(0, &protocol::LayerDescriptor::solid(bg_navy, 0, 0, 1920, 1080))?;
             device.set_layer(
                 1,
                 &protocol::LayerDescriptor::textured(
