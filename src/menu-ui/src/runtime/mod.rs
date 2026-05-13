@@ -661,6 +661,22 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
             ),
         )?;
         device.commit_layers();
+
+        // Wait one vsync before swapping host_idx so the RT we're
+        // about to paint into next is no longer the live scanout
+        // target. Without this, the next frame's paint races the
+        // compositor reading the just-swapped-out RT and we get
+        // visible flicker. Caps the wait so a dropped/slow vsync
+        // doesn't permanently stall the loop.
+        let vsync_before = device.vsync_count();
+        let vsync_start = Instant::now();
+        while device.vsync_count() == vsync_before {
+            if vsync_start.elapsed() > Duration::from_millis(50) {
+                tracing::warn!("vsync wait timed out after 50ms");
+                break;
+            }
+            std::thread::yield_now();
+        }
         // Scanout latency is now sub-vsync (the compositor latches
         // on the next vsync edge), so we leave the scanout-timing
         // tally at zero rather than synthesising a value.
