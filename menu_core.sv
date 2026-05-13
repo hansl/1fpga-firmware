@@ -579,7 +579,7 @@ ring_fetcher u_ring_fetcher (
     .ddram_rd_o         (fetch_rd),
     .ddram_busy_i       (DDRAM_BUSY),
     .ddram_dout_i       (DDRAM_DOUT),
-    .ddram_dout_valid_i (DDRAM_DOUT_READY)
+    .ddram_dout_valid_i (fetch_dout_valid)
 );
 
 // Address selection: scanout reads from FB[display_idx], blit writes to
@@ -668,7 +668,7 @@ blit_engine u_blit_engine (
     .ddram_rd_o         (blit_rd),
     .ddram_busy_i       (DDRAM_BUSY),
     .ddram_dout_i       (DDRAM_DOUT),
-    .ddram_dout_valid_i (DDRAM_DOUT_READY)
+    .ddram_dout_valid_i (blit_dout_valid)
 );
 
 ////////////////////////////////////////////////////////////////////////////
@@ -854,7 +854,7 @@ texture_unit u_texture_unit (
     .ddram_rd_o       (tex_unit_rd),
     .ddram_busy_i     (DDRAM_BUSY),
     .ddram_dout_i     (DDRAM_DOUT),
-    .ddram_dout_valid_i (DDRAM_DOUT_READY),
+    .ddram_dout_valid_i (tex_unit_dout_valid),
     .busy_o           (tex_unit_busy),
     .done_pulse_o     (tex_unit_done)
 );
@@ -883,41 +883,101 @@ layer_dma u_layer_dma (
     .ddram_rd_o         (layer_dma_rd),
     .ddram_busy_i       (DDRAM_BUSY),
     .ddram_dout_i       (DDRAM_DOUT),
-    .ddram_dout_valid_i (DDRAM_DOUT_READY),
+    .ddram_dout_valid_i (layer_dma_dout_valid),
     .busy_o             (layer_dma_busy),
     .done_pulse_o       (layer_dma_done),
     .descriptors_o      (layer_dma_descriptors)
 );
 
-// DDRAM_* mux. Priority: blit_engine > layer_dma > texture_unit >
-// ring_fetcher. blit_engine has hard real-time deadlines through the
-// fence pipeline; layer_dma fires once per frame in VBlank;
-// texture_unit fires once per scanline in HBlank. The fetcher is the
-// background polling master that owns the bus whenever nothing else
-// needs it. Reads return on a shared dout bus — each consumer only
-// samples valid pulses while it owns the bus, so cross-talk is not
-// possible.
-wire layer_dma_owns_bus = layer_dma_busy & ~blit_busy;
-wire tex_unit_owns_bus  = tex_unit_busy & ~blit_busy & ~layer_dma_busy;
+// DDRAM_* arbiter. Four masters share one read response bus
+// (DDRAM_DOUT/DDRAM_DOUT_READY) but the HPS-to-FPGA bridge does not tag
+// responses with the requester. The earlier "samples-only-while-owner"
+// scheme broke whenever ownership transferred while reads were still
+// draining — the new owner captured the previous owner's beats,
+// causing fetcher BadOpcode halts and compositor visual glitches
+// (blinking layers, 1-pixel vertical bars from misrouted texel beats).
+//
+// Fix: serialise. owner_q latches at the cycle a new read is accepted
+// while the response pipe is idle. outstanding_beats_q tracks
+// in-flight beats (incr on accept by burstcnt, decr on each
+// DDRAM_DOUT_READY). New owners can't be granted while beats are
+// draining for the previous owner. Per-consumer dout_valid is masked
+// by owner_q so cross-talk is impossible. Priority among waiting
+// requesters: blit > layer_dma > tex_unit > fetcher (unchanged).
+localparam logic [1:0] TAG_FETCH = 2'd0;
+localparam logic [1:0] TAG_BLIT  = 2'd1;
+localparam logic [1:0] TAG_LDMA  = 2'd2;
+localparam logic [1:0] TAG_TEX   = 2'd3;
 
-assign DDRAM_ADDR     = blit_busy          ? blit_addr
+logic [1:0]  owner_q;
+logic [15:0] outstanding_beats_q;
+wire         pipe_idle     = (outstanding_beats_q == 16'd0);
+wire         read_accepted = DDRAM_RD & ~DDRAM_BUSY;
+wire         beat_arrived  = DDRAM_DOUT_READY;
+
+logic [1:0] next_owner;
+always_comb begin
+    if (blit_busy)            next_owner = TAG_BLIT;
+    else if (layer_dma_busy)  next_owner = TAG_LDMA;
+    else if (tex_unit_busy)   next_owner = TAG_TEX;
+    else                      next_owner = TAG_FETCH;
+end
+
+// Grant the bus only when the pipe is idle (any requester wins) OR the
+// requester matches the current owner (drains its own burst). This is
+// what serialises across ownership transfers.
+wire owner_grant_ok = pipe_idle | (next_owner == owner_q);
+
+wire blit_owns_bus      = blit_busy      & owner_grant_ok;
+wire layer_dma_owns_bus = layer_dma_busy & ~blit_busy & owner_grant_ok;
+wire tex_unit_owns_bus  = tex_unit_busy  & ~blit_busy & ~layer_dma_busy & owner_grant_ok;
+wire fetch_owns_bus     = ~blit_busy & ~layer_dma_busy & ~tex_unit_busy & owner_grant_ok;
+
+always_ff @(posedge clk_sys or negedge fetcher_rst_n) begin
+    if (!fetcher_rst_n) begin
+        owner_q             <= TAG_FETCH;
+        outstanding_beats_q <= 16'd0;
+    end else begin
+        case ({read_accepted, beat_arrived})
+            2'b10:   outstanding_beats_q <= outstanding_beats_q + {8'd0, DDRAM_BURSTCNT};
+            2'b01:   outstanding_beats_q <= outstanding_beats_q - 16'd1;
+            2'b11:   outstanding_beats_q <= outstanding_beats_q + {8'd0, DDRAM_BURSTCNT} - 16'd1;
+            default: outstanding_beats_q <= outstanding_beats_q;
+        endcase
+        if (read_accepted & pipe_idle) owner_q <= next_owner;
+    end
+end
+
+// Per-consumer dout_valid: a beat is delivered only to the current
+// owner. All other consumers see a constant 0, so they cannot capture
+// foreign data even if their own FSMs happen to be in a wait state.
+wire fetch_dout_valid     = DDRAM_DOUT_READY & (owner_q == TAG_FETCH);
+wire blit_dout_valid      = DDRAM_DOUT_READY & (owner_q == TAG_BLIT);
+wire layer_dma_dout_valid = DDRAM_DOUT_READY & (owner_q == TAG_LDMA);
+wire tex_unit_dout_valid  = DDRAM_DOUT_READY & (owner_q == TAG_TEX);
+
+assign DDRAM_ADDR     = blit_owns_bus      ? blit_addr
                       : layer_dma_owns_bus ? layer_dma_addr
                       : tex_unit_owns_bus  ? tex_unit_addr
-                      : fetch_addr;
-assign DDRAM_BURSTCNT = blit_busy          ? blit_burstcnt
+                      : fetch_owns_bus     ? fetch_addr
+                      : 29'd0;
+assign DDRAM_BURSTCNT = blit_owns_bus      ? blit_burstcnt
                       : layer_dma_owns_bus ? layer_dma_burstcnt
                       : tex_unit_owns_bus  ? tex_unit_burstcnt
-                      : fetch_burstcnt;
-assign DDRAM_BE       = blit_busy          ? blit_be
+                      : fetch_owns_bus     ? fetch_burstcnt
+                      : 8'd0;
+assign DDRAM_BE       = blit_owns_bus      ? blit_be
                       : layer_dma_owns_bus ? layer_dma_be
                       : tex_unit_owns_bus  ? tex_unit_be
-                      : fetch_be;
-assign DDRAM_DIN      = blit_busy ? blit_din : 64'd0;
-assign DDRAM_RD       = blit_busy          ? blit_rd
+                      : fetch_owns_bus     ? fetch_be
+                      : 8'd0;
+assign DDRAM_DIN      = blit_owns_bus ? blit_din : 64'd0;
+assign DDRAM_RD       = blit_owns_bus      ? blit_rd
                       : layer_dma_owns_bus ? layer_dma_rd
                       : tex_unit_owns_bus  ? tex_unit_rd
-                      : fetch_rd;
-assign DDRAM_WE       = blit_busy ? blit_we : 1'b0;
+                      : fetch_owns_bus     ? fetch_rd
+                      : 1'b0;
+assign DDRAM_WE       = blit_owns_bus ? blit_we : 1'b0;
 
 // reg_ring_kick is currently advisory — the fetcher polls RING_TAIL
 // every cycle anyway. Wire-suppress to avoid unused warnings until
