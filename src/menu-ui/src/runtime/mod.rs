@@ -329,24 +329,29 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         BUILD_ID, info.width, info.height
     );
 
-    // 1b. Allocate two screen-sized render targets for the compositor
-    //     ping-pong. Per frame the host paints into one while the
-    //     compositor scans out the other; commit_layers swaps which is
-    //     active. This replaces the legacy MISTER_FB scanout (which
-    //     menu-core's RBF gates off — FB_EN = 0) with the layer
-    //     pipeline that owns HDMI via VGA_* → ASCAL.
-    let rt_a = device.create_render_target(fb.width, fb.height)?;
-    let rt_b = device.create_render_target(fb.width, fb.height)?;
+    // 1b. Allocate two render targets sized to the content canvas.
+    //     We render at canvas size rather than full screen because
+    //     1920-wide textured layers at 1080p60 exceed the per-scanline
+    //     fetch budget (~740 clk_sys cycles vs 960 beats needed),
+    //     producing visible flicker. 1280×720 (= 640 beats per row)
+    //     fits comfortably, leaving headroom for blit and layer_dma
+    //     contention. The compositor displays the canvas centred on
+    //     screen with a solid bg filling the surrounding letterbox.
+    let canvas_w: u16 = 1280;
+    let canvas_h: u16 = 720;
+    let canvas_x: i16 = ((fb.width as i32 - canvas_w as i32) / 2) as i16;
+    let canvas_y: i16 = ((fb.height as i32 - canvas_h as i32) / 2) as i16;
+    let rt_a = device.create_render_target(canvas_w, canvas_h)?;
+    let rt_b = device.create_render_target(canvas_w, canvas_h)?;
     let display_rts: [menu_core_host::texture::TextureHandle; 2] = [rt_a, rt_b];
     // `host_idx` = which RT the host paints into next; the other is
     // the one the compositor is currently displaying.
     let mut host_idx: usize = 0;
 
-    // Initial commit so HDMI shows a defined color rather than
-    // whatever the compositor sees with count = 0 (typically black,
-    // but it's nicer to be explicit). One solid layer covering the
-    // whole screen. Replaced by the textured RT layer as soon as
-    // the first React frame commits.
+    // Initial commit so HDMI shows a defined color. Two layers from
+    // here on out:
+    //   - slot 0: full-screen solid bg (letterbox).
+    //   - slot 1: textured RT centred at canvas_x/y, canvas_w×h.
     device.set_layer(
         0,
         &protocol::LayerDescriptor::solid(
@@ -581,12 +586,13 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
 
         // 5. Compute layout. Taffy's measure function consults the
         //    font atlas / image registry for text and img leaves.
+        //    Layout viewport = canvas size, not full screen.
         let layouts = ui_state.with_tree(|tree| {
             crate::layout::compute(
                 tree,
                 root,
-                fb.width as f32,
-                fb.height as f32,
+                canvas_w as f32,
+                canvas_h as f32,
                 &text_styles,
                 &fonts,
                 &images,
@@ -623,11 +629,20 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         // render_pending_text leaves the target at the framebuffer;
         // point it at our compositor RT for the main paint pass.
         let frame = frame.set_target(&display_rts[host_idx])?;
+        // Paint expects a FramebufferConfig for the dst surface
+        // geometry; we override width/height with canvas dimensions
+        // so the root bg fill_rect and dst clipping target the RT,
+        // not the full screen.
+        let canvas_fb = FramebufferConfig {
+            width: canvas_w,
+            height: canvas_h,
+            ..fb
+        };
         let frame = ui_state.with_tree(|tree| {
             crate::paint::paint(
                 tree,
                 root,
-                &fb,
+                &canvas_fb,
                 &layouts,
                 &text_styles,
                 &text_cache,
@@ -635,7 +650,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                 frame,
             )
         })?;
-        let frame = paint_canary(frame, &fb, frame_idx)?;
+        let frame = paint_canary(frame, &canvas_fb, frame_idx)?;
 
         let t7 = Instant::now();
 
@@ -646,18 +661,28 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         let fence_start = Instant::now();
         fence_token.wait(timeout)?;
         let fence_dt = fence_start.elapsed();
-        // After blits retire, point the textured display layer at
-        // the freshly-painted RT and commit. The atomic
-        // LAYER_COMMIT register store is what makes the new buffer
-        // visible; the next vsync's layer_dma reads it.
+        // After blits retire, commit two layers:
+        //   slot 0 = full-screen solid bg (letterbox around canvas).
+        //   slot 1 = textured RT centred at (canvas_x, canvas_y),
+        //            canvas_w × canvas_h.
         device.set_layer(
             0,
-            &protocol::LayerDescriptor::textured(
-                display_rts[host_idx].id,
+            &protocol::LayerDescriptor::solid(
+                0xFF_10_10_18, // dark navy BGRA
                 0,
                 0,
                 fb.width,
                 fb.height,
+            ),
+        )?;
+        device.set_layer(
+            1,
+            &protocol::LayerDescriptor::textured(
+                display_rts[host_idx].id,
+                canvas_x,
+                canvas_y,
+                canvas_w,
+                canvas_h,
             ),
         )?;
         device.commit_layers();

@@ -23,29 +23,33 @@ const ITEMS: Item[] = [
   { name: 'Atari', accent: '#d09040' },
 ];
 
+// Menu-ui currently renders into a 1280×720 canvas RT centred on
+// screen with a dark-navy letterbox around it. The Rust runtime
+// caps the textured layer here to keep the per-scanline fetch inside
+// the HBlank budget; once we widen that (RBF work) the canvas can
+// grow to full screen.
 const root: CSSProperties = {
   position: 'relative',
   display: 'flex',
   flexDirection: 'column',
-  width: 1920,
-  height: 1080,
+  width: 1280,
+  height: 720,
   justifyContent: 'space-between',
   alignItems: 'center',
-  paddingTop: 80,
-  paddingBottom: 80,
+  paddingTop: 60,
+  paddingBottom: 60,
   backgroundColor: '#0a0a14',
 };
 
-// Full-screen wallpaper PNG. Placed as the first child of the root
-// with absolute positioning so it lives behind every other element
-// in DOM order. The fallback solid backgroundColor on the root shows
-// through if the file is missing.
+// Canvas-sized wallpaper PNG. Absolute-positioned so it sits behind
+// every other root child in DOM order. The fallback solid
+// backgroundColor on the root shows through if the file is missing.
 const bgStyle: CSSProperties = {
   position: 'absolute',
   top: 0,
   left: 0,
-  width: 1920,
-  height: 1080,
+  width: 1280,
+  height: 720,
 };
 
 const headerWrap: CSSProperties = {
