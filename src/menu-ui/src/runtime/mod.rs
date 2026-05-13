@@ -345,14 +345,12 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     // Initial commit so HDMI shows a defined color rather than
     // whatever the compositor sees with count = 0 (typically black,
     // but it's nicer to be explicit). One solid layer covering the
-    // whole screen. Bright magenta during bring-up — easy to tell
-    // at a glance "did the initial commit reach HDMI?". When the
-    // first React frame commits, this gets replaced by the textured
-    // RT layer.
+    // whole screen. Replaced by the textured RT layer as soon as
+    // the first React frame commits.
     device.set_layer(
         0,
         &protocol::LayerDescriptor::solid(
-            0xFF_FF_00_FF, // BGRA: B=FF, G=00, R=FF, A=FF — magenta
+            0xFF_10_10_18, // dark navy, BGRA
             0,
             0,
             fb.width,
@@ -360,7 +358,6 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         ),
     )?;
     device.commit_layers();
-    info!("initial commit: magenta full-screen solid layer");
 
     // 2. Load the JS bundle.
     let bundle: Vec<u8> = match cfg.bundle_override.as_ref() {
@@ -618,49 +615,41 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
             continue;
         }
 
-        // 7. DIAGNOSTIC: skip SET_TARGET, paint into the framebuffer
-        //    default. Only emit a SMALL fill_rect (100×100) + canary.
-        //    If THIS fence retires, the basic blit path works and the
-        //    issue is either SET_TARGET-to-RT or full-screen size; if
-        //    not, something more fundamental is broken with blits.
+        // 7. Begin frame. Render pending text into their atlas RTs
+        //    first (set_target/glyphs/restore inside the helper),
+        //    then redirect to the active host RT and paint the tree.
         let frame = device.begin_frame();
-        let frame = frame.fill_rect_unclipped(
-            Rect::new(50, 50, 100, 100),
-            Rgba::new(0x40, 0x80, 0xFF, 0xFF), // sky blue, BGRA
-            BlendMode::Opaque,
-        )?;
-        let _ = (root, &text_styles, &text_cache, &images, &layouts);
-        let _ = pendings;
-        let _ = &display_rts;
+        let frame = crate::paint::render_pending_text(frame, &pendings, &fonts)?;
+        // render_pending_text leaves the target at the framebuffer;
+        // point it at our compositor RT for the main paint pass.
+        let frame = frame.set_target(&display_rts[host_idx])?;
+        let frame = ui_state.with_tree(|tree| {
+            crate::paint::paint(
+                tree,
+                root,
+                &fb,
+                &layouts,
+                &text_styles,
+                &text_cache,
+                &images,
+                frame,
+            )
+        })?;
         let frame = paint_canary(frame, &fb, frame_idx)?;
 
         let t7 = Instant::now();
 
-        // DIAGNOSTIC: commit a TEXTURED layer per-frame again (this
-        // is the failing case), but on fence timeout dump STATUS,
-        // RING_HEAD, RING_TAIL, FENCE_VALUE so we can see where the
-        // fetcher got stuck.
+        // Submit blits and wait for the fence. No present() — we
+        // drive HDMI through commit_layers, not the framebuffer
+        // scanout path.
         let fence_token = frame.submit()?;
-        let fence_value = fence_token.fence_value();
         let fence_start = Instant::now();
-        let wait_result = fence_token.wait(timeout);
+        fence_token.wait(timeout)?;
         let fence_dt = fence_start.elapsed();
-        if let Err(e) = wait_result {
-            let regs = device.register_block();
-            let status = regs.read32(menu_core_host::protocol::registers::STATUS);
-            let ring_head = regs.read32(menu_core_host::protocol::registers::RING_HEAD);
-            let ring_tail = regs.read32(menu_core_host::protocol::registers::RING_TAIL);
-            let fence_val = regs.read32(menu_core_host::protocol::registers::FENCE_VALUE);
-            let error_info = regs.read32(menu_core_host::protocol::registers::ERROR_INFO);
-            let vsync = regs.read32(menu_core_host::protocol::registers::VSYNC_COUNT);
-            error!(
-                "fence hang: expected fence={fence_value:#010X}, got={fence_val:#010X}; \
-                 STATUS={status:#010X} ERROR_INFO={error_info:#010X} \
-                 RING_HEAD={ring_head:#010X} RING_TAIL={ring_tail:#010X} \
-                 VSYNC_COUNT={vsync}; frame_idx={frame_idx}"
-            );
-            return Err(e.into());
-        }
+        // After blits retire, point the textured display layer at
+        // the freshly-painted RT and commit. The atomic
+        // LAYER_COMMIT register store is what makes the new buffer
+        // visible; the next vsync's layer_dma reads it.
         device.set_layer(
             0,
             &protocol::LayerDescriptor::textured(
