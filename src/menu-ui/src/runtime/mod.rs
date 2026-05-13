@@ -348,10 +348,9 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     // the one the compositor is currently displaying.
     let mut host_idx: usize = 0;
 
-    // Initial commit so HDMI shows a defined color. Two layers from
-    // here on out:
-    //   - slot 0: full-screen solid bg (letterbox).
-    //   - slot 1: textured RT centred at canvas_x/y, canvas_w×h.
+    // Initial commit so HDMI shows a defined color. Single solid
+    // layer covering full screen — replaced by the textured canvas
+    // layer once the first frame's paint completes.
     device.set_layer(
         0,
         &protocol::LayerDescriptor::solid(
@@ -661,22 +660,14 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         let fence_start = Instant::now();
         fence_token.wait(timeout)?;
         let fence_dt = fence_start.elapsed();
-        // After blits retire, commit two layers:
-        //   slot 0 = full-screen solid bg (letterbox around canvas).
-        //   slot 1 = textured RT centred at (canvas_x, canvas_y),
-        //            canvas_w × canvas_h.
+        // After blits retire, commit a single textured layer centred
+        // on screen. Letterbox bg is intentionally dropped here for
+        // bisecting the multi-layer wedge — outside the canvas the
+        // compositor falls through to "no layer covers this pixel"
+        // which renders as black, equivalent to a solid bg for the
+        // user.
         device.set_layer(
             0,
-            &protocol::LayerDescriptor::solid(
-                0xFF_10_10_18, // dark navy BGRA
-                0,
-                0,
-                fb.width,
-                fb.height,
-            ),
-        )?;
-        device.set_layer(
-            1,
             &protocol::LayerDescriptor::textured(
                 display_rts[host_idx].id,
                 canvas_x,
