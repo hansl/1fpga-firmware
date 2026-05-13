@@ -1578,6 +1578,11 @@ fn menu_text_demo(base: u32) -> Result<(), Box<dyn std::error::Error>> {
     while running.load(Ordering::SeqCst) && start.elapsed() < max_dur {
         if last_change.elapsed() >= Duration::from_secs(1) {
             selected = (selected + 1) % items.len();
+            // Write BOTH slots every iteration. The layer table is
+            // double-buffered, so writing slot 0 only at startup leaves
+            // the second buffer's slot 0 stale — commits then alternate
+            // between "navy bg present" and "navy bg missing" frames.
+            device.set_layer(0, &protocol::LayerDescriptor::solid(bg_navy, 0, 0, 1920, 1080))?;
             device.set_layer(
                 1,
                 &protocol::LayerDescriptor::textured(
