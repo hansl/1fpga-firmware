@@ -636,27 +636,40 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
 
         let t7 = Instant::now();
 
-        // DIAGNOSTIC: per-frame commit, but with a SOLID layer (not
-        // textured). If this hangs, the per-frame commit_layers
-        // itself is the problem (mirror race or LAYER_COMMIT
-        // register write side-effect). If it succeeds, the hang is
-        // specific to the textured layer / compositor's texture_unit
-        // reading our uninitialized RT.
+        // DIAGNOSTIC: commit a TEXTURED layer per-frame again (this
+        // is the failing case), but on fence timeout dump STATUS,
+        // RING_HEAD, RING_TAIL, FENCE_VALUE so we can see where the
+        // fetcher got stuck.
         let fence_token = frame.submit()?;
+        let fence_value = fence_token.fence_value();
         let fence_start = Instant::now();
-        fence_token.wait(timeout)?;
+        let wait_result = fence_token.wait(timeout);
         let fence_dt = fence_start.elapsed();
-        // Cycle through a few solid colors so we see whether commits
-        // are landing at all.
-        let color = match frame_idx % 4 {
-            0 => 0xFF_FF_00_FF, // magenta
-            1 => 0xFF_00_FF_FF, // cyan-ish (BGRA)
-            2 => 0xFF_FF_FF_00, // yellow (BGRA)
-            _ => 0xFF_80_80_FF, // pink
-        };
+        if let Err(e) = wait_result {
+            let regs = device.register_block();
+            let status = regs.read32(menu_core_host::protocol::registers::STATUS);
+            let ring_head = regs.read32(menu_core_host::protocol::registers::RING_HEAD);
+            let ring_tail = regs.read32(menu_core_host::protocol::registers::RING_TAIL);
+            let fence_val = regs.read32(menu_core_host::protocol::registers::FENCE_VALUE);
+            let error_info = regs.read32(menu_core_host::protocol::registers::ERROR_INFO);
+            let vsync = regs.read32(menu_core_host::protocol::registers::VSYNC_COUNT);
+            error!(
+                "fence hang: expected fence={fence_value:#010X}, got={fence_val:#010X}; \
+                 STATUS={status:#010X} ERROR_INFO={error_info:#010X} \
+                 RING_HEAD={ring_head:#010X} RING_TAIL={ring_tail:#010X} \
+                 VSYNC_COUNT={vsync}; frame_idx={frame_idx}"
+            );
+            return Err(e.into());
+        }
         device.set_layer(
             0,
-            &protocol::LayerDescriptor::solid(color, 0, 0, fb.width, fb.height),
+            &protocol::LayerDescriptor::textured(
+                display_rts[host_idx].id,
+                0,
+                0,
+                fb.width,
+                fb.height,
+            ),
         )?;
         device.commit_layers();
         // Scanout latency is now sub-vsync (the compositor latches
