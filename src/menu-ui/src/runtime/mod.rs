@@ -437,7 +437,12 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
             .map_err(|e| RuntimeError::Io(std::io::Error::other(e.to_string())))?;
     }
 
-    let timeout = Duration::from_millis(500);
+    // First-frame timeout. A cold paint at 1080p with a full-screen
+    // image copy + text atlas blits is ~25 MB of bus transfers, which
+    // is faster than this in practice but the post-migration arbiter
+    // has noticeably more serialisation overhead and we'd rather log
+    // an honest timing than spuriously time out.
+    let timeout = Duration::from_millis(5_000);
     let mut frame_idx: u32 = 0;
     let mut fonts = FontRegistry::new();
     let mut text_cache = TextCache::new();
