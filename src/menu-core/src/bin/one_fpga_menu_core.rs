@@ -1575,6 +1575,8 @@ fn menu_text_demo(base: u32) -> Result<(), Box<dyn std::error::Error>> {
 
     let start = Instant::now();
     let mut last_change = start;
+    let mut last_fps_t = start;
+    let mut last_fps_frames = device.frame_count();
     let max_dur = Duration::from_secs(60);
     while running.load(Ordering::SeqCst) && start.elapsed() < max_dur {
         if last_change.elapsed() >= Duration::from_secs(1) {
@@ -1591,6 +1593,18 @@ fn menu_text_demo(base: u32) -> Result<(), Box<dyn std::error::Error>> {
             )?;
             device.commit_layers();
             last_change = Instant::now();
+
+            // Roll the FPS report into the per-item tick so the log
+            // doesn't drown the menu. frame_count is the compositor's
+            // vsync counter, so this is true scanout fps.
+            let now = Instant::now();
+            let frames_now = device.frame_count();
+            let elapsed = (now - last_fps_t).as_secs_f32();
+            let frames = frames_now.wrapping_sub(last_fps_frames) as f32;
+            let fps = frames / elapsed;
+            println!("item {selected}: {fps:5.1} fps ({frames:.0} frames / {elapsed:.3}s)");
+            last_fps_t = now;
+            last_fps_frames = frames_now;
         }
         std::thread::sleep(Duration::from_millis(33));
     }
