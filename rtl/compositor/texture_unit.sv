@@ -45,14 +45,19 @@
 //============================================================================
 
 module texture_unit #(
-    // Hard cap on per-scanline pixel count. 510 BGRA pixels = 255
-    // 64-bit beats, the largest value that fits in an 8-bit Avalon-MM
-    // burstcount field without aliasing to 0 (which the bus mux's
-    // outstanding-beats counter would account as 0 even though the
-    // controller delivers 256 beats, locking the pipe). For A8 it's
-    // 510 alphas = 64 single-beat reads (alphas are 1 byte each so
-    // the alignment doesn't bite there).
-    parameter int MAX_TEX_WIDTH = 510
+    // Hard cap on per-scanline pixel count. BGRA needs ceil(dst_w/2)
+    // 64-bit beats; rows wider than 510 pixels (>255 beats) overflow
+    // the 8-bit Avalon-MM burstcount, so the BGRA path splits a row
+    // into multiple ≤255-beat bursts when needed. The real upper
+    // bound is then the HBlank fetch budget shared across all
+    // textured layers on the scanline: at 1080p the compositor has
+    // ~700 clk_sys cycles total per scanline, so MAX_TEX_WIDTH = 1280
+    // (= 640 beats) leaves headroom for a single full-width textured
+    // layer plus state-machine overhead. Multi-textured-layer
+    // scenarios at this width may exceed the budget and produce
+    // truncated rows on real hardware; the caller is responsible for
+    // staying within the practical total.
+    parameter int MAX_TEX_WIDTH = 1280
 ) (
     input  logic        clk,
     input  logic        rst_n,
@@ -123,8 +128,10 @@ module texture_unit #(
     logic [7:0]   format_latched;        // 0 = BGRA8888, 1 = A8
     logic [1:0]   desc_beat_q;
     logic [255:0] desc_beats_q;
-    logic [7:0]   row_beats_total;       // BGRA path
-    logic [7:0]   row_beats_recv;        // BGRA path
+    logic [11:0]  row_beats_total;       // BGRA path — full row beats
+    logic [11:0]  row_beats_recv;        // BGRA path — beats received so far
+    logic [7:0]   burst_size_q;          // BGRA path — beats in current burst
+    logic [7:0]   burst_recv_q;          // BGRA path — beats received this burst
     logic [9:0]   line_buf_wr_q;
     logic [31:0]  row_phys_addr;
     // A8 path
@@ -143,11 +150,21 @@ module texture_unit #(
     wire [31:0] desc_pitch     = desc_beats_q[63:32];
     wire [7:0]  desc_format    = desc_beats_q[103:96];
 
-    // BGRA: 2 pixels per beat → ceil(dst_w/2) beats.
-    wire [11:0] dst_w_sat   = (dst_w_i > MAX_TEX_WIDTH[11:0])
-                                ? MAX_TEX_WIDTH[11:0] : dst_w_i;
-    wire [11:0] dst_w_even  = dst_w_sat[0] ? (dst_w_sat + 12'd1) : dst_w_sat;
-    wire [7:0]  beats_needed = dst_w_even[8:1]; // dst_w_even / 2
+    // BGRA: 2 pixels per beat → ceil(dst_w/2) beats. row_beats_total
+    // is 12-bit so a 1280-pixel row (= 640 beats) fits without
+    // truncation; bursts are split below into ≤255-beat chunks at
+    // issue time.
+    wire [11:0] dst_w_sat    = (dst_w_i > MAX_TEX_WIDTH[11:0])
+                                 ? MAX_TEX_WIDTH[11:0] : dst_w_i;
+    wire [11:0] dst_w_even   = dst_w_sat[0] ? (dst_w_sat + 12'd1) : dst_w_sat;
+    wire [11:0] beats_needed = {1'b0, dst_w_even[11:1]}; // dst_w_even / 2
+
+    // Next-burst size: cap at 255 (max Avalon-MM 8-bit burstcount that
+    // does not alias to 0). Computed combinationally from the current
+    // remaining-beats count.
+    wire [11:0] row_beats_remaining = row_beats_total - row_beats_recv;
+    wire [7:0]  next_burst_size =
+        (row_beats_remaining > 12'd255) ? 8'd255 : row_beats_remaining[7:0];
 
     // Expand one alpha byte into a 32-bit BGRA pixel using
     // `tint_latched` as the RGB. The alpha replaces the tint's own A
@@ -180,8 +197,10 @@ module texture_unit #(
             format_latched   <= 8'd0;
             desc_beat_q      <= 2'd0;
             desc_beats_q     <= 256'd0;
-            row_beats_total  <= 8'd0;
-            row_beats_recv   <= 8'd0;
+            row_beats_total  <= 12'd0;
+            row_beats_recv   <= 12'd0;
+            burst_size_q     <= 8'd0;
+            burst_recv_q     <= 8'd0;
             line_buf_wr_q    <= 10'd0;
             row_phys_addr    <= 32'd0;
             a8_beat_q        <= 64'd0;
@@ -253,16 +272,24 @@ module texture_unit #(
                         row_phys_addr  <= desc_data_addr
                                         + ({16'd0, ty_latched} * desc_pitch)
                                         + ({14'd0, src_x_latched, 2'd0});
-                        row_beats_recv <= 8'd0;
+                        row_beats_recv <= 12'd0;
                         state_q        <= S_ROW_REQ;
                     end
                 end
 
                 // === BGRA path ============================================
+                // Splits wide rows into multiple ≤255-beat bursts. Each
+                // iteration: S_ROW_REQ issues `next_burst_size` beats at
+                // the running `row_phys_addr`; S_ROW_BEATS counts beats
+                // for this burst, accumulates into the row total, and
+                // either advances `row_phys_addr` for the next burst or
+                // finishes when all beats for the row are in.
                 S_ROW_REQ: begin
                     if (~ddram_busy_i && ~rd_q) begin
                         ddram_addr_o     <= row_phys_addr[31:3];
-                        ddram_burstcnt_o <= row_beats_total;
+                        ddram_burstcnt_o <= next_burst_size;
+                        burst_size_q     <= next_burst_size;
+                        burst_recv_q     <= 8'd0;
                         rd_q             <= 1'b1;
                         state_q          <= S_ROW_BEATS;
                     end
@@ -274,9 +301,20 @@ module texture_unit #(
                         line_buf_data_o <= ddram_dout_i;
                         line_buf_we_o   <= 1'b1;
                         line_buf_wr_q   <= line_buf_wr_q + 10'd1;
-                        row_beats_recv  <= row_beats_recv + 8'd1;
-                        if (row_beats_recv + 8'd1 == row_beats_total) begin
-                            state_q <= S_DONE;
+                        row_beats_recv  <= row_beats_recv + 12'd1;
+                        burst_recv_q    <= burst_recv_q + 8'd1;
+                        if (burst_recv_q + 8'd1 == burst_size_q) begin
+                            // Burst done. Either the whole row is in
+                            // (final burst always sized exactly to the
+                            // remaining beats), or advance row_phys_addr
+                            // by burst_size*8 bytes and issue the next.
+                            if (row_beats_recv + 12'd1 == row_beats_total) begin
+                                state_q <= S_DONE;
+                            end else begin
+                                row_phys_addr <= row_phys_addr
+                                               + {21'd0, burst_size_q, 3'd0};
+                                state_q       <= S_ROW_REQ;
+                            end
                         end
                     end
                 end
