@@ -1468,9 +1468,15 @@ fn menu_text_demo(base: u32) -> Result<(), Box<dyn std::error::Error>> {
         PANEL_W, PANEL_H, panel.id, panel.phys_addr
     );
 
+    // Opaque colors. The "translucent" panel/title-bar appearance is
+    // recovered at compositor time via SrcAlpha on the panel layer
+    // (the alpha byte in each pixel still travels into DDR3). The
+    // highlight is precomputed as dark amber so we don't need a
+    // SrcAlpha fill_rect — the blit engine paths exercised here all
+    // use Opaque, which the test suite has already validated.
     let panel_bg = Rgba::new(0x0A, 0x10, 0x1A, 0xD0);
     let title_bar_bg = Rgba::new(0x06, 0x0A, 0x14, 0xE8);
-    let highlight_color = Rgba::new(0xFF, 0xC8, 0x60, 0xA0);
+    let highlight_color = Rgba::new(0x70, 0x5A, 0x30, 0xFF);
     let title_color = Rgba::new(0xFF, 0xC8, 0x60, 0xFF);
     let item_color = Rgba::new(0xF0, 0xF0, 0xF8, 0xFF);
     let title = "1FPGA Menu";
@@ -1493,7 +1499,7 @@ fn menu_text_demo(base: u32) -> Result<(), Box<dyn std::error::Error>> {
                     ITEM_H - 4,
                 ),
                 highlight_color,
-                BlendMode::SrcAlpha,
+                BlendMode::Opaque,
             )?;
 
         // Title centered in the title bar.
