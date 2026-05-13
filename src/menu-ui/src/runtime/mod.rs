@@ -345,11 +345,14 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     // Initial commit so HDMI shows a defined color rather than
     // whatever the compositor sees with count = 0 (typically black,
     // but it's nicer to be explicit). One solid layer covering the
-    // whole screen.
+    // whole screen. Bright magenta during bring-up — easy to tell
+    // at a glance "did the initial commit reach HDMI?". When the
+    // first React frame commits, this gets replaced by the textured
+    // RT layer.
     device.set_layer(
         0,
         &protocol::LayerDescriptor::solid(
-            0xFF_10_10_18, // dark navy, replaced as soon as the first frame commits
+            0xFF_FF_00_FF, // BGRA: B=FF, G=00, R=FF, A=FF — magenta
             0,
             0,
             fb.width,
@@ -357,6 +360,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         ),
     )?;
     device.commit_layers();
+    info!("initial commit: magenta full-screen solid layer");
 
     // 2. Load the JS bundle.
     let bundle: Vec<u8> = match cfg.bundle_override.as_ref() {
