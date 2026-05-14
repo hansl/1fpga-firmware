@@ -677,10 +677,15 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
             );
             return Err(e.into());
         }
-        // After blits retire, commit two layers:
-        //   slot 0 = full-screen solid bg (letterbox around canvas).
-        //   slot 1 = textured RT centred at (canvas_x, canvas_y),
-        //            canvas_w × canvas_h.
+        // DIAGNOSTIC: commit ONLY the solid bg layer. No textured
+        // layer 1. If the screen is then stable (dark navy steady,
+        // no flicker, even after the host is killed), the flicker is
+        // *specifically* triggered by having a textured layer
+        // active in layer_cache — tex_unit's per-scanline firing
+        // racing layer_dma or corrupting the cache. If it STILL
+        // flickers with just a solid bg, the bug is in layer_dma or
+        // compositor independent of tex_unit.
+        let _ = (display_rts, host_idx, canvas_x, canvas_y, canvas_w, canvas_h);
         device.set_layer(
             0,
             &protocol::LayerDescriptor::solid(
@@ -689,16 +694,6 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                 0,
                 fb.width,
                 fb.height,
-            ),
-        )?;
-        device.set_layer(
-            1,
-            &protocol::LayerDescriptor::textured(
-                display_rts[host_idx].id,
-                canvas_x,
-                canvas_y,
-                canvas_w,
-                canvas_h,
             ),
         )?;
         device.commit_layers();
