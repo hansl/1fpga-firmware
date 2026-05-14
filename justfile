@@ -122,6 +122,7 @@ demo-menu-core: _kill-fpga-users
 # Cross-compile the menu-ui launcher (React-on-Boa UI framework)
 build-menu-ui mode="release-dev":
     docker run --rm -t \
+        -e RUSTUP_AUTO_INSTALL=0 \
         -v "{{justfile_directory()}}":/home/rust/src \
         messense/rust-musl-cross:armv7-musleabihf \
         cargo build --target armv7-unknown-linux-musleabihf --bin menu_ui --profile {{mode}} --no-default-features --features=platform_de10
