@@ -677,18 +677,29 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
             );
             return Err(e.into());
         }
-        // DIAGNOSTIC: commit ONLY the solid bg layer, in bright
-        // magenta so we can distinguish "stable solid layer" from
-        // "layer_dma corrupted the descriptor to flags=0 (black)".
+        // DIAGNOSTIC: commit TWO solid layers (count=2 but both
+        // solid, no textured). If stable, bug is specifically the
+        // textured layer / tex_unit. If it flickers, count=2
+        // layer_dma is itself unreliable.
         let _ = (display_rts, host_idx, canvas_x, canvas_y, canvas_w, canvas_h);
         device.set_layer(
             0,
             &protocol::LayerDescriptor::solid(
-                0xFF_FF_00_FF, // BGRA: B=FF G=00 R=FF — magenta
+                0xFF_FF_00_FF, // magenta full screen
                 0,
                 0,
                 fb.width,
                 fb.height,
+            ),
+        )?;
+        device.set_layer(
+            1,
+            &protocol::LayerDescriptor::solid(
+                0xFF_00_FF_00, // BGRA: B=00 G=FF R=00 — green, centred inset
+                480,
+                270,
+                960,
+                540,
             ),
         )?;
         device.commit_layers();
