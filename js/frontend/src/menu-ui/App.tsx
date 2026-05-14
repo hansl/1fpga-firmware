@@ -1,6 +1,5 @@
-import { memo, useCallback, useEffect, useState } from 'react';
+import { memo, useCallback, useState } from 'react';
 import type { CSSProperties } from 'react';
-import * as gui from '1fpga:gui';
 
 import { useIntent } from './hooks';
 
@@ -146,12 +145,14 @@ export function App() {
   // -1 = nothing flashing. Set to focused index on confirm,
   // back to -1 after one paint via setTimeout(0).
   const [flashIdx, setFlashIdx] = useState(-1);
-  const [fps, setFps] = useState(0);
-
-  useEffect(() => {
-    const id = setInterval(() => setFps(gui.fps()), 250);
-    return () => clearInterval(id);
-  }, []);
+  // fps display intentionally disabled. The setInterval(250ms) that
+  // used to update it was triggering per-frame repaints, and host
+  // blit contention with the compositor's per-scanline tex_unit
+  // reads produces column flicker on the textured layer. Without
+  // the periodic state change, the React tree is stable, scene_hash
+  // matches each loop iteration, and the runtime skips paint
+  // entirely → no blit → no contention. Re-enable once the RTL
+  // contention bug is fixed.
 
   useIntent(
     'navigate_left',
@@ -188,7 +189,6 @@ export function App() {
   return (
     <div style={root}>
       <img src="/media/fat/menu_ui_bg.png" style={bgStyle} />
-      <div style={fpsStyle}>{`${fps.toFixed(1)} fps`}</div>
       <div style={headerWrap}>
         <div style={titleStyle}>menu-ui · N9 demo</div>
         <div style={subtitleStyle}>core picker</div>

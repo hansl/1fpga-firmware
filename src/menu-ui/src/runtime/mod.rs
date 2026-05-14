@@ -677,19 +677,13 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
             );
             return Err(e.into());
         }
-        // DIAGNOSTIC: solid bg + a TINY 64×64 textured layer. tex_unit
-        // fetch per scanline is only 32 beats (vs 512 for 1024-wide),
-        // and only 64 scanlines per frame need a fetch (vs 720).
-        // ~2k beats/frame total instead of ~370k.
-        //   - Stable here → bug is bandwidth/timing: large tex_unit
-        //     work per frame contends with something.
-        //   - Still flickers → bug is the *presence* of any textured
-        //     layer at all, regardless of size.
-        let _ = (canvas_x, canvas_y, canvas_w, canvas_h);
+        // After blits retire, commit two layers:
+        //   slot 0 = full-screen solid bg (letterbox around canvas).
+        //   slot 1 = textured RT centred at (canvas_x, canvas_y).
         device.set_layer(
             0,
             &protocol::LayerDescriptor::solid(
-                0xFF_FF_00_FF, // magenta full screen
+                0xFF_10_10_18, // dark navy BGRA
                 0,
                 0,
                 fb.width,
@@ -700,10 +694,10 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
             1,
             &protocol::LayerDescriptor::textured(
                 display_rts[host_idx].id,
-                960 - 32, // centred
-                540 - 32,
-                64,
-                64,
+                canvas_x,
+                canvas_y,
+                canvas_w,
+                canvas_h,
             ),
         )?;
         device.commit_layers();
