@@ -264,6 +264,7 @@ fn dump_tree(tree: &Tree, id: NodeId, depth: usize) {
 
 mod boa;
 pub mod damage;
+pub mod dump;
 pub mod fps;
 pub mod raf;
 pub mod warmup;
@@ -690,6 +691,48 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     }
 
     info!("menu-ui: stopping engine");
+
+    // Diagnostic: snapshot staging RT + each FB to /tmp/menu-ui-*.png
+    // before stopping. Lets us see whether the host actually wrote
+    // identical bytes to all three FBs (and whether staging matches
+    // what HDMI displayed) without trusting fb_swapper or scanout to
+    // do the right thing.
+    {
+        let out_dir = std::path::Path::new("/tmp");
+        dump::try_dump(
+            "staging_rt",
+            staging_rt.phys_addr,
+            fb.width,
+            fb.height,
+            (fb.width as u32) * 4,
+            &out_dir.join("menu-ui-staging.png"),
+        );
+        dump::try_dump(
+            "fb0",
+            fb.fb0_phys,
+            fb.width,
+            fb.height,
+            fb.stride,
+            &out_dir.join("menu-ui-fb0.png"),
+        );
+        dump::try_dump(
+            "fb1",
+            fb.fb1_phys,
+            fb.width,
+            fb.height,
+            fb.stride,
+            &out_dir.join("menu-ui-fb1.png"),
+        );
+        dump::try_dump(
+            "fb2",
+            fb.fb2_phys,
+            fb.width,
+            fb.height,
+            fb.stride,
+            &out_dir.join("menu-ui-fb2.png"),
+        );
+    }
+
     device.stop()?;
     Ok(())
 }
