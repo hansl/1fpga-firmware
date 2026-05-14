@@ -677,11 +677,15 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
             );
             return Err(e.into());
         }
-        // DIAGNOSTIC: commit TWO solid layers (count=2 but both
-        // solid, no textured). If stable, bug is specifically the
-        // textured layer / tex_unit. If it flickers, count=2
-        // layer_dma is itself unreliable.
-        let _ = (display_rts, host_idx, canvas_x, canvas_y, canvas_w, canvas_h);
+        // DIAGNOSTIC: solid bg + a TINY 64×64 textured layer. tex_unit
+        // fetch per scanline is only 32 beats (vs 512 for 1024-wide),
+        // and only 64 scanlines per frame need a fetch (vs 720).
+        // ~2k beats/frame total instead of ~370k.
+        //   - Stable here → bug is bandwidth/timing: large tex_unit
+        //     work per frame contends with something.
+        //   - Still flickers → bug is the *presence* of any textured
+        //     layer at all, regardless of size.
+        let _ = (canvas_x, canvas_y, canvas_w, canvas_h);
         device.set_layer(
             0,
             &protocol::LayerDescriptor::solid(
@@ -694,12 +698,12 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         )?;
         device.set_layer(
             1,
-            &protocol::LayerDescriptor::solid(
-                0xFF_00_FF_00, // BGRA: B=00 G=FF R=00 — green, centred inset
-                480,
-                270,
-                960,
-                540,
+            &protocol::LayerDescriptor::textured(
+                display_rts[host_idx].id,
+                960 - 32, // centred
+                540 - 32,
+                64,
+                64,
             ),
         )?;
         device.commit_layers();
