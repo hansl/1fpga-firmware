@@ -998,23 +998,24 @@ wire _unused_layer = &{1'b0, layer_dma_done, tex_unit_done, 1'b0};
 ////////////////////////////////////////////////////////////////////////////
 
 `ifdef MISTER_FB
-// Compositor scanout drives HDMI via VGA_* → ASCAL; MISTER_FB stays idle.
-// Sentinel zero values keep the framework from latching stale FB
-// geometry.
+// MISTER_FB scanout active: the framework reads BGRA8888 pixels from
+// DDR3 at FB_BASE and drives them out via ASCAL → HDMI. The host
+// writes pixels into FB0/FB1/FB2 (one of three) and bumps the
+// display index via PRESENT; `scanout_fb_base` picks whichever slot
+// the fb_swapper says is currently the display.
 //
-// FB_FORCE_BLANK MUST be 0 even though MISTER_FB is unused. In
-// sys_top.v the signal ANDs into the HDMI shadowmask (`dis_output`,
-// line 1134/1155): `dis <= fb_force_blank & ~LFB_EN; .din(dis_output
-// ? 24'd0 : hdmi_data)`. With LFB_EN low (Linux fb not in use) and
-// FB_FORCE_BLANK=1, the framework masks every HDMI pixel to zero —
-// even when our compositor is driving VGA_* correctly through ASCAL.
-// 0 lets ASCAL's pixels reach the HDMI transmitter.
-assign FB_EN          = 1'b0;
-assign FB_FORMAT      = 5'b00000;
-assign FB_WIDTH       = 12'd0;
-assign FB_HEIGHT      = 12'd0;
-assign FB_BASE        = 32'd0;
-assign FB_STRIDE      = 14'd0;
+// FB_FORMAT = 5'b10110 = BGR, 32bpp (matches our BGRA8888 buffers).
+// Values cribbed from the pre-compositor menu_core.sv at 1118af0.
+//
+// The compositor still drives VGA_* but the framework's
+// LFB_EN-priority logic makes MISTER_FB win at the HDMI mux when
+// FB_EN=1, so VGA_* output is harmless overhead.
+assign FB_EN          = 1'b1;
+assign FB_FORMAT      = 5'b10110;
+assign FB_WIDTH       = reg_fb_width;
+assign FB_HEIGHT      = reg_fb_height;
+assign FB_BASE        = scanout_fb_base;
+assign FB_STRIDE      = reg_fb_stride;
 assign FB_FORCE_BLANK = 1'b0;
 `endif
 
