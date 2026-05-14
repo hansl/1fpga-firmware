@@ -998,18 +998,23 @@ module blit_engine (
                 end
 
                 S_DONE: begin
-                    done_o <= 1'b1;
-                    // Drop any leftover prefetch state — the next blit
-                    // could have a completely different (src, tint,
-                    // format) so the buffered pixels and alpha summary
-                    // are no longer valid. The address-match check in
-                    // S_NEXT_PIXEL would already catch this, but
-                    // clearing keeps the bus quiescent if a stray beat
-                    // were still in flight.
-                    prefetch_active_q   <= 1'b0;
-                    prefetch_ready_q    <= 1'b0;
-                    prefetch_beat_idx_q <= 4'd0;
-                    state               <= S_IDLE;
+                    // Stall here until any in-flight prefetch beats
+                    // have arrived and been captured. The capture
+                    // block (above this case) clears prefetch_active_q
+                    // after the 8th beat. If we declared done while
+                    // beats were still en route, the framework would
+                    // continue delivering them — and S_WAIT_SRC_BURST
+                    // of the *next* blit would mistakenly capture
+                    // those leftover prefetch beats into its src_buf,
+                    // producing horizontal slits of foreign pixels in
+                    // the next blit's first row(s). Address-match in
+                    // S_NEXT_PIXEL only protects intra-blit reuse;
+                    // cross-blit stragglers were unguarded.
+                    if (~prefetch_active_q) begin
+                        done_o              <= 1'b1;
+                        prefetch_ready_q    <= 1'b0;
+                        state               <= S_IDLE;
+                    end
                 end
             endcase
         end
