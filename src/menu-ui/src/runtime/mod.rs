@@ -677,19 +677,14 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
             );
             return Err(e.into());
         }
-        // DIAGNOSTIC: commit ONLY the solid bg layer. No textured
-        // layer 1. If the screen is then stable (dark navy steady,
-        // no flicker, even after the host is killed), the flicker is
-        // *specifically* triggered by having a textured layer
-        // active in layer_cache — tex_unit's per-scanline firing
-        // racing layer_dma or corrupting the cache. If it STILL
-        // flickers with just a solid bg, the bug is in layer_dma or
-        // compositor independent of tex_unit.
+        // DIAGNOSTIC: commit ONLY the solid bg layer, in bright
+        // magenta so we can distinguish "stable solid layer" from
+        // "layer_dma corrupted the descriptor to flags=0 (black)".
         let _ = (display_rts, host_idx, canvas_x, canvas_y, canvas_w, canvas_h);
         device.set_layer(
             0,
             &protocol::LayerDescriptor::solid(
-                0xFF_10_10_18, // dark navy BGRA
+                0xFF_FF_00_FF, // BGRA: B=FF G=00 R=FF — magenta
                 0,
                 0,
                 fb.width,
