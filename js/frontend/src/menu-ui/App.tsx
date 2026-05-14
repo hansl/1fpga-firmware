@@ -1,6 +1,5 @@
-import { memo, useCallback, useEffect, useState } from 'react';
+import { memo, useCallback, useState } from 'react';
 import type { CSSProperties } from 'react';
-import * as gui from '1fpga:gui';
 
 import { useIntent } from './hooks';
 
@@ -128,12 +127,11 @@ export function App() {
   // -1 = nothing flashing. Set to focused index on confirm,
   // back to -1 after one paint via setTimeout(0).
   const [flashIdx, setFlashIdx] = useState(-1);
-  const [fps, setFps] = useState(0);
-
-  useEffect(() => {
-    const id = setInterval(() => setFps(gui.fps()), 250);
-    return () => clearInterval(id);
-  }, []);
+  // FPS counter temporarily disabled to isolate static-content text
+  // artifacts: if the artifacts disappear with a frozen string, the
+  // bug is in staging-RT re-paints; if they persist, the bug is in
+  // the first rasterization of each text RT.
+  const fps = 0;
 
   useIntent(
     'navigate_left',
