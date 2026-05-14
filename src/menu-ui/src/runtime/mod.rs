@@ -339,8 +339,14 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     //     controller jitter then causes per-frame variation that
     //     reads as flicker. 1024 (= 512 beats, ~645 cycles total)
     //     fits with margin and is stable.
-    let canvas_w: u16 = 1024;
-    let canvas_h: u16 = 720;
+    // Shrunk to 768×576 to test if it falls below the bug #1
+    // threshold (a size-dependent per-scanline tex_unit instability
+    // that produces flicker even with no host activity). The
+    // menu-text-demo earlier in development used 760-wide textured
+    // panels with rock-stable display, so 768 should be safely
+    // under whatever the threshold is.
+    let canvas_w: u16 = 768;
+    let canvas_h: u16 = 576;
     let canvas_x: i16 = ((fb.width as i32 - canvas_w as i32) / 2) as i16;
     let canvas_y: i16 = ((fb.height as i32 - canvas_h as i32) / 2) as i16;
     let rt_a = device.create_render_target(canvas_w, canvas_h)?;

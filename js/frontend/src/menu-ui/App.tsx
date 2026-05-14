@@ -22,22 +22,23 @@ const ITEMS: Item[] = [
   { name: 'Atari', accent: '#d09040' },
 ];
 
-// Menu-ui currently renders into a 1024×720 canvas RT centred on
-// screen with a dark-navy letterbox around it. The Rust runtime
-// caps the textured layer here to keep the per-scanline fetch inside
-// the compositor's per-scanline budget (~740 clk_sys cycles at
-// 1080p60); once we widen that (multi-line-buffer prefetch in
-// tex_unit, RBF work) the canvas can grow to full screen.
+// Menu-ui renders into a 768×576 canvas RT centred on screen with a
+// dark-navy letterbox around it. Sized this way to stay below the
+// compositor's "large textured layer flickers even when host is
+// idle" threshold (bug #1 from the late-night debugging session;
+// 1024×720 triggers it, 64×64 doesn't, menu-text-demo's 760×620
+// was stable). Until the underlying RTL contention bug is fixed,
+// the menu lives inside this letterboxed canvas.
 const root: CSSProperties = {
   position: 'relative',
   display: 'flex',
   flexDirection: 'column',
-  width: 1024,
-  height: 720,
+  width: 768,
+  height: 576,
   justifyContent: 'space-between',
   alignItems: 'center',
-  paddingTop: 60,
-  paddingBottom: 60,
+  paddingTop: 48,
+  paddingBottom: 48,
   backgroundColor: '#0a0a14',
 };
 
@@ -48,8 +49,8 @@ const bgStyle: CSSProperties = {
   position: 'absolute',
   top: 0,
   left: 0,
-  width: 1024,
-  height: 720,
+  width: 768,
+  height: 576,
 };
 
 const headerWrap: CSSProperties = {
@@ -79,11 +80,11 @@ const listStyle: CSSProperties = {
 const cardBase: CSSProperties = {
   display: 'flex',
   flexDirection: 'column',
-  width: 170,
-  height: 240,
+  width: 130,
+  height: 190,
   alignItems: 'center',
   justifyContent: 'flex-end',
-  paddingBottom: 24,
+  paddingBottom: 20,
 };
 
 const cardLabelStyle: CSSProperties = {
