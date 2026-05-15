@@ -125,19 +125,9 @@ module ring_fetcher (
         S_WAIT_DESC,
         S_BLIT_DISPATCH,
         S_BLIT_WAIT,
-        S_WRITE_DRAIN,
         S_RETIRE,
         S_HALT
     } state_e;
-
-    // Cycles to wait after blit_done_i before retiring, to give the
-    // DDR3 controller time to commit posted writes from the just-
-    // finished COPY_RECT / FILL_RECT before a following PRESENT
-    // triggers an FB swap. Avalon-MM write completion isn't visible
-    // to us, so we burn a fixed budget large enough to cover the
-    // controller's write queue draining even under heavy ASCAL read
-    // contention. 128 cycles ≈ 2.5 µs at 50 MHz, negligible per frame.
-    localparam int unsigned WRITE_DRAIN_CYCLES = 128;
 
     state_e      state;
     logic [31:0] head_q;
@@ -165,10 +155,6 @@ module ring_fetcher (
     logic [31:0] target_pitch_q;
     logic [15:0] target_width_q;
     logic [15:0] target_height_q;
-
-    // Down-counter used by S_WRITE_DRAIN. Loaded with
-    // WRITE_DRAIN_CYCLES-1 on entry; counts to zero before retiring.
-    logic [7:0]  drain_q;
 
     wire [31:0] head_mask = ring_size_i - 32'd1;
 
@@ -265,7 +251,6 @@ module ring_fetcher (
             ddram_burstcnt_o <= 8'd0;
             ddram_be_o       <= 8'd0;
             ddram_rd_o       <= 1'b0;
-            drain_q          <= 8'd0;
         end else begin
             if (~ddram_busy_i) ddram_rd_o <= 1'b0;
 
@@ -408,22 +393,7 @@ module ring_fetcher (
 
                 S_BLIT_DISPATCH: state <= S_BLIT_WAIT;
 
-                S_BLIT_WAIT: if (blit_done_i) begin
-                    // blit_engine asserts done when its last write
-                    // was accepted by the Avalon-MM slave, not when
-                    // the DDR3 controller has committed it. Burn a
-                    // few cycles so any in-flight posted writes from
-                    // this COPY_RECT / FILL_RECT drain before the
-                    // next opcode (potentially PRESENT) retires and
-                    // triggers an FB swap.
-                    drain_q <= 8'(WRITE_DRAIN_CYCLES - 1);
-                    state   <= S_WRITE_DRAIN;
-                end
-
-                S_WRITE_DRAIN: begin
-                    if (drain_q == 8'd0) state <= S_RETIRE;
-                    else                 drain_q <= drain_q - 8'd1;
-                end
+                S_BLIT_WAIT: if (blit_done_i) state <= S_RETIRE;
 
                 S_RETIRE: begin
                     unique case (pending_opcode)

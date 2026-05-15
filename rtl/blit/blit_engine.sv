@@ -1012,18 +1012,15 @@ module blit_engine (
                 end
 
                 S_DONE: begin
-                    // Stall here until any in-flight prefetch beats
-                    // have arrived and been captured. The capture
-                    // block (above this case) clears prefetch_active_q
-                    // after the 8th beat. If we declared done while
-                    // beats were still en route, the framework would
-                    // continue delivering them — and S_WAIT_SRC_BURST
-                    // of the *next* blit would mistakenly capture
-                    // those leftover prefetch beats into its src_buf,
-                    // producing horizontal slits of foreign pixels in
-                    // the next blit's first row(s). Address-match in
-                    // S_NEXT_PIXEL only protects intra-blit reuse;
-                    // cross-blit stragglers were unguarded.
+                    // Stall until any in-flight prefetch beats arrive
+                    // and the capture block (above) clears
+                    // prefetch_active_q. Pairs with the
+                    // ~prefetch_active_q gate on the S_WAIT_* states:
+                    // if we cleared prefetch_active_q manually here
+                    // while beats were still en route, the gate
+                    // would let the next blit's wait state capture
+                    // them as if they were its own — exactly the
+                    // misrouting the gate exists to prevent.
                     if (~prefetch_active_q) begin
                         done_o              <= 1'b1;
                         prefetch_ready_q    <= 1'b0;
