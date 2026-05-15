@@ -736,7 +736,7 @@ module blit_engine (
                     state <= S_WAIT_SRC;
                 end
 
-                S_WAIT_SRC: if (ddram_dout_valid_i) begin
+                S_WAIT_SRC: if (ddram_dout_valid_i & ~prefetch_active_q) begin
                     automatic logic [31:0] src_word;
                     automatic logic [7:0]  sampled_alpha;
                     automatic logic [31:0] computed_src;
@@ -792,7 +792,7 @@ module blit_engine (
                     state <= S_WAIT_DST;
                 end
 
-                S_WAIT_DST: if (ddram_dout_valid_i) begin
+                S_WAIT_DST: if (ddram_dout_valid_i & ~prefetch_active_q) begin
                     // Capture only — let the blend math run in the
                     // next cycle so the combinational path doesn't
                     // exceed the clock period.
@@ -833,7 +833,18 @@ module blit_engine (
                     state <= S_WAIT_SRC_BURST;
                 end
 
-                S_WAIT_SRC_BURST: if (ddram_dout_valid_i) begin
+                // Beats arriving while prefetch_active_q is high are
+                // for the in-flight prefetch (concurrent capture block
+                // routes them into prefetch_buf). They are NOT for
+                // this wait-state's request, so we must not capture
+                // them here — otherwise src_buf is filled with
+                // prefetch data, copy_beat_idx_q over-advances, the
+                // state thinks the burst is done after 8 "beats" that
+                // were actually all prefetch, and the real read's
+                // beats arrive into a later wait-state's buffer.
+                // Result: horizontal slits of foreign pixels in the
+                // current row, visible in menu-ui's text rasters.
+                S_WAIT_SRC_BURST: if (ddram_dout_valid_i & ~prefetch_active_q) begin
                     // Each beat is a 64-bit word holding two RGBA pixels
                     // (low 32 = lower-x pixel, high 32 = upper-x). Apply
                     // tint per-pixel as we capture, and accumulate alpha
@@ -911,7 +922,10 @@ module blit_engine (
                     state <= S_WAIT_DST_BURST;
                 end
 
-                S_WAIT_DST_BURST: if (ddram_dout_valid_i) begin
+                // Same prefetch-race guard as S_WAIT_SRC_BURST: don't
+                // capture into dst_buf while prefetch beats are still
+                // in flight on the response bus.
+                S_WAIT_DST_BURST: if (ddram_dout_valid_i & ~prefetch_active_q) begin
                     automatic logic [4:0] pix_lo_idx;
                     automatic logic [4:0] pix_hi_idx;
                     automatic logic       is_last_beat;
