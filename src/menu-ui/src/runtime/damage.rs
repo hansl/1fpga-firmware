@@ -83,6 +83,30 @@ impl PaintedScene {
     pub fn empty() -> Self {
         Self::default()
     }
+
+    /// Same hash that [`scene_hash`] returns, derived from this
+    /// snapshot's items. Lets the runtime skip the second tree walk
+    /// when it already has the scene built (the hash check is the
+    /// fast path — the snapshot itself drives damage diffs).
+    pub fn hash(&self) -> u64 {
+        let mut h = DefaultHasher::new();
+        for item in &self.items {
+            item.node_id.0.hash(&mut h);
+            item.bbox.hash(&mut h);
+            item.content_hash.hash(&mut h);
+        }
+        h.finish()
+    }
+}
+
+/// Pixel area summed across `rects` (no overlap dedup — overlapping
+/// damage rects double-count, which is the conservative direction
+/// for the "should we fall back to full paint?" decision).
+pub fn total_area(rects: &[PixelRect]) -> u64 {
+    rects
+        .iter()
+        .map(|r| (r.w as u64) * (r.h as u64))
+        .sum()
 }
 
 /// One-shot hash of everything that determines whether the framebuffer

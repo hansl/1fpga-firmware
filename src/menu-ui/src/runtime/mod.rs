@@ -456,18 +456,26 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     // shape close enough for our use cases.
     let raf_epoch = std::time::Instant::now();
 
-    // Per-FB content hash. Tracks "what's currently painted on each
-    // of the three FB slots" as a single u64 hash of the scene. None
-    // = never painted (forces a copy from staging when first
-    // targeted). We pick the slot via the FPGA's render_idx, compute
-    // the current scene hash, and skip submit when they match.
+    // Per-FB content hash (fast skip check).
     let mut scene_hash_per_fb: [Option<u64>; 3] = [None, None, None];
-    // Hash of what's currently rendered into the staging RT. Painted
-    // afresh whenever it diverges from `current_hash`. Each FB then
-    // receives a bit-identical copy via copy_rect, eliminating the
-    // per-FB paint-timing variation that surfaces as text flicker
-    // when fb_swapper rotates between them.
+    // Per-FB PaintedScene snapshot (drives the damage diff for the
+    // staging→FB copy step — only the rects that differ since this
+    // FB was last targeted get re-copied).
+    let mut scene_per_fb: [Option<damage::PaintedScene>; 3] =
+        [None, None, None];
+    // Hash + scene of what's currently rendered into the staging RT.
+    // staging_scene drives the damage diff for the *paint* step;
+    // staging_hash is the fast skip check.
     let mut scene_hash_in_staging: Option<u64> = None;
+    let mut staging_scene: Option<damage::PaintedScene> = None;
+
+    // Damage-paint threshold: if the union of damage rects covers
+    // more than this fraction of the FB, fall back to a single
+    // clip-less paint/copy. Per-rect iteration has per-walk host
+    // overhead and per-op FPGA dispatch overhead; for big damage the
+    // wins from skipping clean pixels evaporate.
+    let fb_area: u64 = (fb.width as u64) * (fb.height as u64);
+    let full_paint_threshold: u64 = fb_area * 70 / 100;
     // Per-stage timing accumulators. Every TIMING_LOG_PERIOD frames
     // we log the average per-stage cost. Tells us where the frame
     // budget actually goes (so we can tell tick_jobs from layout
@@ -579,67 +587,158 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
 
         let t6 = Instant::now();
 
-        // 6. Skip submit when nothing has changed since the last
-        //    paint. We diff a hash of the current scene against
-        //    what we last painted on EACH FB; if all three have
-        //    the current scene, the displayed pixels are already
-        //    correct and we can skip the whole paint+present
-        //    pipeline. fb_swapper holds the displayed buffer
-        //    steady when we don't issue a PRESENT.
+        // 6. Build the current PaintedScene snapshot, and skip
+        //    everything when this FB already has it. Computing the
+        //    scene is cheap (just a tree walk + small Vec) and gives
+        //    us both the fast skip-hash and the structure damage
+        //    needs to diff against the prior state.
         let render_idx = (device.fb_state().render as usize).min(2);
-        let current_hash = ui_state.with_tree(|tree| {
-            damage::scene_hash(tree, root, &layouts, &text_styles)
+        let current_scene = ui_state.with_tree(|tree| {
+            damage::compute_scene(tree, root, &layouts, &text_styles)
         });
+        let current_hash = current_scene.hash();
         if scene_hash_per_fb[render_idx] == Some(current_hash) {
             // This FB already has the desired content. Sleep ~one
-            // vsync to bound the loop and continue. Update fps
-            // counter on the loop tick (not paint tick) so the
-            // displayed value stays meaningful during idle periods.
+            // vsync to bound the loop and continue.
             fps_counter.record_frame();
             std::thread::sleep(Duration::from_millis(16));
             continue;
         }
 
-        // 7. Begin frame. Two-step render to guarantee FB consistency:
-        //    a. If the staging RT doesn't already hold the current
-        //       scene, paint the React tree into it (full repaint
-        //       targeting staging_rt). All paint operations land in
-        //       one stable surface that lives across frames.
-        //    b. copy_rect that staging RT onto FB[render_idx]. Every
-        //       FB rotation receives bit-identical pixels, so
-        //       fb_swapper's three buffers can never disagree.
+        // 7. Paint pipeline with damage-region tracking:
+        //
+        //    a. If staging doesn't already hold the current scene,
+        //       paint into it. Either a full repaint (first time, or
+        //       damage exceeds the threshold) or a sequence of
+        //       per-rect clipped paints. The blit engine evaluates
+        //       dst ∩ clip up front, so an op fully outside the clip
+        //       produces zero DDR work.
+        //    b. Copy staging→FB[render_idx]. Either one full-screen
+        //       copy or a copy per damage rect (relative to the
+        //       prior contents of THIS FB).
+        //
+        //    Each damage diff is computed against the destination's
+        //    own prior snapshot — staging diffs against staging's
+        //    last scene, FB diffs against this FB's last scene. The
+        //    three FBs progress independently, which is why they each
+        //    need their own snapshot.
         let frame = device.begin_frame();
         let frame = crate::paint::render_pending_text(frame, &pendings, &fonts)?;
+
         let frame = if scene_hash_in_staging != Some(current_hash) {
             let frame = frame.set_target(&staging_rt)?;
-            let frame = ui_state.with_tree(|tree| {
-                crate::paint::paint(
-                    tree,
-                    root,
-                    &fb,
-                    &layouts,
-                    &text_styles,
-                    &text_cache,
-                    &images,
-                    frame,
-                )
-            })?;
+            // Decide between damage paint and full paint.
+            let damage_paint_plan = match &staging_scene {
+                Some(prev) => {
+                    let d = damage::compute_damage(prev, &current_scene);
+                    let area = damage::total_area(&d);
+                    if d.is_empty() || area > full_paint_threshold {
+                        None
+                    } else {
+                        Some(d)
+                    }
+                }
+                None => None,
+            };
+            let frame = match damage_paint_plan {
+                Some(rects) => {
+                    // Per-rect clipped paint. clear_clip after each
+                    // rect so the next rect's set_clip replaces it
+                    // cleanly (not unions/intersects with it).
+                    let mut frame = frame;
+                    for r in &rects {
+                        let f = frame.set_clip((*r).into())?;
+                        let f = ui_state.with_tree(|tree| {
+                            crate::paint::paint(
+                                tree,
+                                root,
+                                &fb,
+                                &layouts,
+                                &text_styles,
+                                &text_cache,
+                                &images,
+                                f,
+                            )
+                        })?;
+                        frame = f.clear_clip()?;
+                    }
+                    frame
+                }
+                None => ui_state.with_tree(|tree| {
+                    crate::paint::paint(
+                        tree,
+                        root,
+                        &fb,
+                        &layouts,
+                        &text_styles,
+                        &text_cache,
+                        &images,
+                        frame,
+                    )
+                })?,
+            };
+            // Canary is painted unclipped at the end so it cycles
+            // even on damage paints where its rect wasn't in the
+            // damage list. The matching copy below ensures the FB
+            // picks it up.
             let frame = paint_canary(frame, &fb, frame_idx)?;
             scene_hash_in_staging = Some(current_hash);
+            staging_scene = Some(current_scene.clone());
             frame
         } else {
             frame
         };
-        // Restore the framebuffer as the active target and blit staging
-        // onto it. This is the only operation that touches the FB; the
-        // tree paint above wrote to the staging RT only.
+
+        // Copy staging→FB[render_idx]. Damage diff is against this
+        // FB's own prior snapshot.
         let frame = frame.set_target_framebuffer()?;
-        let frame = frame.copy_rect(
-            &staging_rt,
-            menu_core_host::protocol::Rect::new(0, 0, fb.width, fb.height),
-            menu_core_host::protocol::Rect::new(0, 0, fb.width, fb.height),
-            menu_core_host::frame::CopyOpts::default(),
-        )?;
+        let canary_rect = menu_core_host::protocol::Rect::new(
+            fb.width.saturating_sub(32),
+            8,
+            24,
+            24,
+        );
+        let fb_damage_plan: Option<Vec<damage::PixelRect>> =
+            match &scene_per_fb[render_idx] {
+                Some(prev) => {
+                    let d = damage::compute_damage(prev, &current_scene);
+                    let area = damage::total_area(&d);
+                    if d.is_empty() || area > full_paint_threshold {
+                        None
+                    } else {
+                        Some(d)
+                    }
+                }
+                None => None,
+            };
+        let frame = match fb_damage_plan {
+            Some(rects) => {
+                let mut frame = frame;
+                for r in &rects {
+                    let rect: menu_core_host::protocol::Rect = (*r).into();
+                    frame = frame.copy_rect(
+                        &staging_rt,
+                        rect,
+                        rect,
+                        menu_core_host::frame::CopyOpts::default(),
+                    )?;
+                }
+                // Canary always copies — it changes on every paint
+                // iteration and isn't part of the damage diff.
+                frame.copy_rect(
+                    &staging_rt,
+                    canary_rect,
+                    canary_rect,
+                    menu_core_host::frame::CopyOpts::default(),
+                )?
+            }
+            None => frame.copy_rect(
+                &staging_rt,
+                menu_core_host::protocol::Rect::new(0, 0, fb.width, fb.height),
+                menu_core_host::protocol::Rect::new(0, 0, fb.width, fb.height),
+                menu_core_host::frame::CopyOpts::default(),
+            )?,
+        };
 
         let t7 = Instant::now();
 
@@ -647,6 +746,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
             frame.present()?.submit()?.wait_presented_timed(timeout)?;
 
         scene_hash_per_fb[render_idx] = Some(current_hash);
+        scene_per_fb[render_idx] = Some(current_scene);
         ui_state.with_tree_mut(|t| t.clear_dirty());
         fps_counter.record_frame();
 

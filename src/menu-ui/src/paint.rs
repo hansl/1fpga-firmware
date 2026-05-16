@@ -92,12 +92,16 @@ pub fn paint<'a>(
     images: &ImageRegistry,
     mut frame: Frame<'a>,
 ) -> Result<Frame<'a>, DeviceError> {
-    // Background clear.
+    // Background clear. Use the clip-respecting variant so damage
+    // painting (which sets a user clip before calling us) only writes
+    // pixels inside that clip; with no clip active the effective
+    // bounds are the full FB anyway, so the full-paint case is
+    // unchanged.
     let root_bg = tree
         .get(root)
         .and_then(|n| n.style.background_color)
         .unwrap_or(Rgba::BLACK);
-    frame = frame.fill_rect_unclipped(
+    frame = frame.fill_rect(
         Rect::new(0, 0, fb.width, fb.height),
         root_bg,
         BlendMode::Opaque,
@@ -145,7 +149,10 @@ fn paint_subtree<'a>(
                 let dw = clamp_u16(lay.w);
                 let dh = clamp_u16(lay.h);
                 if dw > 0 && dh > 0 {
-                    frame = frame.fill_rect_unclipped(
+                    // Clip-respecting: paint::paint may be called
+                    // under a damage-rect clip; outside that clip the
+                    // blit engine zeroes eff_w/eff_h and skips work.
+                    frame = frame.fill_rect(
                         Rect::new(dx, dy, dw, dh),
                         color,
                         BlendMode::Opaque,
