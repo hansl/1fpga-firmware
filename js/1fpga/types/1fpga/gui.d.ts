@@ -58,6 +58,15 @@ declare module '1fpga:gui' {
     opacity?: number;
     overflow?: 'visible' | 'hidden';
 
+    // ---- Transform ---------------------------------------------------
+    // Axis-independent scale around the layout-rect centre. Inherited
+    // multiplicatively by descendants (CSS stacking-context shape).
+    // `scale` is a shorthand that sets both axes; explicit `scaleX` /
+    // `scaleY` win when both are present.
+    scale?: number;
+    scaleX?: number;
+    scaleY?: number;
+
     // ---- Text --------------------------------------------------------
     color?: string;
     fontFamily?: string;

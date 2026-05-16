@@ -32,12 +32,16 @@ use crate::vdom::NodeId;
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum TweenProp {
     Opacity,
+    ScaleX,
+    ScaleY,
 }
 
 impl TweenProp {
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "opacity" => Some(Self::Opacity),
+            "scaleX" => Some(Self::ScaleX),
+            "scaleY" => Some(Self::ScaleY),
             _ => None,
         }
     }
@@ -48,6 +52,8 @@ impl TweenProp {
     fn read(self, style: &Style) -> f32 {
         match self {
             Self::Opacity => style.opacity.unwrap_or(1.0),
+            Self::ScaleX => style.scale_x.unwrap_or(1.0),
+            Self::ScaleY => style.scale_y.unwrap_or(1.0),
         }
     }
 
@@ -57,6 +63,11 @@ impl TweenProp {
         let mut patch = Style::default();
         match self {
             Self::Opacity => patch.opacity = Some(value.clamp(0.0, 1.0)),
+            // Scale clamped to a non-negative range; negative scales
+            // would flip the image, which neither the FPGA renderer
+            // nor the layout system handles today.
+            Self::ScaleX => patch.scale_x = Some(value.max(0.0)),
+            Self::ScaleY => patch.scale_y = Some(value.max(0.0)),
         }
         patch
     }

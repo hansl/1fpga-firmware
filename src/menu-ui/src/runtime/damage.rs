@@ -29,6 +29,7 @@ use std::hash::{Hash, Hasher};
 use menu_core_host::protocol::Rect;
 
 use crate::layout::ComputedLayout;
+use crate::style::Transform;
 use crate::text::ResolvedTextStyle;
 use crate::vdom::{NodeId, NodeKind, Tree};
 
@@ -121,8 +122,9 @@ pub fn scene_hash(
     layouts: &HashMap<NodeId, ComputedLayout>,
     text_styles: &HashMap<NodeId, ResolvedTextStyle>,
     opacities: &HashMap<NodeId, f32>,
+    transforms: &HashMap<NodeId, Transform>,
 ) -> u64 {
-    let scene = compute_scene(tree, root, layouts, text_styles, opacities);
+    let scene = compute_scene(tree, root, layouts, text_styles, opacities, transforms);
     scene.hash()
 }
 
@@ -134,9 +136,10 @@ pub fn compute_scene(
     layouts: &HashMap<NodeId, ComputedLayout>,
     text_styles: &HashMap<NodeId, ResolvedTextStyle>,
     opacities: &HashMap<NodeId, f32>,
+    transforms: &HashMap<NodeId, Transform>,
 ) -> PaintedScene {
     let mut items = Vec::new();
-    walk(tree, root, layouts, text_styles, opacities, &mut items);
+    walk(tree, root, layouts, text_styles, opacities, transforms, &mut items);
     PaintedScene { items }
 }
 
@@ -146,6 +149,7 @@ fn walk(
     layouts: &HashMap<NodeId, ComputedLayout>,
     text_styles: &HashMap<NodeId, ResolvedTextStyle>,
     opacities: &HashMap<NodeId, f32>,
+    transforms: &HashMap<NodeId, Transform>,
     out: &mut Vec<PaintedItem>,
 ) {
     let Some(node) = tree.get(id) else {
@@ -166,6 +170,14 @@ fn walk(
         .unwrap_or(1.0)
         .clamp(0.0, 1.0)
         .mul_add(255.0, 0.5) as u8;
+    // Quantise the effective transform similarly so float jitter in
+    // a tween's penultimate frame doesn't invalidate damage every
+    // tick. 1.0 unit = 1024 (i.e., milli-scale × ~1) — fine enough to
+    // catch small UI changes (1.10 vs 1.05), coarse enough to ignore
+    // single-bit float noise.
+    let xf = transforms.get(&id).copied().unwrap_or(Transform::IDENTITY);
+    let sx_q = (xf.scale_x.clamp(0.0, 64.0) * 1024.0).round() as i32;
+    let sy_q = (xf.scale_y.clamp(0.0, 64.0) * 1024.0).round() as i32;
     // Fully-transparent nodes don't paint and therefore don't
     // contribute to the scene; treat them as if they weren't there.
     let skip = opacity_u8 == 0;
@@ -214,6 +226,8 @@ fn walk(
                     }
                     painted_bbox.hash(&mut h);
                     opacity_u8.hash(&mut h);
+                    sx_q.hash(&mut h);
+                    sy_q.hash(&mut h);
                     out.push(PaintedItem {
                         node_id: id,
                         bbox: painted_bbox,
@@ -228,6 +242,8 @@ fn walk(
                     src.hash(&mut h);
                     bbox.hash(&mut h);
                     opacity_u8.hash(&mut h);
+                    sx_q.hash(&mut h);
+                    sy_q.hash(&mut h);
                     out.push(PaintedItem {
                         node_id: id,
                         bbox,
@@ -238,7 +254,7 @@ fn walk(
         }
     }
     for &child in &node.children {
-        walk(tree, child, layouts, text_styles, opacities, out);
+        walk(tree, child, layouts, text_styles, opacities, transforms, out);
     }
 }
 

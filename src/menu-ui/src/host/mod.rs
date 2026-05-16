@@ -371,7 +371,7 @@ fn start_tween(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
     // We only iterate the known props rather than enumerating every
     // own key of the JS object — keeps the property set explicit and
     // avoids accidentally tweening something we don't yet support.
-    for prop_name in &["opacity"] {
+    for prop_name in &["opacity", "scaleX", "scaleY"] {
         let v = target_obj.get(js_string!(*prop_name), context)?;
         if v.is_undefined() || v.is_null() {
             continue;
@@ -697,6 +697,21 @@ fn parse_style_value(value: &JsValue, context: &mut Context) -> JsResult<Style> 
         out.color = parse_color(&color.to_string(context)?.to_std_string_escaped());
     }
     out.opacity = read_f32(&o, "opacity", context)?;
+
+    // Transform: separate axes; `scale` shorthand sets both. Per CSS
+    // convention, a missing field stays `None` (= identity) so a
+    // partial commit doesn't accidentally reset the other axis.
+    out.scale_x = read_f32(&o, "scaleX", context)?;
+    out.scale_y = read_f32(&o, "scaleY", context)?;
+    let scale_uniform = read_f32(&o, "scale", context)?;
+    if let Some(s) = scale_uniform {
+        if out.scale_x.is_none() {
+            out.scale_x = Some(s);
+        }
+        if out.scale_y.is_none() {
+            out.scale_y = Some(s);
+        }
+    }
 
     let ff = o.get(js_string!("fontFamily"), context)?;
     if !ff.is_undefined() {

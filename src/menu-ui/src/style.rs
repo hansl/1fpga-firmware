@@ -118,6 +118,16 @@ pub struct Style {
     pub opacity: Option<f32>,
     pub overflow: Option<Overflow>,
 
+    // ---- Transform (axis-independent scale around layout-rect center) -
+    // These are inherited multiplicatively by descendants — a parent
+    // with scale_x=1.2 effectively scales every child by 1.2 too,
+    // exactly like CSS's stacking-context behaviour. The layout box
+    // itself is *not* affected; Taffy still places neighbours as
+    // though the element were at unit scale. Default for both axes
+    // is 1.0 (no scaling).
+    pub scale_x: Option<f32>,
+    pub scale_y: Option<f32>,
+
     // ---- Text --------------------------------------------------------
     pub color: Option<Rgba>,
     /// Font family — looked up in `FontRegistry`. `None` means use
@@ -165,6 +175,8 @@ impl Style {
         if patch.background_color.is_some(){ self.background_color = patch.background_color; }
         if patch.opacity.is_some()         { self.opacity = patch.opacity; }
         if patch.overflow.is_some()        { self.overflow = patch.overflow; }
+        if patch.scale_x.is_some()         { self.scale_x = patch.scale_x; }
+        if patch.scale_y.is_some()         { self.scale_y = patch.scale_y; }
         if patch.color.is_some()           { self.color = patch.color; }
         if patch.font_family.is_some()     { self.font_family = patch.font_family.clone(); }
         if patch.font_size.is_some()       { self.font_size = patch.font_size; }
@@ -208,6 +220,64 @@ fn walk_opacity(
     out.insert(id, here.clamp(0.0, 1.0));
     for &child in &node.children {
         walk_opacity(tree, child, here, out);
+    }
+}
+
+/// Effective 2D transform for a node, accumulated from ancestors.
+/// `scale_*` is the multiplicative scale (1.0 = identity). The
+/// effective transform is the same shape CSS's stacking-context
+/// model produces: each node's own scale multiplied by every
+/// ancestor's. For non-overlapping subtrees — the menu-UI default —
+/// this matches CSS exactly; overlapping subtrees with partial
+/// opacity & scale combinations may differ.
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub struct Transform {
+    pub scale_x: f32,
+    pub scale_y: f32,
+}
+
+impl Transform {
+    pub const IDENTITY: Self = Self { scale_x: 1.0, scale_y: 1.0 };
+
+    #[inline]
+    pub fn is_identity(self) -> bool {
+        // Use a small tolerance — scale values come from f32 tweens
+        // and may end at 1.0 + epsilon after interpolation.
+        (self.scale_x - 1.0).abs() < 1e-4 && (self.scale_y - 1.0).abs() < 1e-4
+    }
+}
+
+/// Walk the tree from `root`, computing each node's effective
+/// transform = ancestor × self (multiplicative). Same shape as
+/// [`resolve_opacity`]; used by paint to size draw rects and by
+/// damage to include the transform in each item's content hash.
+pub fn resolve_transforms(
+    tree: &crate::vdom::Tree,
+    root: crate::vdom::NodeId,
+) -> std::collections::HashMap<crate::vdom::NodeId, Transform> {
+    let mut out = std::collections::HashMap::new();
+    walk_transform(tree, root, Transform::IDENTITY, &mut out);
+    out
+}
+
+fn walk_transform(
+    tree: &crate::vdom::Tree,
+    id: crate::vdom::NodeId,
+    parent: Transform,
+    out: &mut std::collections::HashMap<crate::vdom::NodeId, Transform>,
+) {
+    let Some(node) = tree.get(id) else {
+        return;
+    };
+    let sx = node.style.scale_x.unwrap_or(1.0);
+    let sy = node.style.scale_y.unwrap_or(1.0);
+    let here = Transform {
+        scale_x: parent.scale_x * sx,
+        scale_y: parent.scale_y * sy,
+    };
+    out.insert(id, here);
+    for &child in &node.children {
+        walk_transform(tree, child, here, out);
     }
 }
 
