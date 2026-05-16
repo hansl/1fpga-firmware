@@ -176,6 +176,41 @@ impl Style {
 /// but `String` makes parser ergonomics simpler.
 pub type FontFamily = String;
 
+/// Walk the tree from `root`, computing each node's *effective*
+/// opacity = ancestor_effective × self_opacity (CSS-like multiplicative
+/// inheritance). Single pass over the tree, used once per frame by
+/// both paint and damage so each node sees the same value.
+///
+/// Returns `1.0` for any node whose own `style.opacity` is `None`.
+/// True CSS opacity is a stacking-context primitive (subtree
+/// composited at full alpha then painted onto canvas at opacity);
+/// we approximate it by multiplying down. For non-overlapping
+/// children — the menu UI's common case — the two are equivalent.
+pub fn resolve_opacity(
+    tree: &crate::vdom::Tree,
+    root: crate::vdom::NodeId,
+) -> std::collections::HashMap<crate::vdom::NodeId, f32> {
+    let mut out = std::collections::HashMap::new();
+    walk_opacity(tree, root, 1.0, &mut out);
+    out
+}
+
+fn walk_opacity(
+    tree: &crate::vdom::Tree,
+    id: crate::vdom::NodeId,
+    parent: f32,
+    out: &mut std::collections::HashMap<crate::vdom::NodeId, f32>,
+) {
+    let Some(node) = tree.get(id) else {
+        return;
+    };
+    let here = parent * node.style.opacity.unwrap_or(1.0);
+    out.insert(id, here.clamp(0.0, 1.0));
+    for &child in &node.children {
+        walk_opacity(tree, child, here, out);
+    }
+}
+
 /// Parse a CSS-style color string. Supports `#rgb`, `#rrggbb`,
 /// `#rrggbbaa`, plus the `rgb(R, G, B)` / `rgba(R, G, B, A)` forms
 /// (the latter is what react-spring's string interpolator emits when

@@ -90,13 +90,17 @@ pub fn paint<'a>(
     text_styles: &HashMap<NodeId, ResolvedTextStyle>,
     text_cache: &TextCache,
     images: &ImageRegistry,
+    opacities: &HashMap<NodeId, f32>,
     mut frame: Frame<'a>,
 ) -> Result<Frame<'a>, DeviceError> {
     // Background clear. Use the clip-respecting variant so damage
     // painting (which sets a user clip before calling us) only writes
     // pixels inside that clip; with no clip active the effective
     // bounds are the full FB anyway, so the full-paint case is
-    // unchanged.
+    // unchanged. Root bg ignores opacity intentionally — root is the
+    // bottom of the stack; "opacity 0" on root would expose whatever
+    // sat in the FB from a previous frame, which is meaningless for
+    // a menu canvas.
     let root_bg = tree
         .get(root)
         .and_then(|n| n.style.background_color)
@@ -114,6 +118,7 @@ pub fn paint<'a>(
         text_styles,
         text_cache,
         images,
+        opacities,
         frame,
         /* skip_root_bg */ true,
     )?;
@@ -127,6 +132,7 @@ fn paint_subtree<'a>(
     text_styles: &HashMap<NodeId, ResolvedTextStyle>,
     text_cache: &TextCache,
     images: &ImageRegistry,
+    opacities: &HashMap<NodeId, f32>,
     mut frame: Frame<'a>,
     skip_root_bg: bool,
 ) -> Result<Frame<'a>, DeviceError> {
@@ -136,6 +142,15 @@ fn paint_subtree<'a>(
     let Some(lay) = layouts.get(&id) else {
         return Ok(frame);
     };
+
+    let opacity = opacities.get(&id).copied().unwrap_or(1.0);
+    let opacity_u8 = opacity_to_u8(opacity);
+
+    // Fully transparent: nothing to draw, nothing to recurse into
+    // (children inherit multiplicatively so they're all 0 too).
+    if opacity_u8 == 0 {
+        return Ok(frame);
+    }
 
     match &node.kind {
         NodeKind::Div => {
@@ -152,24 +167,25 @@ fn paint_subtree<'a>(
                     // Clip-respecting: paint::paint may be called
                     // under a damage-rect clip; outside that clip the
                     // blit engine zeroes eff_w/eff_h and skips work.
+                    let (effective_color, blend) = apply_opacity_to_color(color, opacity_u8);
                     frame = frame.fill_rect(
                         Rect::new(dx, dy, dw, dh),
-                        color,
-                        BlendMode::Opaque,
+                        effective_color,
+                        blend,
                     )?;
                 }
             }
         }
         NodeKind::Text { content } => {
-            frame = paint_text(content, id, lay, text_styles, text_cache, frame)?;
+            frame = paint_text(content, id, lay, text_styles, text_cache, opacity_u8, frame)?;
         }
         NodeKind::Img { src } => {
-            frame = paint_img(src, lay, images, frame)?;
+            frame = paint_img(src, lay, images, opacity_u8, frame)?;
         }
     }
 
     for &child in &node.children {
-        frame = paint_subtree(tree, child, layouts, text_styles, text_cache, images, frame, false)?;
+        frame = paint_subtree(tree, child, layouts, text_styles, text_cache, images, opacities, frame, false)?;
     }
     Ok(frame)
 }
@@ -178,6 +194,7 @@ fn paint_img<'a>(
     src: &str,
     lay: &ComputedLayout,
     images: &ImageRegistry,
+    opacity_u8: u8,
     frame: Frame<'a>,
 ) -> Result<Frame<'a>, DeviceError> {
     let cached = match images.get(src) {
@@ -204,7 +221,7 @@ fn paint_img<'a>(
             // gracefully (alpha=255 → out = src).
             blend: BlendMode::SrcAlpha,
             filter: Filter::Nearest,
-            tint: None,
+            tint: opacity_tint(opacity_u8),
         },
     )
 }
@@ -215,6 +232,7 @@ fn paint_text<'a>(
     lay: &ComputedLayout,
     text_styles: &HashMap<NodeId, ResolvedTextStyle>,
     text_cache: &TextCache,
+    opacity_u8: u8,
     frame: Frame<'a>,
 ) -> Result<Frame<'a>, DeviceError> {
     let Some(rs) = text_styles.get(&id) else {
@@ -256,9 +274,43 @@ fn paint_text<'a>(
             // outside the glyphs don't overwrite the framebuffer.
             blend: BlendMode::SrcAlpha,
             filter: Filter::Nearest,
-            tint: None,
+            tint: opacity_tint(opacity_u8),
         },
     )
+}
+
+#[inline]
+fn opacity_to_u8(opacity: f32) -> u8 {
+    (opacity.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// Build a tint that the blit engine will multiply against an
+/// already-tinted texture (text RT, image) to scale its alpha by
+/// `opacity_u8 / 255`. `None` short-circuits the engine's tint path
+/// entirely when opacity is fully opaque.
+#[inline]
+fn opacity_tint(opacity_u8: u8) -> Option<Rgba> {
+    if opacity_u8 == 0xFF {
+        None
+    } else {
+        // RGB = 0xFF so src.rgb is preserved; only alpha is scaled.
+        Some(Rgba::new(0xFF, 0xFF, 0xFF, opacity_u8))
+    }
+}
+
+/// Apply opacity to a solid fill colour, returning the colour to use
+/// and the blend mode required to render it correctly. When fully
+/// opaque we stay on the fast Opaque path; otherwise we switch to
+/// SrcAlpha with the alpha pre-multiplied by opacity so the existing
+/// SrcAlpha blend math does the work.
+#[inline]
+fn apply_opacity_to_color(color: Rgba, opacity_u8: u8) -> (Rgba, BlendMode) {
+    if opacity_u8 == 0xFF {
+        (color, BlendMode::Opaque)
+    } else {
+        let a = ((color.a as u16) * (opacity_u8 as u16) / 255) as u8;
+        (Rgba::new(color.r, color.g, color.b, a), BlendMode::SrcAlpha)
+    }
 }
 
 #[inline]

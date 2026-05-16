@@ -120,15 +120,10 @@ pub fn scene_hash(
     root: NodeId,
     layouts: &HashMap<NodeId, ComputedLayout>,
     text_styles: &HashMap<NodeId, ResolvedTextStyle>,
+    opacities: &HashMap<NodeId, f32>,
 ) -> u64 {
-    let scene = compute_scene(tree, root, layouts, text_styles);
-    let mut h = DefaultHasher::new();
-    for item in &scene.items {
-        item.node_id.0.hash(&mut h);
-        item.bbox.hash(&mut h);
-        item.content_hash.hash(&mut h);
-    }
-    h.finish()
+    let scene = compute_scene(tree, root, layouts, text_styles, opacities);
+    scene.hash()
 }
 
 /// Walk the tree and build a [`PaintedScene`] reflecting what would
@@ -138,9 +133,10 @@ pub fn compute_scene(
     root: NodeId,
     layouts: &HashMap<NodeId, ComputedLayout>,
     text_styles: &HashMap<NodeId, ResolvedTextStyle>,
+    opacities: &HashMap<NodeId, f32>,
 ) -> PaintedScene {
     let mut items = Vec::new();
-    walk(tree, root, layouts, text_styles, &mut items);
+    walk(tree, root, layouts, text_styles, opacities, &mut items);
     PaintedScene { items }
 }
 
@@ -149,6 +145,7 @@ fn walk(
     id: NodeId,
     layouts: &HashMap<NodeId, ComputedLayout>,
     text_styles: &HashMap<NodeId, ResolvedTextStyle>,
+    opacities: &HashMap<NodeId, f32>,
     out: &mut Vec<PaintedItem>,
 ) {
     let Some(node) = tree.get(id) else {
@@ -159,14 +156,64 @@ fn walk(
     };
     let bbox = layout_to_bbox(lay);
 
-    match &node.kind {
-        NodeKind::Div => {
-            if let Some(bg) = node.style.background_color {
+    // Effective opacity drives painted pixels — include it in the
+    // content hash so a tween that animates opacity (without moving
+    // the bbox) damages the right rect. Quantise to 8 bits so
+    // microscopic float jitter doesn't invalidate every frame.
+    let opacity_u8 = opacities
+        .get(&id)
+        .copied()
+        .unwrap_or(1.0)
+        .clamp(0.0, 1.0)
+        .mul_add(255.0, 0.5) as u8;
+    // Fully-transparent nodes don't paint and therefore don't
+    // contribute to the scene; treat them as if they weren't there.
+    let skip = opacity_u8 == 0;
+
+    if !skip {
+        match &node.kind {
+            NodeKind::Div => {
+                if let Some(bg) = node.style.background_color {
+                    if bbox.w > 0 && bbox.h > 0 {
+                        let mut h = DefaultHasher::new();
+                        0u8.hash(&mut h); // tag
+                        bg.to_u32().hash(&mut h);
+                        bbox.hash(&mut h);
+                        opacity_u8.hash(&mut h);
+                        out.push(PaintedItem {
+                            node_id: id,
+                            bbox,
+                            content_hash: h.finish(),
+                        });
+                    }
+                }
+            }
+            NodeKind::Text { content } => {
                 if bbox.w > 0 && bbox.h > 0 {
                     let mut h = DefaultHasher::new();
-                    0u8.hash(&mut h); // tag
-                    bg.to_u32().hash(&mut h);
+                    1u8.hash(&mut h);
+                    content.hash(&mut h);
+                    if let Some(s) = text_styles.get(&id) {
+                        s.font_name.hash(&mut h);
+                        (s.px_size as u32).hash(&mut h);
+                        s.color.to_u32().hash(&mut h);
+                    }
                     bbox.hash(&mut h);
+                    opacity_u8.hash(&mut h);
+                    out.push(PaintedItem {
+                        node_id: id,
+                        bbox,
+                        content_hash: h.finish(),
+                    });
+                }
+            }
+            NodeKind::Img { src } => {
+                if bbox.w > 0 && bbox.h > 0 {
+                    let mut h = DefaultHasher::new();
+                    2u8.hash(&mut h);
+                    src.hash(&mut h);
+                    bbox.hash(&mut h);
+                    opacity_u8.hash(&mut h);
                     out.push(PaintedItem {
                         node_id: id,
                         bbox,
@@ -175,40 +222,9 @@ fn walk(
                 }
             }
         }
-        NodeKind::Text { content } => {
-            if bbox.w > 0 && bbox.h > 0 {
-                let mut h = DefaultHasher::new();
-                1u8.hash(&mut h);
-                content.hash(&mut h);
-                if let Some(s) = text_styles.get(&id) {
-                    s.font_name.hash(&mut h);
-                    (s.px_size as u32).hash(&mut h);
-                    s.color.to_u32().hash(&mut h);
-                }
-                bbox.hash(&mut h);
-                out.push(PaintedItem {
-                    node_id: id,
-                    bbox,
-                    content_hash: h.finish(),
-                });
-            }
-        }
-        NodeKind::Img { src } => {
-            if bbox.w > 0 && bbox.h > 0 {
-                let mut h = DefaultHasher::new();
-                2u8.hash(&mut h);
-                src.hash(&mut h);
-                bbox.hash(&mut h);
-                out.push(PaintedItem {
-                    node_id: id,
-                    bbox,
-                    content_hash: h.finish(),
-                });
-            }
-        }
     }
     for &child in &node.children {
-        walk(tree, child, layouts, text_styles, out);
+        walk(tree, child, layouts, text_styles, opacities, out);
     }
 }
 

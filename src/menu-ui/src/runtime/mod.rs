@@ -593,8 +593,9 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         //    us both the fast skip-hash and the structure damage
         //    needs to diff against the prior state.
         let render_idx = (device.fb_state().render as usize).min(2);
+        let opacities = ui_state.with_tree(|tree| crate::style::resolve_opacity(tree, root));
         let current_scene = ui_state.with_tree(|tree| {
-            damage::compute_scene(tree, root, &layouts, &text_styles)
+            damage::compute_scene(tree, root, &layouts, &text_styles, &opacities)
         });
         let current_hash = current_scene.hash();
         if scene_hash_per_fb[render_idx] == Some(current_hash) {
@@ -657,6 +658,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                                 &text_styles,
                                 &text_cache,
                                 &images,
+                                &opacities,
                                 f,
                             )
                         })?;
@@ -673,6 +675,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                         &text_styles,
                         &text_cache,
                         &images,
+                        &opacities,
                         frame,
                     )
                 })?,

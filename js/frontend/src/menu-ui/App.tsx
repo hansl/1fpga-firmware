@@ -127,8 +127,11 @@ const Card = memo(function Card({
   flashing: boolean;
 }) {
   const bg = flashing ? '#ffffff' : focused ? item.accent : '#1a1a2a';
+  // Unfocused cards dim to 50% so focus is unambiguous. Opacity is
+  // multiplicative down the subtree, so the icon + label dim too.
+  const opacity = flashing ? 1 : focused ? 1 : 0.5;
   return (
-    <div style={{ ...cardBase, backgroundColor: bg }}>
+    <div style={{ ...cardBase, backgroundColor: bg, opacity }}>
       <img src={item.icon} style={cardIconStyle} />
       <div style={cardLabelStyle}>{item.name}</div>
     </div>
