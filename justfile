@@ -149,12 +149,24 @@ deploy-menu-ui-bundle:
 deploy-menu-ui-test-png:
     scp docs/assets/osd/line_array.png root@{{mister_ip}}:/media/fat/menu_ui_test.png
 
+# (Re-)generate the menu-ui N9 demo asset PNGs (host-side tool).
+# Writes into docs/assets/menu-ui-demo/. The PNGs are committed,
+# so only re-run when the demo's visual style changes.
+gen-menu-ui-assets:
+    cargo run --bin gen_demo_assets
+
+# Deploy the menu-ui N9 demo assets (background + per-system icons)
+# into /media/fat/menu_ui_assets/ on the device. Idempotent.
+deploy-menu-ui-assets:
+    ssh root@{{mister_ip}} 'mkdir -p /media/fat/menu_ui_assets'
+    scp docs/assets/menu-ui-demo/*.png root@{{mister_ip}}:/media/fat/menu_ui_assets/
+
 # Run the menu-ui launcher on the device, loading the deployed JS bundle
 run-menu-ui: _kill-fpga-users
     ssh -t root@{{mister_ip}} '/media/fat/menu_ui --bundle /media/fat/menu_ui_app.js'
 
 # Build everything menu-ui needs and deploy + run in one shot
-demo-menu-ui: deploy-menu-ui deploy-menu-ui-bundle run-menu-ui
+demo-menu-ui: deploy-menu-ui deploy-menu-ui-bundle deploy-menu-ui-assets run-menu-ui
 
 # Run the probe on the device (assumes the menu-core .rbf is loaded and the binary is deployed)
 probe-menu-core: _kill-fpga-users

@@ -1,28 +1,33 @@
-import { memo, useCallback, useState } from 'react';
+import { memo, useCallback, useEffect, useState } from 'react';
 import type { CSSProperties } from 'react';
+import * as gui from '1fpga:gui';
 
 import { useIntent } from './hooks';
 
 // N9 demo — a horizontal "core picker": a row of cards with a focus
-// highlight that animates between cards via react-spring as the user
-// presses ← / →. Pressing Enter pulses the focused card. Bottom line
-// echoes the focused card's name. Top-left corner shows the live
-// frame rate (diagnostic).
+// highlight that moves between cards as the user presses ← / →.
+// Pressing Enter pulses the focused card. Bottom line echoes the
+// focused core's name. Background image + per-system icons load from
+// /media/fat/menu_ui_assets (deployed via `just deploy-menu-ui-assets`).
 
 interface Item {
   name: string;
   accent: string;
+  icon: string;
 }
 
+const ASSETS = '/media/fat/menu_ui_assets';
+
 const ITEMS: Item[] = [
-  { name: 'NES', accent: '#d04040' },
-  { name: 'SNES', accent: '#6070ff' },
-  { name: 'Genesis', accent: '#3a3a3a' },
-  { name: 'Game Boy', accent: '#80a040' },
-  { name: 'Atari', accent: '#d09040' },
+  { name: 'NES',      accent: '#d04040', icon: `${ASSETS}/nes.png` },
+  { name: 'SNES',     accent: '#6070ff', icon: `${ASSETS}/snes.png` },
+  { name: 'Genesis',  accent: '#3a3a3a', icon: `${ASSETS}/genesis.png` },
+  { name: 'Game Boy', accent: '#80a040', icon: `${ASSETS}/gameboy.png` },
+  { name: 'Atari',    accent: '#d09040', icon: `${ASSETS}/atari.png` },
 ];
 
 const root: CSSProperties = {
+  position: 'relative',
   display: 'flex',
   flexDirection: 'column',
   width: 1920,
@@ -32,6 +37,14 @@ const root: CSSProperties = {
   paddingTop: 80,
   paddingBottom: 80,
   backgroundColor: '#0a0a14',
+};
+
+const bgImageStyle: CSSProperties = {
+  position: 'absolute',
+  top: 0,
+  left: 0,
+  width: 1920,
+  height: 1080,
 };
 
 const headerWrap: CSSProperties = {
@@ -64,8 +77,14 @@ const cardBase: CSSProperties = {
   width: 240,
   height: 240,
   alignItems: 'center',
-  justifyContent: 'flex-end',
+  justifyContent: 'space-between',
+  paddingTop: 28,
   paddingBottom: 24,
+};
+
+const cardIconStyle: CSSProperties = {
+  width: 128,
+  height: 128,
 };
 
 const cardLabelStyle: CSSProperties = {
@@ -98,13 +117,6 @@ const fpsStyle: CSSProperties = {
   color: '#60ff60',
 };
 
-// memo() — focus change only re-renders the two cards whose
-// `focused` flipped. Earlier revision used react-spring here; that
-// added ~30-45ms of React commit cost per nav (hooks + observer
-// setup) which dominated the frame budget when the user mashed
-// arrows. Static style toggle now: visual transition is barely
-// perceptible at our ~17fps paint rate anyway, so removing the
-// tween costs nothing visible and recovers the frame.
 const Card = memo(function Card({
   item,
   focused,
@@ -117,6 +129,7 @@ const Card = memo(function Card({
   const bg = flashing ? '#ffffff' : focused ? item.accent : '#1a1a2a';
   return (
     <div style={{ ...cardBase, backgroundColor: bg }}>
+      <img src={item.icon} style={cardIconStyle} />
       <div style={cardLabelStyle}>{item.name}</div>
     </div>
   );
@@ -127,11 +140,12 @@ export function App() {
   // -1 = nothing flashing. Set to focused index on confirm,
   // back to -1 after one paint via setTimeout(0).
   const [flashIdx, setFlashIdx] = useState(-1);
-  // FPS counter temporarily disabled to isolate static-content text
-  // artifacts: if the artifacts disappear with a frozen string, the
-  // bug is in staging-RT re-paints; if they persist, the bug is in
-  // the first rasterization of each text RT.
-  const fps = 0;
+  const [fps, setFps] = useState(0);
+
+  useEffect(() => {
+    const id = setInterval(() => setFps(gui.fps()), 250);
+    return () => clearInterval(id);
+  }, []);
 
   useIntent(
     'navigate_left',
@@ -153,10 +167,6 @@ export function App() {
     'confirm',
     useCallback((e) => {
       if (e.kind !== 'pressed') return;
-      // Flash the currently-focused card white for ~120ms, then
-      // restore. setFocus uses functional update so we read the
-      // latest value without depending on it (avoids useCallback
-      // dep churn that resubscribes the listener every focus change).
       setFocus((f) => {
         setFlashIdx(f);
         setTimeout(() => setFlashIdx(-1), 120);
@@ -167,6 +177,7 @@ export function App() {
 
   return (
     <div style={root}>
+      <img src={`${ASSETS}/bg.png`} style={bgImageStyle} />
       <div style={fpsStyle}>{`${fps.toFixed(1)} fps`}</div>
       <div style={headerWrap}>
         <div style={titleStyle}>menu-ui · N9 demo</div>
