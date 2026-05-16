@@ -130,14 +130,27 @@ const Card = memo(function Card({
   // Unfocused cards dim to 50% so focus is unambiguous. Opacity is
   // multiplicative down the subtree, so the icon + label dim too.
   const targetOpacity = flashing ? 1 : focused ? 1 : 0.5;
-  // Animate the opacity transition on the host. React commits the
-  // target value to style; the host's tween manager smoothly
-  // interpolates from the previous value over 180 ms each time
-  // `targetOpacity` changes.
+  // Focused card scales up to 1.08; unfocused stays at 1.0. Scale
+  // inherits multiplicatively, so the icon + label grow with the
+  // card around its center. Animate via the host-side tween manager
+  // so React only commits when focus state actually flips.
+  const targetScale = focused ? 1.08 : 1.0;
   const ref = useRef<gui.NodeId | null>(null);
-  useTween(ref, { opacity: targetOpacity }, { duration: 180, easing: 'easeOut' });
+  useTween(
+    ref,
+    { opacity: targetOpacity, scale: targetScale },
+    { duration: 180, easing: 'easeOut' },
+  );
   return (
-    <div ref={ref} style={{ ...cardBase, backgroundColor: bg, opacity: targetOpacity }}>
+    <div
+      ref={ref}
+      style={{
+        ...cardBase,
+        backgroundColor: bg,
+        opacity: targetOpacity,
+        scale: targetScale,
+      }}
+    >
       <img src={item.icon} style={cardIconStyle} />
       <div style={cardLabelStyle}>{item.name}</div>
     </div>

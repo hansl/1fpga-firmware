@@ -245,6 +245,24 @@ impl Transform {
         // and may end at 1.0 + epsilon after interpolation.
         (self.scale_x - 1.0).abs() < 1e-4 && (self.scale_y - 1.0).abs() < 1e-4
     }
+
+    /// Apply this transform to a layout rect, scaling around its
+    /// centre (transform-origin: 50% 50% in CSS terms). Returns the
+    /// new dst rect in floating-point form so callers can perform
+    /// their own integer-rounding / alignment. Negative scales are
+    /// clamped to zero (we don't support flips).
+    #[inline]
+    pub fn apply_to_rect(self, x: f32, y: f32, w: f32, h: f32) -> (f32, f32, f32, f32) {
+        let sx = self.scale_x.max(0.0);
+        let sy = self.scale_y.max(0.0);
+        let cx = x + w * 0.5;
+        let cy = y + h * 0.5;
+        let new_w = w * sx;
+        let new_h = h * sy;
+        let new_x = cx - new_w * 0.5;
+        let new_y = cy - new_h * 0.5;
+        (new_x, new_y, new_w, new_h)
+    }
 }
 
 /// Walk the tree from `root`, computing each node's effective

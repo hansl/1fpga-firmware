@@ -15,6 +15,7 @@ use menu_core_host::protocol::{BlendMode, Filter, Rect, Rgba};
 use crate::font::FontRegistry;
 use crate::image::{CachedImage, ImageRegistry};
 use crate::layout::ComputedLayout;
+use crate::style::Transform;
 use crate::text::{CacheKey, PendingRender, ResolvedTextStyle, TextCache};
 use crate::vdom::{NodeId, NodeKind, Tree};
 
@@ -91,6 +92,7 @@ pub fn paint<'a>(
     text_cache: &TextCache,
     images: &ImageRegistry,
     opacities: &HashMap<NodeId, f32>,
+    transforms: &HashMap<NodeId, Transform>,
     mut frame: Frame<'a>,
 ) -> Result<Frame<'a>, DeviceError> {
     // Background clear. Use the clip-respecting variant so damage
@@ -119,6 +121,7 @@ pub fn paint<'a>(
         text_cache,
         images,
         opacities,
+        transforms,
         frame,
         /* skip_root_bg */ true,
     )?;
@@ -133,6 +136,7 @@ fn paint_subtree<'a>(
     text_cache: &TextCache,
     images: &ImageRegistry,
     opacities: &HashMap<NodeId, f32>,
+    transforms: &HashMap<NodeId, Transform>,
     mut frame: Frame<'a>,
     skip_root_bg: bool,
 ) -> Result<Frame<'a>, DeviceError> {
@@ -152,6 +156,13 @@ fn paint_subtree<'a>(
         return Ok(frame);
     }
 
+    let xf = transforms.get(&id).copied().unwrap_or(Transform::IDENTITY);
+    // Scaled = produce a different-sized dst rect than src. The FPGA
+    // routes COPY_RECT with `src_w != dst_w || src_h != dst_h` into
+    // its nearest-neighbour path; FILL_RECT only uses dst, so scale
+    // just changes the rect size.
+    let scaled = !xf.is_identity();
+
     match &node.kind {
         NodeKind::Div => {
             if !skip_root_bg
@@ -159,10 +170,11 @@ fn paint_subtree<'a>(
                 && lay.w > 0.5
                 && lay.h > 0.5
             {
-                let dx = clamp_u16(lay.x);
-                let dy = clamp_u16(lay.y);
-                let dw = clamp_u16(lay.w);
-                let dh = clamp_u16(lay.h);
+                let (tx, ty, tw, th) = xf.apply_to_rect(lay.x, lay.y, lay.w, lay.h);
+                let dx = clamp_u16(tx);
+                let dy = clamp_u16(ty);
+                let dw = clamp_u16(tw);
+                let dh = clamp_u16(th);
                 if dw > 0 && dh > 0 {
                     // Clip-respecting: paint::paint may be called
                     // under a damage-rect clip; outside that clip the
@@ -177,15 +189,15 @@ fn paint_subtree<'a>(
             }
         }
         NodeKind::Text { content } => {
-            frame = paint_text(content, id, lay, text_styles, text_cache, opacity_u8, frame)?;
+            frame = paint_text(content, id, lay, text_styles, text_cache, opacity_u8, xf, scaled, frame)?;
         }
         NodeKind::Img { src } => {
-            frame = paint_img(src, lay, images, opacity_u8, frame)?;
+            frame = paint_img(src, lay, images, opacity_u8, xf, frame)?;
         }
     }
 
     for &child in &node.children {
-        frame = paint_subtree(tree, child, layouts, text_styles, text_cache, images, opacities, frame, false)?;
+        frame = paint_subtree(tree, child, layouts, text_styles, text_cache, images, opacities, transforms, frame, false)?;
     }
     Ok(frame)
 }
@@ -195,6 +207,7 @@ fn paint_img<'a>(
     lay: &ComputedLayout,
     images: &ImageRegistry,
     opacity_u8: u8,
+    xf: Transform,
     frame: Frame<'a>,
 ) -> Result<Frame<'a>, DeviceError> {
     let cached = match images.get(src) {
@@ -205,11 +218,12 @@ fn paint_img<'a>(
     if src_w == 0 || src_h == 0 || lay.w < 0.5 || lay.h < 0.5 {
         return Ok(frame);
     }
+    let (tx, ty, tw, th) = xf.apply_to_rect(lay.x, lay.y, lay.w, lay.h);
     let dst = Rect::new(
-        clamp_u16(lay.x),
-        clamp_u16(lay.y),
-        clamp_u16(lay.w),
-        clamp_u16(lay.h),
+        clamp_u16(tx),
+        clamp_u16(ty),
+        clamp_u16(tw),
+        clamp_u16(th),
     );
     frame.copy_rect(
         &texture,
@@ -233,6 +247,8 @@ fn paint_text<'a>(
     text_styles: &HashMap<NodeId, ResolvedTextStyle>,
     text_cache: &TextCache,
     opacity_u8: u8,
+    xf: Transform,
+    scaled: bool,
     frame: Frame<'a>,
 ) -> Result<Frame<'a>, DeviceError> {
     let Some(rs) = text_styles.get(&id) else {
@@ -251,19 +267,34 @@ fn paint_text<'a>(
     if cached.width == 0 || cached.height == 0 {
         return Ok(frame);
     }
-    // Round dst.x down to a 16-pixel multiple so the framebuffer write
-    // address is 64-byte aligned at cur_x=0. This lets the FPGA blit
-    // engine engage its 16-pixel burst tier from the start of every
-    // text row instead of bottoming out at smaller bursts. Visual
-    // shift is at most 15 px left of where Taffy placed the text;
-    // imperceptible at our typical sizes.
-    let raw_x = clamp_u16(lay.x);
-    let aligned_x = raw_x & !15;
+    // Transform the text's layout rect, then size dst to the
+    // transformed dimensions. In identity (non-scaled) mode this is
+    // a no-op and we still get the burst-friendly 16-px x alignment
+    // (the FPGA's 1:1 path). In scaled mode we let dst differ from
+    // src so the FPGA's nearest-neighbour scaled path engages — the
+    // alignment optimisation doesn't apply there anyway (scaled
+    // copy reads per pixel, no bursts).
+    let (tx, ty, tw, th) = xf.apply_to_rect(
+        lay.x,
+        lay.y,
+        cached.width as f32,
+        cached.height as f32,
+    );
+    let dst_x = if scaled {
+        clamp_u16(tx)
+    } else {
+        // Round dst.x down to a 16-pixel multiple so the framebuffer
+        // write address is 64-byte aligned at cur_x=0 — engages the
+        // engine's 16-pixel burst tier from the start of every row.
+        // Visual shift is at most 15 px left of where Taffy placed
+        // the text; imperceptible at our typical sizes.
+        clamp_u16(tx) & !15
+    };
     let dst = Rect::new(
-        aligned_x,
-        clamp_u16(lay.y),
-        cached.width,
-        cached.height,
+        dst_x,
+        clamp_u16(ty),
+        clamp_u16(tw).max(1),
+        clamp_u16(th).max(1),
     );
     frame.copy_rect(
         &cached.texture,

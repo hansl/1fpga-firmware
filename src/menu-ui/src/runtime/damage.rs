@@ -158,7 +158,14 @@ fn walk(
     let Some(lay) = layouts.get(&id) else {
         return;
     };
-    let bbox = layout_to_bbox(lay);
+    let xf = transforms.get(&id).copied().unwrap_or(Transform::IDENTITY);
+    let scaled = !xf.is_identity();
+    // Damage bbox follows the *transformed* footprint so per-rect
+    // clip + copy cover the area actually painted. For non-scaled
+    // nodes this collapses to the layout rect (with the identity
+    // transform leaving x/y/w/h unchanged), so existing damage
+    // behaviour is preserved.
+    let bbox = transformed_bbox(lay, xf);
 
     // Effective opacity drives painted pixels — include it in the
     // content hash so a tween that animates opacity (without moving
@@ -175,9 +182,9 @@ fn walk(
     // tick. 1.0 unit = 1024 (i.e., milli-scale × ~1) — fine enough to
     // catch small UI changes (1.10 vs 1.05), coarse enough to ignore
     // single-bit float noise.
-    let xf = transforms.get(&id).copied().unwrap_or(Transform::IDENTITY);
     let sx_q = (xf.scale_x.clamp(0.0, 64.0) * 1024.0).round() as i32;
     let sy_q = (xf.scale_y.clamp(0.0, 64.0) * 1024.0).round() as i32;
+    let _ = scaled; // currently only the bbox + hash uses xf
     // Fully-transparent nodes don't paint and therefore don't
     // contribute to the scene; treat them as if they weren't there.
     let skip = opacity_u8 == 0;
@@ -264,6 +271,20 @@ fn layout_to_bbox(lay: &ComputedLayout) -> PixelRect {
     let w = lay.w.max(0.0).min(u16::MAX as f32) as u16;
     let h = lay.h.max(0.0).min(u16::MAX as f32) as u16;
     PixelRect { x, y, w, h }
+}
+
+/// Layout rect scaled around its centre per `xf`. Used by the
+/// damage walker so each item's bbox matches the area `paint::paint`
+/// actually writes after applying the same transform.
+fn transformed_bbox(lay: &ComputedLayout, xf: Transform) -> PixelRect {
+    let (tx, ty, tw, th) = xf.apply_to_rect(lay.x, lay.y, lay.w, lay.h);
+    let to_u16 = |v: f32| v.max(0.0).min(u16::MAX as f32) as u16;
+    PixelRect {
+        x: to_u16(tx),
+        y: to_u16(ty),
+        w: to_u16(tw),
+        h: to_u16(th),
+    }
 }
 
 /// Diff `prev` and `cur`; return per-rect damage covering every node

@@ -672,6 +672,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                                 &text_cache,
                                 &images,
                                 &opacities,
+                                &transforms,
                                 f,
                             )
                         })?;
@@ -689,6 +690,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                         &text_cache,
                         &images,
                         &opacities,
+                        &transforms,
                         frame,
                     )
                 })?,

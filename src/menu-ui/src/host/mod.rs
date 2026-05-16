@@ -368,6 +368,17 @@ fn start_tween(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
         })?;
     let state = ui_state(context)?;
 
+    // `scale` shorthand: kick off both axes. Explicit `scaleX` /
+    // `scaleY` in the same call win over the shorthand for that
+    // axis (CSS-style). We iterate the explicit props after so they
+    // overwrite any shorthand tweens already started.
+    let scale_uniform = target_obj.get(js_string!("scale"), context)?;
+    if !scale_uniform.is_undefined() && !scale_uniform.is_null() {
+        let v = scale_uniform.to_number(context)? as f32;
+        mgr.start(&state, id, TweenProp::ScaleX, v, duration, easing);
+        mgr.start(&state, id, TweenProp::ScaleY, v, duration, easing);
+    }
+
     // We only iterate the known props rather than enumerating every
     // own key of the JS object — keeps the property set explicit and
     // avoids accidentally tweening something we don't yet support.
