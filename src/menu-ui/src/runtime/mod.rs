@@ -262,6 +262,7 @@ fn dump_tree(tree: &Tree, id: NodeId, depth: usize) {
     }
 }
 
+pub mod anim;
 mod boa;
 pub mod damage;
 pub mod dump;
@@ -369,11 +370,13 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     let fps_counter = fps::FpsCounter::new();
     let raf_state = raf::RafState::new();
     let warmup_queue = warmup::WarmupQueue::new();
+    let anim_mgr = anim::AnimationManager::new();
     context.insert_data(ui_state.clone());
     context.insert_data(input_state.clone());
     context.insert_data(fps_counter.clone());
     context.insert_data(raf_state.clone());
     context.insert_data(warmup_queue.clone());
+    context.insert_data(anim_mgr.clone());
 
     let module = {
         let source = Source::from_bytes(&bundle);
@@ -544,6 +547,15 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         }
 
         let t2 = Instant::now();
+
+        // 0e. Advance any in-flight tweens. Runs before layout so
+        //     tweens of layout-affecting properties (width, height,
+        //     etc.) take effect this frame. Each tween mutates the
+        //     target node's style via `Style::merge_from`, which is
+        //     the same path React's `gui.updateStyle` uses; the
+        //     damage system then naturally diffs the changed value
+        //     into a per-rect repaint.
+        let _active_tweens = anim_mgr.tick(&ui_state);
 
         // 1. Resolve text style inheritance once for the frame.
         let text_styles = ui_state.with_tree(|tree| crate::text::resolve(tree, root));

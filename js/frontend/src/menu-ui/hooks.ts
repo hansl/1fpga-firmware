@@ -69,3 +69,45 @@ export function useAnimationFrame(tick: (now: number) => void): void {
     };
   }, []);
 }
+
+/**
+ * Animate one or more numeric style properties on a host node from
+ * their current values to the supplied `target` over `opts.duration`
+ * milliseconds. The actual interpolation runs **on the host** (Rust
+ * AnimationManager): each loop iteration the manager advances all
+ * tweens and applies the interpolated value via the same style-merge
+ * path React's `gui.updateStyle` uses, so the damage system picks the
+ * change up naturally. This avoids React re-rendering once per tween
+ * tick — the component only re-renders when `target` itself changes.
+ *
+ * Pass a `ref` that you've attached to the element you want to
+ * animate. The hook resolves the host `NodeId` from `ref.current` on
+ * every dependency change. Re-targeting mid-animation glides from
+ * the in-progress value rather than snapping.
+ *
+ * Example:
+ * ```tsx
+ * const ref = useRef<gui.NodeId>(null);
+ * useTween(ref, { opacity: focused ? 1 : 0.5 }, { duration: 200 });
+ * return <div ref={ref} />;
+ * ```
+ */
+export function useTween(
+  ref: { current: gui.NodeId | null },
+  target: Partial<gui.Style>,
+  opts?: gui.TweenOpts,
+): void {
+  // Cheap stable identity for the dep array — JSON.stringify is fine
+  // because the objects are tiny and only contain primitives.
+  const targetKey = JSON.stringify(target);
+  const optsKey = JSON.stringify(opts ?? null);
+  useLayoutEffect(() => {
+    const node = ref.current;
+    if (node == null) return;
+    gui.startTween(node, target, opts);
+    // No cleanup: a tween either completes on its own or is replaced
+    // by the next dep-change. Letting one expire naturally is the
+    // intended behaviour.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [targetKey, optsKey]);
+}

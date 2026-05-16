@@ -104,6 +104,10 @@ pub fn register(loader: &MapModuleLoader, context: &mut Context) -> JsResult<()>
             NativeFunction::from_fn_ptr(update_style),
         ),
         (
+            js_string!("startTween"),
+            NativeFunction::from_fn_ptr(start_tween),
+        ),
+        (
             js_string!("addIntentListener"),
             NativeFunction::from_fn_ptr(add_intent_listener),
         ),
@@ -309,6 +313,76 @@ fn update_style(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
             t.set_style(id, merged);
         }
     });
+    Ok(JsValue::undefined())
+}
+
+/// `gui.startTween(nodeId, target, opts)` — start (or replace) a
+/// host-side tween. `target` is `{ propName: numericValue }` for each
+/// property to animate; `opts` is `{ duration?: ms, easing?: string }`.
+///
+/// Each tween is keyed by `(nodeId, property)` and lives in the
+/// `AnimationManager`. The runtime loop ticks every tween once per
+/// iteration before layout + scene-hash, so the interpolated values
+/// flow through the standard paint path. Calling `startTween` again
+/// for the same key replaces the active tween, continuing from
+/// whatever value it had reached so retargets glide rather than snap.
+fn start_tween(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    use crate::runtime::anim::{AnimationManager, Easing, TweenProp};
+    use std::time::Duration;
+
+    let id = NodeId(args.get_or_undefined(0).to_u32(context)?);
+    let target_obj = match args.get_or_undefined(1).as_object() {
+        Some(o) => o.clone(),
+        None => return Ok(JsValue::undefined()),
+    };
+    let opts_val = args.get_or_undefined(2);
+
+    // ---- Parse opts -----------------------------------------------
+    let mut duration_ms: f64 = 200.0;
+    let mut easing = Easing::EaseOut;
+    if let Some(o) = opts_val.as_object() {
+        let d = o.get(js_string!("duration"), context)?;
+        if !d.is_undefined() {
+            duration_ms = d.to_number(context)?;
+        }
+        let e = o.get(js_string!("easing"), context)?;
+        if let Some(s) = e.as_string()
+            && let Ok(s) = s.to_std_string()
+            && let Some(parsed) = Easing::from_str(&s)
+        {
+            easing = parsed;
+        }
+    }
+    let duration = Duration::from_secs_f64((duration_ms / 1000.0).max(0.0));
+
+    // ---- Parse target ----------------------------------------------
+    // For each recognised property key in `target`, queue a tween.
+    let mgr = context
+        .get_data::<AnimationManager>()
+        .cloned()
+        .ok_or_else(|| {
+            JsError::from_native(
+                JsNativeError::error()
+                    .with_message("AnimationManager not installed in Boa context"),
+            )
+        })?;
+    let state = ui_state(context)?;
+
+    // We only iterate the known props rather than enumerating every
+    // own key of the JS object — keeps the property set explicit and
+    // avoids accidentally tweening something we don't yet support.
+    for prop_name in &["opacity"] {
+        let v = target_obj.get(js_string!(*prop_name), context)?;
+        if v.is_undefined() || v.is_null() {
+            continue;
+        }
+        let target_value = v.to_number(context)? as f32;
+        let prop = match TweenProp::from_str(prop_name) {
+            Some(p) => p,
+            None => continue,
+        };
+        mgr.start(&state, id, prop, target_value, duration, easing);
+    }
     Ok(JsValue::undefined())
 }
 

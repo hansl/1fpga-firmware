@@ -127,6 +127,39 @@ declare module '1fpga:gui' {
   export function updateStyle(node: NodeId, patch: Partial<Style>): void;
 
   /**
+   * Easing curve names accepted by `startTween`. Defaults to
+   * `'easeOut'` when omitted.
+   */
+  export type Easing = 'linear' | 'easeIn' | 'easeOut' | 'easeInOut';
+
+  /** Animation options for `startTween`. */
+  export interface TweenOpts {
+    /** Duration in milliseconds. Defaults to 200 ms. */
+    duration?: number;
+    /** Easing curve. Defaults to `'easeOut'`. */
+    easing?: Easing;
+  }
+
+  /**
+   * Start (or replace) a host-side tween for one or more properties
+   * of `node`. Each entry in `target` is interpolated from the node's
+   * current value to the entry's value over `opts.duration` ms; the
+   * runtime ticks every active tween once per frame, before layout
+   * and damage computation, so interpolated values flow through the
+   * normal paint path. Re-calling for the same `(node, property)`
+   * replaces the active tween and resumes from wherever it had
+   * reached — retargets glide instead of snapping.
+   *
+   * Currently supports `opacity`. More properties (width, height,
+   * etc.) added as the renderer grows.
+   */
+  export function startTween(
+    node: NodeId,
+    target: Partial<Style>,
+    opts?: TweenOpts,
+  ): void;
+
+  /**
    * Mark `root` as the live UI root. After the JS `main()` returns,
    * the runtime starts driving a frame loop with this root.
    */

@@ -1,8 +1,8 @@
-import { memo, useCallback, useEffect, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import * as gui from '1fpga:gui';
 
-import { useIntent } from './hooks';
+import { useIntent, useTween } from './hooks';
 
 // N9 demo — a horizontal "core picker": a row of cards with a focus
 // highlight that moves between cards as the user presses ← / →.
@@ -129,9 +129,15 @@ const Card = memo(function Card({
   const bg = flashing ? '#ffffff' : focused ? item.accent : '#1a1a2a';
   // Unfocused cards dim to 50% so focus is unambiguous. Opacity is
   // multiplicative down the subtree, so the icon + label dim too.
-  const opacity = flashing ? 1 : focused ? 1 : 0.5;
+  const targetOpacity = flashing ? 1 : focused ? 1 : 0.5;
+  // Animate the opacity transition on the host. React commits the
+  // target value to style; the host's tween manager smoothly
+  // interpolates from the previous value over 180 ms each time
+  // `targetOpacity` changes.
+  const ref = useRef<gui.NodeId | null>(null);
+  useTween(ref, { opacity: targetOpacity }, { duration: 180, easing: 'easeOut' });
   return (
-    <div style={{ ...cardBase, backgroundColor: bg, opacity }}>
+    <div ref={ref} style={{ ...cardBase, backgroundColor: bg, opacity: targetOpacity }}>
       <img src={item.icon} style={cardIconStyle} />
       <div style={cardLabelStyle}>{item.name}</div>
     </div>
