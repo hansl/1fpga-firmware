@@ -190,6 +190,20 @@ fn walk(
             }
             NodeKind::Text { content } => {
                 if bbox.w > 0 && bbox.h > 0 {
+                    // paint_text aligns dst.x down to a 16-pixel
+                    // boundary for burst-friendly writes. The actual
+                    // painted area therefore extends up to 15 px
+                    // *left* of the layout's x. Mirror that here so
+                    // damage rects cover the full painted footprint —
+                    // otherwise an OLD-text damage rect leaves a
+                    // sliver of stale pixels at its left edge when
+                    // the new text shifts position.
+                    let painted_bbox = PixelRect {
+                        x: bbox.x & !15,
+                        y: bbox.y,
+                        w: bbox.w,
+                        h: bbox.h,
+                    };
                     let mut h = DefaultHasher::new();
                     1u8.hash(&mut h);
                     content.hash(&mut h);
@@ -198,11 +212,11 @@ fn walk(
                         (s.px_size as u32).hash(&mut h);
                         s.color.to_u32().hash(&mut h);
                     }
-                    bbox.hash(&mut h);
+                    painted_bbox.hash(&mut h);
                     opacity_u8.hash(&mut h);
                     out.push(PaintedItem {
                         node_id: id,
-                        bbox,
+                        bbox: painted_bbox,
                         content_hash: h.finish(),
                     });
                 }

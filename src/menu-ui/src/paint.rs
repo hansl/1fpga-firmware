@@ -285,31 +285,49 @@ fn opacity_to_u8(opacity: f32) -> u8 {
 }
 
 /// Build a tint that the blit engine will multiply against an
-/// already-tinted texture (text RT, image) to scale its alpha by
-/// `opacity_u8 / 255`. `None` short-circuits the engine's tint path
-/// entirely when opacity is fully opaque.
+/// already-tinted texture (text RT, image) to scale its contribution
+/// by `opacity_u8 / 255`. `None` short-circuits the engine's tint
+/// path entirely when opacity is fully opaque.
+///
+/// All four channels are set to `opacity_u8` because the engine's
+/// SrcAlpha uses the premultiplied formula
+///     `out = src.RGB + dst.RGB · (1 − src.A/255)`
+/// and the A8 path bakes RGB = tint.RGB · glyph_alpha into the text
+/// RT — so for premultiplied src we must dim RGB *and* alpha to get
+/// the visual effect of "less src contribution". Tinting only the
+/// alpha leaves the RGB at full strength and produces hollow text.
+/// The same tint works for non-premultiplied images because dimming
+/// both their RGB (linear factor) and alpha (linear factor in the
+/// (1−src.A) dst term) gives the expected `src·op + dst·(1−op)`
+/// blend at opaque pixels.
 #[inline]
 fn opacity_tint(opacity_u8: u8) -> Option<Rgba> {
     if opacity_u8 == 0xFF {
         None
     } else {
-        // RGB = 0xFF so src.rgb is preserved; only alpha is scaled.
-        Some(Rgba::new(0xFF, 0xFF, 0xFF, opacity_u8))
+        Some(Rgba::new(opacity_u8, opacity_u8, opacity_u8, opacity_u8))
     }
 }
 
 /// Apply opacity to a solid fill colour, returning the colour to use
 /// and the blend mode required to render it correctly. When fully
 /// opaque we stay on the fast Opaque path; otherwise we switch to
-/// SrcAlpha with the alpha pre-multiplied by opacity so the existing
-/// SrcAlpha blend math does the work.
+/// SrcAlpha. The engine's SrcAlpha is premultiplied, so RGB must be
+/// pre-scaled by the *effective* alpha (color.a · opacity / 255²):
+///     out = src.RGB + dst.RGB · (1 − src.A/255)
+/// With unpremultiplied src this gives `src + dst·(1−A)` which
+/// over-brightens by `src·(1−A)` and produces a too-light fill.
 #[inline]
 fn apply_opacity_to_color(color: Rgba, opacity_u8: u8) -> (Rgba, BlendMode) {
     if opacity_u8 == 0xFF {
         (color, BlendMode::Opaque)
     } else {
-        let a = ((color.a as u16) * (opacity_u8 as u16) / 255) as u8;
-        (Rgba::new(color.r, color.g, color.b, a), BlendMode::SrcAlpha)
+        let eff_a = ((color.a as u16) * (opacity_u8 as u16) / 255) as u8;
+        let pre = |c: u8| ((c as u16) * (eff_a as u16) / 255) as u8;
+        (
+            Rgba::new(pre(color.r), pre(color.g), pre(color.b), eff_a),
+            BlendMode::SrcAlpha,
+        )
     }
 }
 
