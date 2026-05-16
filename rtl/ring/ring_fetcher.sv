@@ -71,6 +71,8 @@ module ring_fetcher (
     output logic [31:0] blit_color_o,
     output logic [15:0] blit_src_x_o,
     output logic [15:0] blit_src_y_o,
+    output logic [15:0] blit_src_w_o,
+    output logic [15:0] blit_src_h_o,
     output logic [31:0] blit_src_addr_o,
     output logic [31:0] blit_src_pitch_o,
     output logic        blit_format_o,      // 0 = RGBA8888, 1 = A8
@@ -195,6 +197,10 @@ module ring_fetcher (
     assign blit_color_o      = arg_q[2];      // only meaningful for FILL
     assign blit_src_x_o      = arg_q[1][31:16];
     assign blit_src_y_o      = arg_q[1][15:0];
+    // src.wh is arg[2] per PROTOCOL.md §5.3 #COPY_RECT. Driven for
+    // FILL_RECT too but blit_engine ignores it when mode == FILL.
+    assign blit_src_w_o      = arg_q[2][31:16];
+    assign blit_src_h_o      = arg_q[2][15:0];
     assign blit_src_addr_o   = desc_q[0];     // descriptor §6.1: data_addr
     assign blit_src_pitch_o  = desc_q[1];     // descriptor §6.1: pitch_bytes
     assign blit_format_o     = desc_q[3][0];  // descriptor §6.1 format byte: 0=RGBA, 1=A8

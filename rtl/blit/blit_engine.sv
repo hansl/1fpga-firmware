@@ -44,6 +44,13 @@ module blit_engine (
     // COPY-only inputs.
     input  logic [15:0] src_x_i,
     input  logic [15:0] src_y_i,
+    // Source rect width/height. When `src_w_i == dst_w_i &&
+    // src_h_i == dst_h_i` the engine takes the existing 1:1 path
+    // (burst-friendly). Otherwise it routes into the nearest-neighbor
+    // scaled-copy path: per-pixel src reads with a fixed-point step
+    // accumulator, no src bursts. Ignored when `mode_i == MODE_FILL`.
+    input  logic [15:0] src_w_i,
+    input  logic [15:0] src_h_i,
     input  logic [31:0] src_addr_i,
     input  logic [31:0] src_pitch_i,
     input  logic        format_i,         // 0 = RGBA8888, 1 = A8
@@ -141,8 +148,24 @@ module blit_engine (
     logic [15:0] dst_x_q, dst_y_q, dst_w_q, dst_h_q;
     logic [31:0] color_q;
     logic [15:0] src_x_q, src_y_q;
+    logic [15:0] src_w_q, src_h_q;
     logic [31:0] src_addr_q;
     logic [31:0] src_pitch_q;
+
+    // ---- Scaled-copy state (nearest-neighbour) --------------------
+    // Set in S_IDLE when (src_w != dst_w || src_h != dst_h). Forces
+    // the COPY path through the per-pixel branch (no burst, no
+    // prefetch) and replaces the linear src column index with a
+    // Q16.16 accumulator stepped by `src_w_q / dst_w_q` per pixel.
+    // `src_y_acc_q` is per-row; `src_x_acc_q` resets to its init
+    // value at the start of every row.
+    logic        scale_mode_q;
+    logic [31:0] src_step_x_q;   // Q16.16: src dx per dst pixel
+    logic [31:0] src_step_y_q;   // Q16.16: src dy per dst row
+    logic [31:0] src_x_acc_q;    // Q16.16, reset per row
+    logic [31:0] src_y_acc_q;    // Q16.16, advanced per row
+    logic [31:0] src_x_init_q;   // Q16.16: initial src_x_acc (clipped sox in src space)
+    logic [31:0] src_y_init_q;   // Q16.16: initial src_y_acc
 
     logic [15:0] cur_x, cur_y_off;
     logic [31:0] dst_row_byte_addr;
@@ -207,10 +230,15 @@ module blit_engine (
 
     // Per-pixel byte addresses.
     // RGBA8888: x*4. A8: x*1.
+    //
+    // Source-side column index: in 1:1 mode it's the dst column
+    // `cur_x` directly; in scaled mode it's the integer part of the
+    // Q16.16 src-x accumulator (nearest-neighbour sampling).
+    wire [15:0] src_col_eff = scale_mode_q ? src_x_acc_q[31:16] : cur_x;
     wire [31:0] cur_x_offset_dst = ({16'd0, cur_x} <<< 2);
     wire [31:0] cur_x_offset_src = (format_q == FMT_A8)
-                                       ? {16'd0, cur_x}
-                                       : ({16'd0, cur_x} <<< 2);
+                                       ? {16'd0, src_col_eff}
+                                       : ({16'd0, src_col_eff} <<< 2);
     wire [31:0] dst_pixel_byte_addr = dst_row_byte_addr + cur_x_offset_dst;
     wire [31:0] src_pixel_byte_addr = src_row_byte_addr + cur_x_offset_src;
 
@@ -414,8 +442,17 @@ module blit_engine (
             color_q           <= '0;
             src_x_q           <= '0;
             src_y_q           <= '0;
+            src_w_q           <= '0;
+            src_h_q           <= '0;
             src_addr_q        <= '0;
             src_pitch_q       <= '0;
+            scale_mode_q      <= 1'b0;
+            src_step_x_q      <= 32'h0001_0000;
+            src_step_y_q      <= 32'h0001_0000;
+            src_x_acc_q       <= '0;
+            src_y_acc_q       <= '0;
+            src_x_init_q      <= '0;
+            src_y_init_q      <= '0;
             cur_x             <= '0;
             cur_y_off         <= '0;
             dst_row_byte_addr <= '0;
@@ -512,6 +549,13 @@ module blit_engine (
                     automatic logic [15:0] ex0, ey0, ex1, ey1;
                     automatic logic [15:0] eff_w, eff_h;
                     automatic logic [15:0] sox, soy;
+                    // Scale-mode locals — declared at the top so the
+                    // nested if/else doesn't need its own
+                    // declarations (Quartus 17 rejects automatic in
+                    // nested blocks).
+                    automatic logic        do_scale;
+                    automatic logic [31:0] step_x;
+                    automatic logic [31:0] step_y;
 
                     fbw = target_width_i;
                     fbh = target_height_i;
@@ -552,11 +596,58 @@ module blit_engine (
                     dst_w_q      <= eff_w;
                     dst_h_q      <= eff_h;
                     color_q      <= color_i;
-                    src_x_q      <= src_x_i + sox;
-                    src_y_q      <= src_y_i + soy;
+                    // For 1:1 (non-scaled) blits the existing src
+                    // start advances by sox/soy in dst space (1:1).
+                    // For scaled blits we keep src_x/y_q at the
+                    // unclipped src origin and let the row/pixel
+                    // accumulators handle the scaled left/top offset.
+                    do_scale = (mode_i == MODE_COPY) &&
+                               ((src_w_i != dst_w_i) || (src_h_i != dst_h_i));
+                    src_x_q      <= src_x_i + (do_scale ? 16'd0 : sox);
+                    src_y_q      <= src_y_i + (do_scale ? 16'd0 : soy);
+                    src_w_q      <= src_w_i;
+                    src_h_q      <= src_h_i;
                     src_addr_q   <= src_addr_i;
                     src_pitch_q  <= src_pitch_i;
                     cur_y_off    <= '0;
+
+                    // --- Scale-mode setup --------------------------
+                    // Active only on COPY when src and dst dimensions
+                    // differ. Step = (src_dim / dst_dim) in Q16.16.
+                    // Initial src accumulators include sox·step /
+                    // soy·step so left/top clipping advances the src
+                    // tap by the scaled amount, not a 1:1 amount.
+                    // (Guard against dst==0 — degenerate fully-
+                    // clipped — S_ROW_INIT short-circuits anyway.)
+                    // `do_scale` is reused from the src_x/y_q
+                    // selection above.
+                    step_x = (dst_w_i == 16'd0)
+                             ? 32'h0001_0000
+                             : ({16'd0, src_w_i} <<< 16) / {16'd0, dst_w_i};
+                    step_y = (dst_h_i == 16'd0)
+                             ? 32'h0001_0000
+                             : ({16'd0, src_h_i} <<< 16) / {16'd0, dst_h_i};
+                    if (do_scale) begin
+                        scale_mode_q <= 1'b1;
+                        src_step_x_q <= step_x;
+                        src_step_y_q <= step_y;
+                        // sox/soy were computed in dst pixels (1:1
+                        // sense). Multiply by step to get the
+                        // matching Q16.16 advance in src space.
+                        src_x_init_q <= {16'd0, sox} * step_x;
+                        src_y_init_q <= {16'd0, soy} * step_y;
+                        src_x_acc_q  <= {16'd0, sox} * step_x;
+                        src_y_acc_q  <= {16'd0, soy} * step_y;
+                    end else begin
+                        scale_mode_q <= 1'b0;
+                        src_step_x_q <= 32'h0001_0000;
+                        src_step_y_q <= 32'h0001_0000;
+                        src_x_init_q <= 32'd0;
+                        src_y_init_q <= 32'd0;
+                        src_x_acc_q  <= 32'd0;
+                        src_y_acc_q  <= 32'd0;
+                    end
+
                     // If the rect is fully clipped (eff_w == 0 or
                     // eff_h == 0), S_ROW_INIT immediately finds
                     // cur_y_off == dst_h_q == 0 and falls to S_DONE.
@@ -567,16 +658,31 @@ module blit_engine (
                     if (cur_y_off == dst_h_q) begin
                         state <= S_DONE;
                     end else begin
+                        automatic logic [15:0] src_y_eff;
+                        // In scale mode the src row index comes from
+                        // the Q16.16 accumulator (integer part). In
+                        // 1:1 mode it's the dst row offset directly.
+                        src_y_eff = scale_mode_q
+                                        ? src_y_acc_q[31:16]
+                                        : cur_y_off;
                         dst_row_byte_addr <= target_base_i
                             + ({16'd0, (dst_y_q + cur_y_off)} * target_pitch_i)
                             + ({16'd0, dst_x_q} <<< 2);
-                        // src x byte multiplier depends on format.
+                        // Row base: src.x byte multiplier depends on
+                        // format. src_x_q already has sox baked in
+                        // for 1:1, or stays at src_x_i for scale (the
+                        // sox·step bias lives in src_x_acc_q below).
                         src_row_byte_addr <= src_addr_q
-                            + ({16'd0, (src_y_q + cur_y_off)} * src_pitch_q)
+                            + ({16'd0, (src_y_q + src_y_eff)} * src_pitch_q)
                             + ((format_q == FMT_A8)
                                   ? {16'd0, src_x_q}
                                   : ({16'd0, src_x_q} <<< 2));
                         cur_x <= '0;
+                        // Restart the src-x accumulator at its row-
+                        // start value every row; src_y advances by
+                        // one step per row from S_NEXT_PIXEL's
+                        // end-of-row branch.
+                        src_x_acc_q <= src_x_init_q;
                         state <= S_NEXT_PIXEL;
                     end
                 end
@@ -584,12 +690,27 @@ module blit_engine (
                 S_NEXT_PIXEL: begin
                     if (cur_x == dst_w_q) begin
                         cur_y_off <= cur_y_off + 16'd1;
+                        // Advance the row-step accumulator in scale
+                        // mode so S_ROW_INIT picks up the next src_y.
+                        if (scale_mode_q) begin
+                            src_y_acc_q <= src_y_acc_q + src_step_y_q;
+                        end
                         // Row's last burst can't match the prefetch
                         // (it'd be for a same-row position past dst_w);
                         // the address-match check would handle this
                         // anyway, but clearing makes the intent explicit.
                         prefetch_ready_q <= 1'b0;
                         state     <= S_ROW_INIT;
+                    end else if (mode_q == MODE_COPY && scale_mode_q) begin
+                        // Scale-mode COPY: bursts are off (src reads
+                        // don't stride sequentially in this mode), so
+                        // route straight to the per-pixel fetch path.
+                        // The per-pixel path's existing addressing
+                        // wires (`src_pixel_byte_addr`) already pick
+                        // up the scaled column via `src_col_eff`, and
+                        // `src_x_acc_q` advances one step per pixel
+                        // in S_WRITE_WAIT (the dst write commit).
+                        state <= S_FETCH_SRC;
                     end else if (mode_q == MODE_COPY) begin
                         // Burst-COPY dispatch: pick the largest aligned
                         // burst that fits the remainder of the row.
@@ -781,6 +902,12 @@ module blit_engine (
                     end else if ((blend_q == BLEND_SRCALPHA)
                                  && (src_alpha == 8'h00)) begin
                         cur_x <= cur_x + 16'd1;
+                        // Same step bump as the S_WRITE_WAIT path:
+                        // we're advancing one dst pixel here too, so
+                        // src_x_acc must move forward in scale mode.
+                        if (scale_mode_q) begin
+                            src_x_acc_q <= src_x_acc_q + src_step_x_q;
+                        end
                         state <= S_NEXT_PIXEL;
                     end else begin
                         src_pixel_q <= computed_src;
@@ -811,6 +938,14 @@ module blit_engine (
 
                 S_WRITE_WAIT: begin
                     cur_x <= cur_x + 16'd1;
+                    // In scale mode, step the src column accumulator
+                    // one Q16.16 step per dst pixel. Non-scale mode
+                    // leaves src_x_acc_q untouched (its initial 0
+                    // is never read since `src_col_eff` selects on
+                    // `scale_mode_q`).
+                    if (scale_mode_q) begin
+                        src_x_acc_q <= src_x_acc_q + src_step_x_q;
+                    end
                     state <= S_NEXT_PIXEL;
                 end
 

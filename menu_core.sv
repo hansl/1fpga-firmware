@@ -504,7 +504,7 @@ wire        blit_start;
 wire        blit_mode;
 wire [1:0]  blit_blend;
 wire [15:0] blit_dst_x, blit_dst_y, blit_dst_w, blit_dst_h;
-wire [15:0] blit_src_x, blit_src_y;
+wire [15:0] blit_src_x, blit_src_y, blit_src_w, blit_src_h;
 wire [31:0] blit_src_addr, blit_src_pitch;
 wire [31:0] blit_color;
 wire        blit_format;
@@ -560,6 +560,8 @@ ring_fetcher u_ring_fetcher (
     .blit_color_o    (blit_color),
     .blit_src_x_o    (blit_src_x),
     .blit_src_y_o    (blit_src_y),
+    .blit_src_w_o    (blit_src_w),
+    .blit_src_h_o    (blit_src_h),
     .blit_src_addr_o (blit_src_addr),
     .blit_src_pitch_o(blit_src_pitch),
     .blit_format_o     (blit_format),
@@ -639,6 +641,8 @@ blit_engine u_blit_engine (
     .color_i    (blit_color),
     .src_x_i    (blit_src_x),
     .src_y_i    (blit_src_y),
+    .src_w_i    (blit_src_w),
+    .src_h_i    (blit_src_h),
     .src_addr_i (blit_src_addr),
     .src_pitch_i(blit_src_pitch),
     .format_i      (blit_format),
