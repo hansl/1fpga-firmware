@@ -14,6 +14,13 @@ path = "src/lib.rs"
 name = "menu_ui"
 path = "src/bin/menu_ui.rs"
 
+[[bin]]
+name = "gen_demo_assets"
+path = "src/bin/gen_demo_assets.rs"
+# Host-only tool: generates the N9 demo's background + system icon
+# PNGs into docs/assets/menu-ui-demo/. Not deployed to the device.
+required-features = []
+
 [lints]
 workspace = true
 
