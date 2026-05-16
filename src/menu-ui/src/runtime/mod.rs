@@ -330,20 +330,6 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         BUILD_ID, info.width, info.height
     );
 
-    // 1b. Allocate a staging RT for proper triple-buffering. The
-    //     React tree is painted ONCE into this RT, then each frame
-    //     copy_rect's the RT onto the active FB. This guarantees all
-    //     three rotating FBs receive bit-identical pixels — without
-    //     the staging step, painting directly into FB[render_idx]
-    //     produces subtle timing-induced differences across the
-    //     three buffers that fb_swapper's rotation surfaces as text
-    //     flicker. Single allocation; sized to the framebuffer.
-    let staging_rt = device.create_render_target(fb.width, fb.height)?;
-    info!(
-        "staging rt allocated: tex_id={}, phys={:#010X}",
-        staging_rt.id, staging_rt.phys_addr
-    );
-
     // 2. Load the JS bundle.
     let bundle: Vec<u8> = match cfg.bundle_override.as_ref() {
         Some(p) => {
@@ -458,16 +444,12 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
 
     // Per-FB content hash. Tracks "what's currently painted on each
     // of the three FB slots" as a single u64 hash of the scene. None
-    // = never painted (forces a copy from staging when first
-    // targeted). We pick the slot via the FPGA's render_idx, compute
-    // the current scene hash, and skip submit when they match.
+    // = never painted (forces a full paint when first targeted). We
+    // pick the slot via the FPGA's render_idx, compute the current
+    // scene hash, and skip submit when they match. After 3 paints,
+    // all FBs converge to the same hash and the loop falls into the
+    // skip path until the scene changes again.
     let mut scene_hash_per_fb: [Option<u64>; 3] = [None, None, None];
-    // Hash of what's currently rendered into the staging RT. Painted
-    // afresh whenever it diverges from `current_hash`. Each FB then
-    // receives a bit-identical copy via copy_rect, eliminating the
-    // per-FB paint-timing variation that surfaces as text flicker
-    // when fb_swapper rotates between them.
-    let mut scene_hash_in_staging: Option<u64> = None;
     // Per-stage timing accumulators. Every TIMING_LOG_PERIOD frames
     // we log the average per-stage cost. Tells us where the frame
     // budget actually goes (so we can tell tick_jobs from layout
@@ -600,46 +582,29 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
             continue;
         }
 
-        // 7. Begin frame. Two-step render to guarantee FB consistency:
-        //    a. If the staging RT doesn't already hold the current
-        //       scene, paint the React tree into it (full repaint
-        //       targeting staging_rt). All paint operations land in
-        //       one stable surface that lives across frames.
-        //    b. copy_rect that staging RT onto FB[render_idx]. Every
-        //       FB rotation receives bit-identical pixels, so
-        //       fb_swapper's three buffers can never disagree.
+        // 7. Begin frame and paint the React tree straight into
+        //    FB[render_idx]. begin_frame's default target is the
+        //    framebuffer, so no set_target is needed. The blit
+        //    engine's prefetch-capture race that previously forced
+        //    us through a staging RT is fixed at the FPGA level
+        //    (gated wait-state captures); we can therefore drop the
+        //    staging copy entirely, halving the per-paint DDR3
+        //    write traffic.
         let frame = device.begin_frame();
         let frame = crate::paint::render_pending_text(frame, &pendings, &fonts)?;
-        let frame = if scene_hash_in_staging != Some(current_hash) {
-            let frame = frame.set_target(&staging_rt)?;
-            let frame = ui_state.with_tree(|tree| {
-                crate::paint::paint(
-                    tree,
-                    root,
-                    &fb,
-                    &layouts,
-                    &text_styles,
-                    &text_cache,
-                    &images,
-                    frame,
-                )
-            })?;
-            let frame = paint_canary(frame, &fb, frame_idx)?;
-            scene_hash_in_staging = Some(current_hash);
-            frame
-        } else {
-            frame
-        };
-        // Restore the framebuffer as the active target and blit staging
-        // onto it. This is the only operation that touches the FB; the
-        // tree paint above wrote to the staging RT only.
-        let frame = frame.set_target_framebuffer()?;
-        let frame = frame.copy_rect(
-            &staging_rt,
-            menu_core_host::protocol::Rect::new(0, 0, fb.width, fb.height),
-            menu_core_host::protocol::Rect::new(0, 0, fb.width, fb.height),
-            menu_core_host::frame::CopyOpts::default(),
-        )?;
+        let frame = ui_state.with_tree(|tree| {
+            crate::paint::paint(
+                tree,
+                root,
+                &fb,
+                &layouts,
+                &text_styles,
+                &text_cache,
+                &images,
+                frame,
+            )
+        })?;
+        let frame = paint_canary(frame, &fb, frame_idx)?;
 
         let t7 = Instant::now();
 
@@ -692,21 +657,11 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
 
     info!("menu-ui: stopping engine");
 
-    // Diagnostic: snapshot staging RT + each FB to /tmp/menu-ui-*.png
-    // before stopping. Lets us see whether the host actually wrote
-    // identical bytes to all three FBs (and whether staging matches
-    // what HDMI displayed) without trusting fb_swapper or scanout to
-    // do the right thing.
+    // Diagnostic: snapshot each FB to /tmp/menu-ui-*.png before
+    // stopping. Lets us inspect what HDMI was showing at exit and
+    // verify the three FBs converged to the same content.
     {
         let out_dir = std::path::Path::new("/tmp");
-        dump::try_dump(
-            "staging_rt",
-            staging_rt.phys_addr,
-            fb.width,
-            fb.height,
-            (fb.width as u32) * 4,
-            &out_dir.join("menu-ui-staging.png"),
-        );
         dump::try_dump(
             "fb0",
             fb.fb0_phys,
