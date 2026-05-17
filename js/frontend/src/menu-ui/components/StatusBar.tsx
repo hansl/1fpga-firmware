@@ -4,7 +4,7 @@
 // services through `1fpga:` modules, swap the inline literals for
 // service hooks.
 
-import { useEffect, useState } from 'react';
+import { memo, useEffect, useState } from 'react';
 import type { CSSProperties } from 'react';
 
 import { Icon } from './Icon';
@@ -66,7 +66,14 @@ function useClock(): string {
   return `${pad2(now.getHours())}:${pad2(now.getMinutes())}`;
 }
 
-export function StatusBar({
+/**
+ * Memoised so the status bar only re-renders when its actual props
+ * change or when its internal clock tick fires (~once a minute).
+ * Without this, navigating the menu would invalidate damage rects
+ * across the whole top-right strip every keystroke even though the
+ * displayed content hasn't changed.
+ */
+export const StatusBar = memo(function StatusBar({
   user = 'guest',
   notifications = 0,
   wifi = 'connected',
@@ -98,4 +105,4 @@ export function StatusBar({
       </div>
     </div>
   );
-}
+});

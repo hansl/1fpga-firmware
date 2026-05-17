@@ -6,6 +6,7 @@
 //   https://raw.githubusercontent.com/google/material-design-icons/
 //     master/font/MaterialIcons-Regular.codepoints
 
+import { memo } from 'react';
 import type { CSSProperties } from 'react';
 
 export type IconName =
@@ -117,7 +118,18 @@ interface IconProps {
   style?: CSSProperties;
 }
 
-export function Icon({ name, size = 24, color = '#ffffff', style }: IconProps) {
+/**
+ * Memoised so an Icon re-renders only when its actual props change.
+ * Without this, every parent re-render (e.g. on navigation) would
+ * emit a fresh `style` object identity and trigger commitUpdate +
+ * damage even though the rendered pixels are identical.
+ */
+export const Icon = memo(function Icon({
+  name,
+  size = 24,
+  color = '#ffffff',
+  style,
+}: IconProps) {
   return (
     <div
       style={{
@@ -132,4 +144,4 @@ export function Icon({ name, size = 24, color = '#ffffff', style }: IconProps) {
       {CODEPOINTS[name]}
     </div>
   );
-}
+});
