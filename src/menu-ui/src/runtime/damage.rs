@@ -66,6 +66,18 @@ impl PixelRect {
             && ay2 > other.y as u32
             && by2 > self.y as u32
     }
+
+    /// True if `self` is fully inside (or equal to) `other`.
+    fn contained_in(&self, other: &PixelRect) -> bool {
+        let sx2 = self.x as u32 + self.w as u32;
+        let sy2 = self.y as u32 + self.h as u32;
+        let ox2 = other.x as u32 + other.w as u32;
+        let oy2 = other.y as u32 + other.h as u32;
+        (self.x as u32) >= (other.x as u32)
+            && (self.y as u32) >= (other.y as u32)
+            && sx2 <= ox2
+            && sy2 <= oy2
+    }
 }
 
 impl From<PixelRect> for Rect {
@@ -288,7 +300,13 @@ fn transformed_bbox(lay: &ComputedLayout, xf: Transform) -> PixelRect {
 }
 
 /// Diff `prev` and `cur`; return per-rect damage covering every node
-/// that was added, removed, or changed.
+/// that was added, removed, or changed. Output rects are
+/// containment-deduplicated — when one rect is fully inside another,
+/// the smaller one is dropped, since painting the larger one already
+/// covers it. This collapses the common parent-with-changed-children
+/// pattern (e.g., a card animating its scale also "changes" every
+/// descendant's transform-derived content_hash) into a single
+/// outermost rect, saving redundant tree walks + duplicate blit work.
 pub fn compute_damage(prev: &PaintedScene, cur: &PaintedScene) -> Vec<PixelRect> {
     let mut rects = Vec::new();
 
@@ -320,7 +338,38 @@ pub fn compute_damage(prev: &PaintedScene, cur: &PaintedScene) -> Vec<PixelRect>
         }
     }
 
+    dedupe_contained(rects)
+}
+
+/// Drop any rect that is fully contained in another rect of the
+/// same list. O(N²) but `N` is the count of damaged drawables —
+/// realistically <30 even for a busy tween frame. Identical rects
+/// are kept by checking strict containment + index ordering.
+fn dedupe_contained(rects: Vec<PixelRect>) -> Vec<PixelRect> {
+    let mut keep: Vec<bool> = vec![true; rects.len()];
+    for i in 0..rects.len() {
+        if !keep[i] {
+            continue;
+        }
+        for j in 0..rects.len() {
+            if i == j || !keep[j] {
+                continue;
+            }
+            // rects[i] contained in rects[j] → drop i. Tie-break on
+            // equal rects: keep the lower-indexed one.
+            if rects[i].contained_in(&rects[j])
+                && (rects[i] != rects[j] || i > j)
+            {
+                keep[i] = false;
+                break;
+            }
+        }
+    }
     rects
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(r, k)| if k { Some(r) } else { None })
+        .collect()
 }
 
 /// Bounding-rect union of every input rect. Returns `None` if the
