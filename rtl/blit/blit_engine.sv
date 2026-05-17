@@ -645,13 +645,23 @@ module blit_engine (
                         scale_mode_q <= 1'b1;
                         src_step_x_q <= step_x;
                         src_step_y_q <= step_y;
-                        // sox/soy were computed in dst pixels (1:1
-                        // sense). Multiply by step to get the
-                        // matching Q16.16 advance in src space.
-                        src_x_init_q <= {16'd0, sox} * step_x;
-                        src_y_init_q <= {16'd0, soy} * step_y;
-                        src_x_acc_q  <= {16'd0, sox} * step_x;
-                        src_y_acc_q  <= {16'd0, soy} * step_y;
+                        // sox/soy in dst-pixel units, multiplied by
+                        // the Q16.16 step to convert to src-space.
+                        // Plus a +step/2 bias so the per-pixel
+                        // accumulator samples at the *center* of each
+                        // dst pixel rather than its top-left corner
+                        // — matches PROTOCOL.md §7.4:
+                        //
+                        //   src_x = sx + floor((i + 0.5) * sw / dw)
+                        //
+                        // Without the bias, scaling shifts the
+                        // output up-and-left by half a destination
+                        // pixel; visible at large scale factors and
+                        // when a tween straddles integer src pixels.
+                        src_x_init_q <= ({16'd0, sox} * step_x) + (step_x >> 1);
+                        src_y_init_q <= ({16'd0, soy} * step_y) + (step_y >> 1);
+                        src_x_acc_q  <= ({16'd0, sox} * step_x) + (step_x >> 1);
+                        src_y_acc_q  <= ({16'd0, soy} * step_y) + (step_y >> 1);
                     end else begin
                         scale_mode_q <= 1'b0;
                         src_step_x_q <= 32'h0001_0000;
