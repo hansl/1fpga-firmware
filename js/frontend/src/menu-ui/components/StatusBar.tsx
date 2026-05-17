@@ -7,6 +7,8 @@
 import { useEffect, useState } from 'react';
 import type { CSSProperties } from 'react';
 
+import { Icon } from './Icon';
+
 const rootStyle: CSSProperties = {
   position: 'absolute',
   top: 16,
@@ -74,19 +76,20 @@ export function StatusBar({
   wifi?: 'connected' | 'disconnected' | 'unknown';
 } = {}) {
   const time = useClock();
-  const wifiLabel =
-    wifi === 'connected' ? 'WiFi' : wifi === 'disconnected' ? 'No net' : 'WiFi?';
+  const wifiIcon =
+    wifi === 'connected' ? 'wifi' : wifi === 'disconnected' ? 'wifi_off' : 'wifi';
   return (
     <div style={rootStyle}>
       <div style={cellStyle}>
-        <div style={glyphStyle}>{wifiLabel}</div>
+        <Icon name={wifiIcon} size={24} color="#80c0ff" />
       </div>
       <div style={cellStyle}>
+        <Icon name="account_circle" size={24} color="#80c0ff" />
         <div style={labelStyle}>{user}</div>
       </div>
       {notifications > 0 ? (
         <div style={cellStyle}>
-          <div style={{ ...glyphStyle, color: '#ffd060' }}>!</div>
+          <Icon name="notifications_active" size={24} color="#ffd060" />
           <div style={labelStyle}>{notifications}</div>
         </div>
       ) : null}

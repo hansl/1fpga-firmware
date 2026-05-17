@@ -1,19 +1,29 @@
 // Bottom action hints. Maps a list of (intent, label) pairs to the
-// active input device's glyphs so the same UI reads as "Ⓐ Select"
-// on a gamepad and "↵ Select" on a keyboard, switching live when
-// the user touches a different device.
+// active input device's glyph + label so the same UI reads as
+// "Ⓐ Select" on a gamepad and "↵ Select" on a keyboard, switching
+// live when the user touches a different device.
 
 import type { CSSProperties } from 'react';
 
 import { useInputSource } from '../hooks';
+import { Icon, type IconName } from './Icon';
 
 /** A single hint shown in the bar. `intent` is the semantic action
- *  (`confirm`, `back`, `face_north`, …); the component picks the
- *  glyph based on the current input source. */
+ *  (`confirm`, `back`, `face_north`, …); the bar picks the glyph
+ *  based on the current input source. */
 export interface ActionBinding {
   intent: string;
   label: string;
 }
+
+/** A glyph is either a Material Icons name (rendered through the
+ *  icon font) or a literal text label (rendered with the default
+ *  font). Different intents pick different forms — keyboard arrow
+ *  glyphs are icons, but gamepad button labels like "(A)" stay as
+ *  text until we ship gamepad-button artwork. */
+type GlyphSpec =
+  | { kind: 'icon'; name: IconName }
+  | { kind: 'text'; text: string };
 
 const rootStyle: CSSProperties = {
   position: 'absolute',
@@ -27,7 +37,7 @@ const rootStyle: CSSProperties = {
   flexDirection: 'row',
   alignItems: 'center',
   gap: 32,
-  backgroundColor: '#0008181c', // 'subtle dark strip — close to transparent.
+  backgroundColor: '#0008181c',
 };
 
 const itemStyle: CSSProperties = {
@@ -37,7 +47,7 @@ const itemStyle: CSSProperties = {
   gap: 10,
 };
 
-const glyphStyle: CSSProperties = {
+const textGlyphStyle: CSSProperties = {
   fontSize: 22,
   color: '#ffd060',
 };
@@ -47,78 +57,87 @@ const labelStyle: CSSProperties = {
   color: '#d0d8e0',
 };
 
-/** Resolve `intent` to the printable glyph for `source`. ASCII-only
- *  for now because the bundled font is a heavily subsetted
- *  NotoSans-Regular (Latin only — no arrow / box / symbol blocks).
- *  Will switch to PNG button artwork once we ship a sprite set,
- *  which sidesteps the font issue entirely and gives proper
- *  Xbox-style "Ⓐ" / "Ⓑ" / shoulder-button glyphs. */
-export function glyphFor(intent: string, source: 'keyboard' | 'gamepad' | 'mouse'): string {
+/** Resolve `intent` × source to the glyph that should appear before
+ *  the action's label. Keyboard arrows / Enter / Esc are real icons;
+ *  letter-key fallbacks (Z, X, Q…) and gamepad button labels stay
+ *  as text. Future work: ship a gamepad-button sprite set and
+ *  switch the gamepad cases to icons too. */
+export function glyphFor(
+  intent: string,
+  source: 'keyboard' | 'gamepad' | 'mouse',
+): GlyphSpec | null {
   if (source === 'keyboard') {
     switch (intent) {
-      case 'confirm': return 'Enter';
-      case 'back': return 'Esc';
-      case 'menu': return 'F1';
-      case 'navigate_up': return 'Up';
-      case 'navigate_down': return 'Dn';
-      case 'navigate_left': return 'Lt';
-      case 'navigate_right': return 'Rt';
-      case 'navigate_updown': return 'Up/Dn';
-      case 'navigate_leftright': return 'Lt/Rt';
-      case 'face_south': return 'Z';
-      case 'face_east': return 'X';
-      case 'face_west': return 'A';
-      case 'face_north': return 'S';
-      case 'shoulder_l1': return 'Q';
-      case 'shoulder_r1': return 'W';
-      case 'shoulder_l2': return '1';
-      case 'shoulder_r2': return '2';
-      case 'start': return 'F11';
-      case 'select': return 'F12';
-      case 'tab': return 'Tab';
-      default: return '';
+      case 'confirm': return { kind: 'icon', name: 'keyboard_return' };
+      case 'back': return { kind: 'text', text: 'Esc' };
+      case 'menu': return { kind: 'text', text: 'F1' };
+      case 'navigate_up': return { kind: 'icon', name: 'keyboard_arrow_up' };
+      case 'navigate_down': return { kind: 'icon', name: 'keyboard_arrow_down' };
+      case 'navigate_left': return { kind: 'icon', name: 'keyboard_arrow_left' };
+      case 'navigate_right': return { kind: 'icon', name: 'keyboard_arrow_right' };
+      case 'navigate_updown': return { kind: 'icon', name: 'unfold_more' };
+      case 'navigate_leftright': return { kind: 'icon', name: 'compare_arrows' };
+      case 'face_south': return { kind: 'text', text: 'Z' };
+      case 'face_east': return { kind: 'text', text: 'X' };
+      case 'face_west': return { kind: 'text', text: 'A' };
+      case 'face_north': return { kind: 'text', text: 'S' };
+      case 'shoulder_l1': return { kind: 'text', text: 'Q' };
+      case 'shoulder_r1': return { kind: 'text', text: 'W' };
+      case 'shoulder_l2': return { kind: 'text', text: '1' };
+      case 'shoulder_r2': return { kind: 'text', text: '2' };
+      case 'start': return { kind: 'text', text: 'F11' };
+      case 'select': return { kind: 'text', text: 'F12' };
+      case 'tab': return { kind: 'text', text: 'Tab' };
+      default: return null;
     }
   } else if (source === 'gamepad') {
     switch (intent) {
-      // Compass labels — neutral across Xbox / Nintendo layouts.
-      // Real button artwork comes later; the parenthesised single
-      // letters read cleanly in small UI labels.
-      case 'confirm': return '(A)';
-      case 'back': return '(B)';
-      case 'menu': return '(Mode)';
-      case 'navigate_up': return 'D-Up';
-      case 'navigate_down': return 'D-Dn';
-      case 'navigate_left': return 'D-Lt';
-      case 'navigate_right': return 'D-Rt';
-      case 'navigate_updown': return 'D-Pad';
-      case 'navigate_leftright': return 'D-Pad';
-      case 'face_south': return '(A)';
-      case 'face_east': return '(B)';
-      case 'face_west': return '(X)';
-      case 'face_north': return '(Y)';
-      case 'shoulder_l1': return 'L1';
-      case 'shoulder_r1': return 'R1';
-      case 'shoulder_l2': return 'L2';
-      case 'shoulder_r2': return 'R2';
-      case 'start': return 'Start';
-      case 'select': return 'Select';
-      default: return '';
+      case 'confirm': return { kind: 'text', text: '(A)' };
+      case 'back': return { kind: 'text', text: '(B)' };
+      case 'menu': return { kind: 'icon', name: 'menu' };
+      case 'navigate_up': return { kind: 'icon', name: 'keyboard_arrow_up' };
+      case 'navigate_down': return { kind: 'icon', name: 'keyboard_arrow_down' };
+      case 'navigate_left': return { kind: 'icon', name: 'keyboard_arrow_left' };
+      case 'navigate_right': return { kind: 'icon', name: 'keyboard_arrow_right' };
+      case 'navigate_updown': return { kind: 'icon', name: 'unfold_more' };
+      case 'navigate_leftright': return { kind: 'icon', name: 'compare_arrows' };
+      case 'face_south': return { kind: 'text', text: '(A)' };
+      case 'face_east': return { kind: 'text', text: '(B)' };
+      case 'face_west': return { kind: 'text', text: '(X)' };
+      case 'face_north': return { kind: 'text', text: '(Y)' };
+      case 'shoulder_l1': return { kind: 'text', text: 'L1' };
+      case 'shoulder_r1': return { kind: 'text', text: 'R1' };
+      case 'shoulder_l2': return { kind: 'text', text: 'L2' };
+      case 'shoulder_r2': return { kind: 'text', text: 'R2' };
+      case 'start': return { kind: 'text', text: 'Start' };
+      case 'select': return { kind: 'text', text: 'Select' };
+      default: return null;
     }
   } else {
-    return intent === 'confirm' ? 'Click' : '';
+    return intent === 'confirm' ? { kind: 'text', text: 'Click' } : null;
   }
+}
+
+function Glyph({ spec }: { spec: GlyphSpec }) {
+  if (spec.kind === 'icon') {
+    return <Icon name={spec.name} size={22} color="#ffd060" />;
+  }
+  return <div style={textGlyphStyle}>{spec.text}</div>;
 }
 
 export function ActionBar({ actions }: { actions: ActionBinding[] }) {
   const source = useInputSource();
   return (
     <div style={rootStyle}>
-      {actions.map((a) => (
-        <div key={a.intent} style={itemStyle}>
-          <div style={glyphStyle}>{glyphFor(a.intent, source)}</div>
-          <div style={labelStyle}>{a.label}</div>
-        </div>
-      ))}
+      {actions.map((a) => {
+        const spec = glyphFor(a.intent, source);
+        return (
+          <div key={a.intent} style={itemStyle}>
+            {spec ? <Glyph spec={spec} /> : null}
+            <div style={labelStyle}>{a.label}</div>
+          </div>
+        );
+      })}
     </div>
   );
 }

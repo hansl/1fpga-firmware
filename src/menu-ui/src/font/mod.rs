@@ -27,6 +27,16 @@ pub const DEFAULT_FONT_NAME: &str = "default";
 const DEFAULT_FONT_BYTES: &[u8] =
     include_bytes!("../../../menu-core/fonts/NotoSans-Regular.ttf");
 
+/// Material Icons font (Apache 2.0). Registered under this name so
+/// JS can render any of the ~2 000 Material Symbols by writing the
+/// icon's Private Use Area codepoint as a normal text node with
+/// `fontFamily: 'icons'`. A name → codepoint table lives JS-side;
+/// the engine just needs to rasterise the codepoint through
+/// fontdue like any other glyph.
+pub const ICON_FONT_NAME: &str = "icons";
+const ICON_FONT_BYTES: &[u8] =
+    include_bytes!("../../../menu-core/fonts/MaterialIcons-Regular.ttf");
+
 /// Always include `'?'` as the missing-glyph fallback so unknown
 /// codepoints render as a question mark instead of disappearing.
 const FALLBACK_CHAR: char = '?';
@@ -59,6 +69,7 @@ impl Default for FontRegistry {
     fn default() -> Self {
         let mut fonts = HashMap::new();
         fonts.insert(DEFAULT_FONT_NAME.to_string(), DEFAULT_FONT_BYTES.to_vec());
+        fonts.insert(ICON_FONT_NAME.to_string(), ICON_FONT_BYTES.to_vec());
         Self {
             fonts,
             atlases: HashMap::new(),
