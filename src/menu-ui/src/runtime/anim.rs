@@ -172,6 +172,14 @@ pub struct AnimationManager {
 #[derive(Default)]
 struct AnimInner {
     tweens: HashMap<(NodeId, TweenProp), Tween>,
+    /// Last interpolated value applied per (node, property). Persists
+    /// across tween completions and React commits, so `start` can use
+    /// it as the new tween's `from` instead of reading `style.x` —
+    /// which by the time `useLayoutEffect` runs has already been
+    /// overwritten with the new target by `commitUpdate`. Without this
+    /// cache, every tween's `from` equals its `to` and no animation
+    /// happens (the value just snaps).
+    last_values: HashMap<(NodeId, TweenProp), f32>,
 }
 
 impl AnimationManager {
@@ -180,10 +188,11 @@ impl AnimationManager {
     }
 
     /// Start (or replace) a tween. The new tween's `from` is the
-    /// node's *current* value for that property — including any
-    /// in-progress tween's interpolated position — so retargeting
-    /// mid-animation glides smoothly from wherever the tween was
-    /// instead of snapping to the React-committed value.
+    /// last value we *applied* (cached in `last_values`), which
+    /// survives React's `commitUpdate` clobbering `style.x` with the
+    /// new target. First-ever tween for a (node, prop) reads
+    /// `style.x` directly (good enough — there's nothing to animate
+    /// from yet).
     pub fn start(
         &self,
         ui_state: &UiState,
@@ -193,14 +202,22 @@ impl AnimationManager {
         duration: Duration,
         easing: Easing,
     ) {
-        // Look up the current visible value for `prop` on `node_id`.
-        let from = ui_state.with_tree(|t| {
-            t.get(node_id).map(|n| prop.read(&n.style)).unwrap_or(0.0)
-        });
-        if duration.is_zero() {
-            // Degenerate — just apply the target and skip the tween.
+        let mut inner = self.inner.borrow_mut();
+        let from = match inner.last_values.get(&(node_id, prop)).copied() {
+            Some(v) => v,
+            None => ui_state.with_tree(|t| {
+                t.get(node_id).map(|n| prop.read(&n.style)).unwrap_or(0.0)
+            }),
+        };
+        if duration.is_zero() || (from - to).abs() < f32::EPSILON {
+            // Degenerate (zero duration) or no-op (same value): just
+            // apply and skip the tween. Still record `to` as the
+            // last_value so future `start`s see the right baseline.
+            drop(inner);
             apply(ui_state, node_id, prop, to);
-            self.inner.borrow_mut().tweens.remove(&(node_id, prop));
+            let mut inner = self.inner.borrow_mut();
+            inner.tweens.remove(&(node_id, prop));
+            inner.last_values.insert((node_id, prop), to);
             return;
         }
         let tween = Tween {
@@ -210,10 +227,7 @@ impl AnimationManager {
             duration,
             easing,
         };
-        self.inner
-            .borrow_mut()
-            .tweens
-            .insert((node_id, prop), tween);
+        inner.tweens.insert((node_id, prop), tween);
     }
 
     /// Advance every active tween. Returns the number of tweens still
@@ -222,17 +236,30 @@ impl AnimationManager {
     /// changes every iteration even if nothing else moved).
     pub fn tick(&self, ui_state: &UiState) -> usize {
         let now = Instant::now();
-        let mut inner = self.inner.borrow_mut();
-        let mut to_remove: Vec<(NodeId, TweenProp)> = Vec::new();
-        for (&(node_id, prop), tween) in inner.tweens.iter() {
-            let (value, done) = tween.sample(now);
-            apply(ui_state, node_id, prop, value);
-            if done {
-                to_remove.push((node_id, prop));
-            }
+        // Snapshot the tweens first so we can apply (which borrows
+        // ui_state) outside the inner borrow. Each sample produces
+        // both the value to write and the value to cache as
+        // `last_values` for the next tween that targets the same key.
+        let samples: Vec<((NodeId, TweenProp), f32, bool)> = {
+            let inner = self.inner.borrow();
+            inner
+                .tweens
+                .iter()
+                .map(|(&key, tween)| {
+                    let (value, done) = tween.sample(now);
+                    (key, value, done)
+                })
+                .collect()
+        };
+        for &(key, value, _done) in &samples {
+            apply(ui_state, key.0, key.1, value);
         }
-        for key in to_remove {
-            inner.tweens.remove(&key);
+        let mut inner = self.inner.borrow_mut();
+        for &(key, value, done) in &samples {
+            inner.last_values.insert(key, value);
+            if done {
+                inner.tweens.remove(&key);
+            }
         }
         inner.tweens.len()
     }
