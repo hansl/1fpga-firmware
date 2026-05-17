@@ -34,6 +34,10 @@ pub enum TweenProp {
     Opacity,
     ScaleX,
     ScaleY,
+    Top,
+    Right,
+    Bottom,
+    Left,
 }
 
 impl TweenProp {
@@ -42,6 +46,10 @@ impl TweenProp {
             "opacity" => Some(Self::Opacity),
             "scaleX" => Some(Self::ScaleX),
             "scaleY" => Some(Self::ScaleY),
+            "top" => Some(Self::Top),
+            "right" => Some(Self::Right),
+            "bottom" => Some(Self::Bottom),
+            "left" => Some(Self::Left),
             _ => None,
         }
     }
@@ -54,6 +62,12 @@ impl TweenProp {
             Self::Opacity => style.opacity.unwrap_or(1.0),
             Self::ScaleX => style.scale_x.unwrap_or(1.0),
             Self::ScaleY => style.scale_y.unwrap_or(1.0),
+            // Position offsets: 0 is a sensible "no offset" default
+            // for the from-value when the style hasn't committed yet.
+            Self::Top => style.top.unwrap_or(0.0),
+            Self::Right => style.right.unwrap_or(0.0),
+            Self::Bottom => style.bottom.unwrap_or(0.0),
+            Self::Left => style.left.unwrap_or(0.0),
         }
     }
 
@@ -68,6 +82,12 @@ impl TweenProp {
             // nor the layout system handles today.
             Self::ScaleX => patch.scale_x = Some(value.max(0.0)),
             Self::ScaleY => patch.scale_y = Some(value.max(0.0)),
+            // Position offsets: pass through unchanged. Negative
+            // values are CSS-legal (drag an element off-screen).
+            Self::Top => patch.top = Some(value),
+            Self::Right => patch.right = Some(value),
+            Self::Bottom => patch.bottom = Some(value),
+            Self::Left => patch.left = Some(value),
         }
         patch
     }

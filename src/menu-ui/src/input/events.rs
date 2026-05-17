@@ -97,4 +97,22 @@ pub mod keycode {
     pub const END: u16 = 107;
     pub const PAGE_UP: u16 = 104;
     pub const PAGE_DOWN: u16 = 109;
+
+    // Letter keys used as keyboard alternatives for gamepad face /
+    // shoulder buttons. evdev codes from <linux/input-event-codes.h>.
+    pub const A: u16 = 30;
+    pub const S: u16 = 31;
+    pub const Q: u16 = 16;
+    pub const W: u16 = 17;
+    pub const Z: u16 = 44;
+    pub const X: u16 = 45;
+
+    // Number row, used as L2/R2 alternatives.
+    pub const ONE: u16 = 2;
+    pub const TWO: u16 = 3;
+
+    // Function keys, used for menu/start/select alternatives.
+    pub const F1: u16 = 59;
+    pub const F11: u16 = 87;
+    pub const F12: u16 = 88;
 }

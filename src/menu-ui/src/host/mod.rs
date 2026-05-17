@@ -382,7 +382,15 @@ fn start_tween(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
     // We only iterate the known props rather than enumerating every
     // own key of the JS object — keeps the property set explicit and
     // avoids accidentally tweening something we don't yet support.
-    for prop_name in &["opacity", "scaleX", "scaleY"] {
+    for prop_name in &[
+        "opacity",
+        "scaleX",
+        "scaleY",
+        "top",
+        "right",
+        "bottom",
+        "left",
+    ] {
         let v = target_obj.get(js_string!(*prop_name), context)?;
         if v.is_undefined() || v.is_null() {
             continue;

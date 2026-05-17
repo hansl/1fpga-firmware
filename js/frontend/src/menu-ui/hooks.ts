@@ -8,7 +8,7 @@
 // render that triggered them. useLayoutEffect ensures listener
 // registration completes before the runtime's first frame loop tick.
 
-import { useLayoutEffect, useRef } from 'react';
+import { useCallback, useLayoutEffect, useRef, useState } from 'react';
 import * as gui from '1fpga:gui';
 
 export function useIntent(
@@ -110,4 +110,35 @@ export function useTween(
     // intended behaviour.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetKey, optsKey]);
+}
+
+/**
+ * Track the most recently active input source so UI can switch
+ * between keyboard / gamepad / mouse glyph styles. Returns a
+ * lowercase string identifier; the component re-renders whenever
+ * the user touches a *different* input device, but stays stable
+ * within a single device session.
+ *
+ * Common pattern:
+ * ```tsx
+ * const source = useInputSource();
+ * const glyph = source === 'gamepad' ? 'Ⓐ' : '↵';
+ * ```
+ */
+export function useInputSource(initial: 'keyboard' | 'gamepad' | 'mouse' = 'keyboard') {
+  const [source, setSource] = useState<'keyboard' | 'gamepad' | 'mouse'>(initial);
+  const onKb = useCallback(() => setSource((s) => (s === 'keyboard' ? s : 'keyboard')), []);
+  const onPad = useCallback(() => setSource((s) => (s === 'gamepad' ? s : 'gamepad')), []);
+  const onMouse = useCallback(() => setSource((s) => (s === 'mouse' ? s : 'mouse')), []);
+  useLayoutEffect(() => {
+    const a = gui.addRawInputListener('keyboard', onKb, { global: true });
+    const b = gui.addRawInputListener('gamepad', onPad, { global: true });
+    const c = gui.addRawInputListener('mouse', onMouse, { global: true });
+    return () => {
+      gui.removeListener(a);
+      gui.removeListener(b);
+      gui.removeListener(c);
+    };
+  }, [onKb, onPad, onMouse]);
+  return source;
 }
