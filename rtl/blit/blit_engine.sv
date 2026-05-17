@@ -167,6 +167,17 @@ module blit_engine (
     logic [31:0] src_x_init_q;   // Q16.16: initial src_x_acc (clipped sox in src space)
     logic [31:0] src_y_init_q;   // Q16.16: initial src_y_acc
 
+    // One-pixel src cache. In upscale (the typical case) consecutive
+    // dst pixels often map to the same src column — caching the
+    // tinted/computed result and reusing it skips the DDR read +
+    // 64-bit beat wait, which on this design is ~20-40 cycles. Big
+    // win at 1.5x..2x scale; harmless at 1:1 (we just never check).
+    // Reset to invalid at every S_ROW_INIT so a new src_y can't
+    // accidentally hit the previous row's cached x.
+    logic [31:0] cached_src_pixel_q;  // post-tint / post-A8-expand
+    logic [15:0] last_src_col_q;
+    logic        cache_valid_q;
+
     logic [15:0] cur_x, cur_y_off;
     logic [31:0] dst_row_byte_addr;
     logic [31:0] src_row_byte_addr;
@@ -453,6 +464,9 @@ module blit_engine (
             src_y_acc_q       <= '0;
             src_x_init_q      <= '0;
             src_y_init_q      <= '0;
+            cached_src_pixel_q <= '0;
+            last_src_col_q    <= '0;
+            cache_valid_q     <= 1'b0;
             cur_x             <= '0;
             cur_y_off         <= '0;
             dst_row_byte_addr <= '0;
@@ -683,6 +697,11 @@ module blit_engine (
                         // one step per row from S_NEXT_PIXEL's
                         // end-of-row branch.
                         src_x_acc_q <= src_x_init_q;
+                        // New row → src_y changed → cached pixel
+                        // (which was from the previous row's src
+                        // column) is no longer valid for any
+                        // column on this row.
+                        cache_valid_q <= 1'b0;
                         state <= S_NEXT_PIXEL;
                     end
                 end
@@ -702,15 +721,39 @@ module blit_engine (
                         prefetch_ready_q <= 1'b0;
                         state     <= S_ROW_INIT;
                     end else if (mode_q == MODE_COPY && scale_mode_q) begin
-                        // Scale-mode COPY: bursts are off (src reads
-                        // don't stride sequentially in this mode), so
-                        // route straight to the per-pixel fetch path.
-                        // The per-pixel path's existing addressing
-                        // wires (`src_pixel_byte_addr`) already pick
-                        // up the scaled column via `src_col_eff`, and
-                        // `src_x_acc_q` advances one step per pixel
-                        // in S_WRITE_WAIT (the dst write commit).
-                        state <= S_FETCH_SRC;
+                        // Scale-mode COPY: per-pixel reads with a
+                        // 1-pixel src cache. Consecutive dst pixels
+                        // landing on the same src column reuse the
+                        // last fetched (and post-tint / post-A8)
+                        // result — the upscale "read once, write a
+                        // bunch" optimisation. Cache miss falls
+                        // through to the normal per-pixel fetch.
+                        automatic logic [7:0] cached_alpha;
+                        cached_alpha = ch_a(cached_src_pixel_q);
+                        if (cache_valid_q && (src_col_eff == last_src_col_q)) begin
+                            // Mirror S_WAIT_SRC's tail dispatch, but
+                            // using the cached value instead of the
+                            // just-fetched one.
+                            if ((blend_q == BLEND_OPAQUE)
+                                || ((blend_q == BLEND_SRCALPHA)
+                                    && (cached_alpha == 8'hFF))) begin
+                                pixel_data <= cached_src_pixel_q;
+                                state      <= S_WRITE;
+                            end else if ((blend_q == BLEND_SRCALPHA)
+                                         && (cached_alpha == 8'h00)) begin
+                                // Fully transparent: dst unchanged.
+                                // Same per-pixel step bump as the
+                                // alpha-zero path in S_WAIT_SRC.
+                                cur_x <= cur_x + 16'd1;
+                                src_x_acc_q <= src_x_acc_q + src_step_x_q;
+                                state <= S_NEXT_PIXEL;
+                            end else begin
+                                src_pixel_q <= cached_src_pixel_q;
+                                state       <= S_FETCH_DST;
+                            end
+                        end else begin
+                            state <= S_FETCH_SRC;
+                        end
                     end else if (mode_q == MODE_COPY) begin
                         // Burst-COPY dispatch: pick the largest aligned
                         // burst that fits the remainder of the row.
@@ -884,6 +927,19 @@ module blit_engine (
                         end
                     end
                     src_alpha = ch_a(computed_src);
+
+                    // Populate the 1-pixel src cache in scale mode
+                    // so the next consecutive dst pixel landing on
+                    // the same src column can short-circuit the
+                    // entire fetch+wait round-trip. Cache is reset
+                    // at S_ROW_INIT, so cross-row reuse is off (a
+                    // future enhancement could keep a small row
+                    // buffer; not worth it at our current sizes).
+                    if (scale_mode_q) begin
+                        cached_src_pixel_q <= computed_src;
+                        last_src_col_q     <= src_col_eff;
+                        cache_valid_q      <= 1'b1;
+                    end
 
                     // Fast paths for SrcAlpha — saves DDRAM round-trips
                     // for the common cases at glyph edges and interiors.
