@@ -47,22 +47,24 @@ const labelStyle: CSSProperties = {
   color: '#d0d8e0',
 };
 
-/** Resolve `intent` to the printable glyph for `source`. Returns
- *  empty string for unmapped intents — the caller still renders the
- *  label, which is enough to convey meaning until we ship per-button
- *  artwork. */
+/** Resolve `intent` to the printable glyph for `source`. ASCII-only
+ *  for now because the bundled font is a heavily subsetted
+ *  NotoSans-Regular (Latin only — no arrow / box / symbol blocks).
+ *  Will switch to PNG button artwork once we ship a sprite set,
+ *  which sidesteps the font issue entirely and gives proper
+ *  Xbox-style "Ⓐ" / "Ⓑ" / shoulder-button glyphs. */
 export function glyphFor(intent: string, source: 'keyboard' | 'gamepad' | 'mouse'): string {
   if (source === 'keyboard') {
     switch (intent) {
-      case 'confirm': return '↵';
+      case 'confirm': return 'Enter';
       case 'back': return 'Esc';
       case 'menu': return 'F1';
-      case 'navigate_up': return '↑';
-      case 'navigate_down': return '↓';
-      case 'navigate_left': return '←';
-      case 'navigate_right': return '→';
-      case 'navigate_updown': return '↑↓';
-      case 'navigate_leftright': return '←→';
+      case 'navigate_up': return 'Up';
+      case 'navigate_down': return 'Dn';
+      case 'navigate_left': return 'Lt';
+      case 'navigate_right': return 'Rt';
+      case 'navigate_updown': return 'Up/Dn';
+      case 'navigate_leftright': return 'Lt/Rt';
       case 'face_south': return 'Z';
       case 'face_east': return 'X';
       case 'face_west': return 'A';
@@ -84,12 +86,12 @@ export function glyphFor(intent: string, source: 'keyboard' | 'gamepad' | 'mouse
       case 'confirm': return '(A)';
       case 'back': return '(B)';
       case 'menu': return '(Mode)';
-      case 'navigate_up': return 'D↑';
-      case 'navigate_down': return 'D↓';
-      case 'navigate_left': return 'D←';
-      case 'navigate_right': return 'D→';
-      case 'navigate_updown': return 'D↑↓';
-      case 'navigate_leftright': return 'D←→';
+      case 'navigate_up': return 'D-Up';
+      case 'navigate_down': return 'D-Dn';
+      case 'navigate_left': return 'D-Lt';
+      case 'navigate_right': return 'D-Rt';
+      case 'navigate_updown': return 'D-Pad';
+      case 'navigate_leftright': return 'D-Pad';
       case 'face_south': return '(A)';
       case 'face_east': return '(B)';
       case 'face_west': return '(X)';

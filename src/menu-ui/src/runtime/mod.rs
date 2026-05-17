@@ -13,9 +13,7 @@ use tracing::{debug, error, info};
 
 use menu_core_host::device::{Device, DeviceConfig, FramebufferConfig};
 use menu_core_host::error::DeviceError;
-use menu_core_host::frame::Frame;
 use menu_core_host::mem;
-use menu_core_host::protocol::{BlendMode, Rect, Rgba};
 
 use crate::font::{FontError, FontRegistry};
 use crate::host::UiState;
@@ -34,29 +32,6 @@ use boa_engine::{JsObject, JsValue};
 /// (Git hash via build.rs is a future improvement.)
 pub const BUILD_ID: &str = env!("CARGO_PKG_VERSION");
 
-/// "Build canary" — paints a small color-cycling square in the
-/// top-right corner of every frame so a glance at the screen confirms
-/// the loop is alive AND the binary is fresh. Cycles through 6 colors
-/// every 6 frames (≈100 ms at 60 fps).
-fn paint_canary<'a>(
-    frame: Frame<'a>,
-    fb: &FramebufferConfig,
-    frame_idx: u32,
-) -> Result<Frame<'a>, DeviceError> {
-    const SIZE: u16 = 24;
-    const PALETTE: [Rgba; 6] = [
-        Rgba::new(0xFF, 0x40, 0x40, 0xFF), // red
-        Rgba::new(0xFF, 0xC0, 0x40, 0xFF), // amber
-        Rgba::new(0xFF, 0xFF, 0x40, 0xFF), // yellow
-        Rgba::new(0x40, 0xFF, 0x40, 0xFF), // green
-        Rgba::new(0x40, 0xC0, 0xFF, 0xFF), // sky
-        Rgba::new(0xC0, 0x40, 0xFF, 0xFF), // violet
-    ];
-    let color = PALETTE[(frame_idx as usize) % PALETTE.len()];
-    let x = fb.width.saturating_sub(SIZE + 8);
-    let y = 8u16;
-    frame.fill_rect_unclipped(Rect::new(x, y, SIZE, SIZE), color, BlendMode::Opaque)
-}
 
 /// Translate one raw event to intents and dispatch JS listeners. Raw
 /// listeners for the event's source also fire (so input boxes /
@@ -695,11 +670,6 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                     )
                 })?,
             };
-            // Canary is painted unclipped at the end so it cycles
-            // even on damage paints where its rect wasn't in the
-            // damage list. The matching copy below ensures the FB
-            // picks it up.
-            let frame = paint_canary(frame, &fb, frame_idx)?;
             scene_hash_in_staging = Some(current_hash);
             staging_scene = Some(current_scene.clone());
             frame
@@ -710,12 +680,6 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         // Copy staging→FB[render_idx]. Damage diff is against this
         // FB's own prior snapshot.
         let frame = frame.set_target_framebuffer()?;
-        let canary_rect = menu_core_host::protocol::Rect::new(
-            fb.width.saturating_sub(32),
-            8,
-            24,
-            24,
-        );
         let fb_damage_plan: Option<Vec<damage::PixelRect>> =
             match &scene_per_fb[render_idx] {
                 Some(prev) => {
@@ -741,14 +705,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                         menu_core_host::frame::CopyOpts::default(),
                     )?;
                 }
-                // Canary always copies — it changes on every paint
-                // iteration and isn't part of the damage diff.
-                frame.copy_rect(
-                    &staging_rt,
-                    canary_rect,
-                    canary_rect,
-                    menu_core_host::frame::CopyOpts::default(),
-                )?
+                frame
             }
             None => frame.copy_rect(
                 &staging_rt,

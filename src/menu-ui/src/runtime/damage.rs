@@ -221,19 +221,33 @@ fn walk(
             }
             NodeKind::Text { content } => {
                 if bbox.w > 0 && bbox.h > 0 {
-                    // paint_text aligns dst.x down to a 16-pixel
-                    // boundary for burst-friendly writes. The actual
-                    // painted area therefore extends up to 15 px
-                    // *left* of the layout's x. Mirror that here so
-                    // damage rects cover the full painted footprint —
-                    // otherwise an OLD-text damage rect leaves a
-                    // sliver of stale pixels at its left edge when
-                    // the new text shifts position.
-                    let painted_bbox = PixelRect {
-                        x: bbox.x & !15,
-                        y: bbox.y,
-                        w: bbox.w,
-                        h: bbox.h,
+                    // Mirror paint_text's dst.x policy exactly:
+                    //
+                    //   - 1:1 (no scaling): align x down to a
+                    //     16-px boundary so the framebuffer write
+                    //     addresses are 64-byte aligned at cur_x=0.
+                    //     The actual painted area extends up to
+                    //     15 px LEFT of layout.x, so the damage
+                    //     rect must too.
+                    //   - Scaled: paint_text uses the raw
+                    //     transformed x (the burst-alignment
+                    //     optimisation doesn't apply in scale-mode
+                    //     anyway — the engine reads per-pixel).
+                    //     Aligning here would push the damage rect
+                    //     LEFT of paint, leaving up to 15 px of
+                    //     stale pixels on the RIGHT that paint
+                    //     draws but damage never covers — visible
+                    //     as fragments after a row whose previous
+                    //     content was wider than the new one.
+                    let painted_bbox = if xf.is_identity() {
+                        PixelRect {
+                            x: bbox.x & !15,
+                            y: bbox.y,
+                            w: bbox.w,
+                            h: bbox.h,
+                        }
+                    } else {
+                        bbox
                     };
                     let mut h = DefaultHasher::new();
                     1u8.hash(&mut h);

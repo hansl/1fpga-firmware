@@ -74,15 +74,14 @@ export function StatusBar({
   wifi?: 'connected' | 'disconnected' | 'unknown';
 } = {}) {
   const time = useClock();
-  const wifiGlyph =
-    wifi === 'connected' ? '▰▰▰' : wifi === 'disconnected' ? '▱▱▱' : '?';
+  const wifiLabel =
+    wifi === 'connected' ? 'WiFi' : wifi === 'disconnected' ? 'No net' : 'WiFi?';
   return (
     <div style={rootStyle}>
       <div style={cellStyle}>
-        <div style={glyphStyle}>{wifiGlyph}</div>
+        <div style={glyphStyle}>{wifiLabel}</div>
       </div>
       <div style={cellStyle}>
-        <div style={glyphStyle}>♦</div>
         <div style={labelStyle}>{user}</div>
       </div>
       {notifications > 0 ? (
