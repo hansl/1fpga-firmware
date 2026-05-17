@@ -1,7 +1,8 @@
-// Vertical list of items for the currently-selected category.
-// Selected item brightens + scales 1.1×; others sit at rest size
-// and dim down. Icons are optional per-item; when present they sit
-// to the left of the label.
+// XMB-style item list: hangs straight down from the selected
+// category's column. The leftmost edge of each row aligns with the
+// selected-category x position; items extend rightward from there.
+// Selected row is brighter and very slightly larger; others sit at
+// rest size and dimmed.
 
 import { memo, useRef } from 'react';
 import type { CSSProperties } from 'react';
@@ -9,18 +10,25 @@ import * as gui from '1fpga:gui';
 
 import { useTween } from '../hooks';
 import type { MenuItem } from '../data';
+import { SELECTED_CATEGORY_X, STRIP_BOTTOM_Y } from './MenuBar';
 
-const ROW_HEIGHT = 80;
-const ICON_SIZE = 56;
+const ROW_HEIGHT = 64;
+const ICON_SIZE = 40;
+/** First row begins this far below the strip's bottom edge. */
+const COLUMN_TOP_OFFSET = 32;
+/** Distance from the selected-category x to where the row content
+ *  starts. Negative-leaning so the icon sits slightly left of
+ *  centre and the text extends rightward, matching how the XMB
+ *  positions items "anchored" to the column. */
+const COLUMN_LEFT_OFFSET = -40;
 
 const rootStyle: CSSProperties = {
   position: 'absolute',
-  top: 320,
-  left: 96,
-  right: 96,
+  top: STRIP_BOTTOM_Y + COLUMN_TOP_OFFSET,
+  left: SELECTED_CATEGORY_X + COLUMN_LEFT_OFFSET,
+  right: 0,
   display: 'flex',
   flexDirection: 'column',
-  gap: 4,
 };
 
 const rowStyle: CSSProperties = {
@@ -28,16 +36,13 @@ const rowStyle: CSSProperties = {
   flexDirection: 'row',
   alignItems: 'center',
   height: ROW_HEIGHT,
-  paddingLeft: 24,
   paddingRight: 24,
-  // Items use absolute scale animation via useTween; the rest
-  // layout stays put.
 };
 
 const iconStyle: CSSProperties = {
   width: ICON_SIZE,
   height: ICON_SIZE,
-  marginRight: 24,
+  marginRight: 16,
 };
 
 const textColStyle: CSSProperties = {
@@ -48,7 +53,7 @@ const textColStyle: CSSProperties = {
 };
 
 const nameStyle: CSSProperties = {
-  fontSize: 28,
+  fontSize: 26,
   color: '#d0d8e0',
 };
 
@@ -58,9 +63,9 @@ const nameSelectedStyle: CSSProperties = {
 };
 
 const subtitleStyle: CSSProperties = {
-  fontSize: 18,
+  fontSize: 16,
   color: '#80909a',
-  marginTop: 4,
+  marginTop: 2,
 };
 
 const Row = memo(function Row({
@@ -70,12 +75,10 @@ const Row = memo(function Row({
   item: MenuItem;
   selected: boolean;
 }) {
-  // Same animation shape as MenuBar but a touch milder; vertical
-  // lists feel claustrophobic when individual rows grow 20%.
   const ref = useRef<gui.NodeId | null>(null);
   useTween(
     ref,
-    { scale: selected ? 1.08 : 1.0, opacity: selected ? 1.0 : 0.55 },
+    { scale: selected ? 1.04 : 1.0, opacity: selected ? 1.0 : 0.5 },
     { duration: 180, easing: 'easeOut' },
   );
   return (
@@ -83,8 +86,8 @@ const Row = memo(function Row({
       ref={ref}
       style={{
         ...rowStyle,
-        scale: selected ? 1.08 : 1.0,
-        opacity: selected ? 1.0 : 0.55,
+        scale: selected ? 1.04 : 1.0,
+        opacity: selected ? 1.0 : 0.5,
       }}
     >
       {item.icon ? <img src={item.icon} style={iconStyle} /> : null}
