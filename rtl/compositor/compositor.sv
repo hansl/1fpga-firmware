@@ -21,15 +21,17 @@
 //  Textured layers are dropped by `scanline_filter`; they light up
 //  in Phase 2b.
 //
-//  Timing: native 1920×1080, 100 MHz pixel clock (= clk_video,
-//  separate from clk_sys via a second PLL output). ASCAL still
-//  accepts arbitrary core-side timing; producing pixels at native
-//  resolution lets text/UI keep their pixel-perfect crispness on a
-//  1080p HDMI sink.
+//  Timing: parameterised via module params (defaults 1920×1080), driven
+//  by clk_video (separate PLL output, default 100 MHz). The framework's
+//  ASCAL block scales this to whatever HDMI mode is active, so the
+//  internal raster doesn't have to match the HDMI sink. The host's
+//  MISTER_FB scanout (FB_EN=1) further bypasses this path for active
+//  rendering — the painter's VGA_* output is only used when FB_EN=0,
+//  so the parameters mostly matter for the dead-weight path and for
+//  consumers that read the synthesised totals.
 //
-//    H: 1920 active + 1500 blank = 3420 total
-//    V: 1080 active +   20 blank = 1100 total
-//    => 100 MHz / (3420 × 1100) ≈ 26.6 Hz
+//  Default: H 1920 active + 1500 blank = 3420 total, V 1080+20=1100,
+//  => 100 MHz / (3420 × 1100) ≈ 26.6 Hz on the compositor's VGA path.
 //
 //  HBlank widened from 600 -> 1500 in Phase 2c step 3 to fit the
 //  dispatcher's worst-case 4-textured pass. Future optimisation:
@@ -58,7 +60,24 @@ module compositor #(
     // The painter pipeline blends them back-to-front: stage 2
     // applies buffer 0 over the solid background, stage 3 applies
     // buffer 1, stage 4 buffer 2, stage 5 buffer 3.
-    parameter int MAX_TEXTURED = 4
+    parameter int MAX_TEXTURED = 4,
+    // Scanout timing. Defaults match the historical "always 1080p"
+    // configuration this core was built for. The compositor's
+    // pixel-clock output (VGA_*) feeds the framework's ASCAL block
+    // which independently scales to the active HDMI mode — so this
+    // is the *internal* raster the core drives, not the HDMI sink's
+    // resolution. The MISTER_FB scanout path (FB_EN=1) actually
+    // bypasses these for active rendering, so changing them only
+    // affects the dead-weight VGA path; the host paints into FBs
+    // of arbitrary size via `configure_framebuffer()`.
+    parameter int H_ACTIVE = 1920,
+    parameter int H_FP     = 60,
+    parameter int H_SYNC   = 40,
+    parameter int H_BP     = 1400,
+    parameter int V_ACTIVE = 1080,
+    parameter int V_FP     = 4,
+    parameter int V_SYNC   = 4,
+    parameter int V_BP     = 12
 ) (
     input  logic        clk,        // CLK_VIDEO == pixel clock (100 MHz)
     input  logic        rst_n,
@@ -115,23 +134,18 @@ module compositor #(
     input  logic [63:0] line_buf_data_i [MAX_TEXTURED-1:0]
 );
 
-    // ---- Timing constants (1920×1080, 100 MHz pixel clock).
+    // ---- Derived timing totals (from module parameters above).
+    // Defaults give native 1920×1080 at the 100 MHz clk_video:
+    //   H: 1920 + 60 + 40 + 1400 = 3420 total
+    //   V: 1080 +  4 +  4 +   12 = 1100 total
+    //   fps = 100 MHz / (3420 × 1100) ≈ 26.6 Hz
     // HBlank widened to 1500 cycles in Phase 2c step 3 to fit the
     // dispatcher's worst case (4 textured layers × ~300 cycles each
     // for moderately-sized BGRA + filter 260 + walk + margin).
-    // VBlank = 20 lines (unchanged; layer_dma fits comfortably).
-    // fps = 100 MHz / (3420 × 1100) ≈ 26.6 Hz.
-    localparam int H_ACTIVE = 1920;
-    localparam int H_FP     = 60;
-    localparam int H_SYNC   = 40;
-    localparam int H_BP     = 1400;
-    localparam int H_TOTAL  = H_ACTIVE + H_FP + H_SYNC + H_BP; // 3420
-
-    localparam int V_ACTIVE = 1080;
-    localparam int V_FP     = 4;
-    localparam int V_SYNC   = 4;
-    localparam int V_BP     = 12;
-    localparam int V_TOTAL  = V_ACTIVE + V_FP + V_SYNC + V_BP; // 1100
+    // VBlank = 20 lines is enough for layer_dma to land all 256
+    // descriptors with margin.
+    localparam int H_TOTAL = H_ACTIVE + H_FP + H_SYNC + H_BP;
+    localparam int V_TOTAL = V_ACTIVE + V_FP + V_SYNC + V_BP;
 
     logic [11:0] hcount;
     logic [11:0] vcount;
