@@ -21,17 +21,18 @@ import * as gui from '1fpga:gui';
 
 import { useTween } from '../hooks';
 import type { MenuItem } from '../data';
+import { s } from '../scale';
 import { SELECTED_CATEGORY_X, STRIP_BOTTOM_Y } from './MenuBar';
 
-const ROW_HEIGHT = 64;
-const ICON_SIZE = 40;
+const ROW_HEIGHT = s(64);
+const ICON_SIZE = s(40);
 /** First row begins this far below the strip's bottom edge. */
-const COLUMN_TOP_OFFSET = 32;
+const COLUMN_TOP_OFFSET = s(32);
 /** Distance from the selected-category x to where the row content
  *  starts. Negative-leaning so the icon sits slightly left of
  *  centre and the text extends rightward, matching how the XMB
  *  positions items "anchored" to the column. */
-const COLUMN_LEFT_OFFSET = -40;
+const COLUMN_LEFT_OFFSET = s(-40);
 
 const rootStyle: CSSProperties = {
   position: 'absolute',
@@ -47,13 +48,13 @@ const rowStyle: CSSProperties = {
   flexDirection: 'row',
   alignItems: 'center',
   height: ROW_HEIGHT,
-  paddingRight: 24,
+  paddingRight: s(24),
 };
 
 const iconStyle: CSSProperties = {
   width: ICON_SIZE,
   height: ICON_SIZE,
-  marginRight: 16,
+  marginRight: s(16),
 };
 
 const textColStyle: CSSProperties = {
@@ -64,7 +65,7 @@ const textColStyle: CSSProperties = {
 };
 
 const nameStyle: CSSProperties = {
-  fontSize: 26,
+  fontSize: s(26),
   color: '#d0d8e0',
 };
 
@@ -74,9 +75,9 @@ const nameSelectedStyle: CSSProperties = {
 };
 
 const subtitleStyle: CSSProperties = {
-  fontSize: 16,
+  fontSize: s(16),
   color: '#80909a',
-  marginTop: 2,
+  marginTop: s(2),
 };
 
 const Row = memo(function Row({

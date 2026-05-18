@@ -6,6 +6,7 @@
 import type { CSSProperties } from 'react';
 
 import { useInputSource } from '../hooks';
+import { s } from '../scale';
 import { Icon, type IconName } from './Icon';
 
 /** A single hint shown in the bar. `intent` is the semantic action
@@ -30,13 +31,13 @@ const rootStyle: CSSProperties = {
   left: 0,
   right: 0,
   bottom: 0,
-  height: 56,
-  paddingLeft: 48,
-  paddingRight: 48,
+  height: s(56),
+  paddingLeft: s(48),
+  paddingRight: s(48),
   display: 'flex',
   flexDirection: 'row',
   alignItems: 'center',
-  gap: 32,
+  gap: s(32),
   backgroundColor: '#0008181c',
 };
 
@@ -44,16 +45,16 @@ const itemStyle: CSSProperties = {
   display: 'flex',
   flexDirection: 'row',
   alignItems: 'center',
-  gap: 10,
+  gap: s(10),
 };
 
 const textGlyphStyle: CSSProperties = {
-  fontSize: 22,
+  fontSize: s(22),
   color: '#ffd060',
 };
 
 const labelStyle: CSSProperties = {
-  fontSize: 20,
+  fontSize: s(20),
   color: '#d0d8e0',
 };
 
@@ -120,7 +121,7 @@ export function glyphFor(
 
 function Glyph({ spec }: { spec: GlyphSpec }) {
   if (spec.kind === 'icon') {
-    return <Icon name={spec.name} size={22} color="#ffd060" />;
+    return <Icon name={spec.name} size={s(22)} color="#ffd060" />;
   }
   return <div style={textGlyphStyle}>{spec.text}</div>;
 }

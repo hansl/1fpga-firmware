@@ -9,6 +9,7 @@ import type { CSSProperties } from 'react';
 
 import { useIntent } from './hooks';
 import { CATEGORIES } from './data';
+import { VW, VH } from './scale';
 import { ActionBar } from './components/ActionBar';
 import { MenuBar } from './components/MenuBar';
 import { MenuColumn } from './components/MenuColumn';
@@ -18,8 +19,8 @@ const ASSETS = '/media/fat/menu_ui_assets';
 
 const root: CSSProperties = {
   position: 'relative',
-  width: 1920,
-  height: 1080,
+  width: VW,
+  height: VH,
   backgroundColor: '#0a0a14',
 };
 
@@ -27,8 +28,8 @@ const bgImageStyle: CSSProperties = {
   position: 'absolute',
   top: 0,
   left: 0,
-  width: 1920,
-  height: 1080,
+  width: VW,
+  height: VH,
   // Wallpaper is pre-darkened during PNG conversion (see
   // src/menu-ui/src/bin/gen_demo_assets.rs) so we can render it
   // fully opaque here. The FPGA blit takes the Opaque blend fast

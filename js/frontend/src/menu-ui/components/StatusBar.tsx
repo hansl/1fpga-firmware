@@ -7,32 +7,33 @@
 import { memo, useEffect, useState } from 'react';
 import type { CSSProperties } from 'react';
 
+import { s } from '../scale';
 import { Icon } from './Icon';
 
 const rootStyle: CSSProperties = {
   position: 'absolute',
-  top: 16,
-  right: 24,
+  top: s(16),
+  right: s(24),
   display: 'flex',
   flexDirection: 'row',
   alignItems: 'center',
-  gap: 24,
+  gap: s(24),
 };
 
 const cellStyle: CSSProperties = {
   display: 'flex',
   flexDirection: 'row',
   alignItems: 'center',
-  gap: 8,
+  gap: s(8),
 };
 
 const glyphStyle: CSSProperties = {
-  fontSize: 22,
+  fontSize: s(22),
   color: '#80c0ff',
 };
 
 const labelStyle: CSSProperties = {
-  fontSize: 20,
+  fontSize: s(20),
   color: '#d0d8e0',
 };
 
@@ -88,15 +89,15 @@ export const StatusBar = memo(function StatusBar({
   return (
     <div style={rootStyle}>
       <div style={cellStyle}>
-        <Icon name={wifiIcon} size={24} color="#80c0ff" />
+        <Icon name={wifiIcon} size={s(24)} color="#80c0ff" />
       </div>
       <div style={cellStyle}>
-        <Icon name="account_circle" size={24} color="#80c0ff" />
+        <Icon name="account_circle" size={s(24)} color="#80c0ff" />
         <div style={labelStyle}>{user}</div>
       </div>
       {notifications > 0 ? (
         <div style={cellStyle}>
-          <Icon name="notifications_active" size={24} color="#ffd060" />
+          <Icon name="notifications_active" size={s(24)} color="#ffd060" />
           <div style={labelStyle}>{notifications}</div>
         </div>
       ) : null}

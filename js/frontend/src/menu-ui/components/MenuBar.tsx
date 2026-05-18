@@ -18,17 +18,15 @@ import * as gui from '1fpga:gui';
 
 import { useTween } from '../hooks';
 import type { MenuCategory } from '../data';
+import { CENTRE_X, s } from '../scale';
 
-const FB_WIDTH = 1920;
-/** Centre of the screen — where the selected category icon lives. */
-const CENTER_X = FB_WIDTH / 2;
-/** Horizontal distance between consecutive category icons. */
-const SLOT_WIDTH = 220;
-/** Strip vertical centre. */
-const STRIP_CENTER_Y = 460;
-const STRIP_HEIGHT = 160;
+/** Horizontal distance between consecutive category icons (design units). */
+const SLOT_WIDTH = s(220);
+/** Strip vertical centre (design units). */
+const STRIP_CENTER_Y = s(460);
+const STRIP_HEIGHT = s(160);
 const STRIP_TOP = STRIP_CENTER_Y - STRIP_HEIGHT / 2;
-const ICON_SIZE = 96;
+const ICON_SIZE = s(96);
 
 const stripFrameStyle: CSSProperties = {
   position: 'absolute',
@@ -63,11 +61,11 @@ const iconStyle: CSSProperties = {
 
 const titleStyle: CSSProperties = {
   position: 'absolute',
-  top: STRIP_TOP - 56,
+  top: STRIP_TOP - s(56),
   left: 0,
   right: 0,
   textAlign: 'center',
-  fontSize: 36,
+  fontSize: s(36),
   color: '#ffffff',
 };
 
@@ -109,9 +107,9 @@ export const MenuBar = memo(function MenuBar({
   selected: number;
 }) {
   // Position the strip so the SELECTED category's slot centres on
-  // CENTER_X. Slot i sits at `inner_left + (i + 0.5) * SLOT_WIDTH`;
-  // solve for inner_left given selected sits at CENTER_X.
-  const targetLeft = CENTER_X - (selected + 0.5) * SLOT_WIDTH;
+  // CENTRE_X. Slot i sits at `inner_left + (i + 0.5) * SLOT_WIDTH`;
+  // solve for inner_left given selected sits at CENTRE_X.
+  const targetLeft = CENTRE_X - (selected + 0.5) * SLOT_WIDTH;
   const ref = useRef<gui.NodeId | null>(null);
   useTween(ref, { left: targetLeft }, { duration: 280, easing: 'easeOut' });
 
@@ -138,5 +136,5 @@ export const MenuBar = memo(function MenuBar({
 
 /** Exported so other components (e.g. MenuColumn) can align with
  *  the selected category's column at screen centre. */
-export const SELECTED_CATEGORY_X = CENTER_X;
+export const SELECTED_CATEGORY_X = CENTRE_X;
 export const STRIP_BOTTOM_Y = STRIP_TOP + STRIP_HEIGHT;

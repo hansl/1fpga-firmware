@@ -245,6 +245,20 @@ declare module '1fpga:gui' {
   export function fps(): number;
 
   /**
+   * The render-target dimensions configured at startup. JS layouts
+   * should size everything relative to these so the same bundle
+   * works at 1080p / 720p / 480p / 320×240 without code changes.
+   * The framework's ASCAL block handles the upscale from the FB to
+   * the active HDMI mode, so a smaller render target trades visual
+   * crispness for proportionally less per-frame DDR3 work.
+   */
+  export interface Viewport {
+    width: number;
+    height: number;
+  }
+  export function viewport(): Viewport;
+
+  /**
    * Schedule `cb` for invocation on the next frame. The callback fires
    * once and receives the current high-resolution timestamp (ms since
    * runtime start), matching the browser `DOMHighResTimeStamp` shape.
