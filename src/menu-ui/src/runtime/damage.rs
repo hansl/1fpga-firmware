@@ -78,6 +78,29 @@ impl PixelRect {
             && sx2 <= ox2
             && sy2 <= oy2
     }
+
+    #[inline]
+    fn area(&self) -> u64 {
+        (self.w as u64) * (self.h as u64)
+    }
+
+    /// Smallest axis-aligned rect containing both `self` and `other`.
+    fn union_with(&self, other: &PixelRect) -> PixelRect {
+        let ax2 = self.x as u32 + self.w as u32;
+        let ay2 = self.y as u32 + self.h as u32;
+        let bx2 = other.x as u32 + other.w as u32;
+        let by2 = other.y as u32 + other.h as u32;
+        let x = (self.x as u32).min(other.x as u32);
+        let y = (self.y as u32).min(other.y as u32);
+        let w = ax2.max(bx2) - x;
+        let h = ay2.max(by2) - y;
+        PixelRect {
+            x: x.min(u16::MAX as u32) as u16,
+            y: y.min(u16::MAX as u32) as u16,
+            w: w.min(u16::MAX as u32) as u16,
+            h: h.min(u16::MAX as u32) as u16,
+        }
+    }
 }
 
 impl From<PixelRect> for Rect {
@@ -352,7 +375,58 @@ pub fn compute_damage(prev: &PaintedScene, cur: &PaintedScene) -> Vec<PixelRect>
         }
     }
 
-    dedupe_contained(rects)
+    let rects = dedupe_contained(rects);
+    coalesce_nearby(rects)
+}
+
+/// Greedily merge rects whose union "wastes" little extra area beyond
+/// the two inputs. For navigation-style damage — a horizontal slide
+/// producing 6 icons × 2 positions, or a column fade producing 8 row
+/// rects — the inputs cluster spatially, so each merge is nearly
+/// free in pixel area but eliminates one per-rect paint walk +
+/// copy_rect dispatch downstream. Iterates until no remaining pair
+/// satisfies the waste budget. O(N²) per pass; N typically <20.
+///
+/// Tuning knob: a merge is accepted when
+///     `union.area <= (a.area + b.area) * (1 + SLOP)`
+/// i.e., the merged rect can be at most `SLOP` larger than the sum of
+/// the two it replaced. Generous enough to combine abutting/aligned
+/// strips, tight enough to avoid joining far-apart corners into a
+/// near-fullscreen rect (which would defeat damage tracking).
+fn coalesce_nearby(mut rects: Vec<PixelRect>) -> Vec<PixelRect> {
+    const SLOP: f64 = 0.50;
+    if rects.len() <= 1 {
+        return rects;
+    }
+    loop {
+        let n = rects.len();
+        let mut best: Option<(usize, usize, PixelRect)> = None;
+        let mut best_waste: i64 = i64::MAX;
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let u = rects[i].union_with(&rects[j]);
+                let combined = (rects[i].area() + rects[j].area()) as i64;
+                let waste = u.area() as i64 - combined;
+                // Accept only when the merged rect grows by at most
+                // SLOP × combined. `waste < 0` shouldn't happen for
+                // dedupe_contained survivors but is treated as "great
+                // merge".
+                let budget = (combined as f64 * SLOP) as i64;
+                if waste <= budget && waste < best_waste {
+                    best_waste = waste;
+                    best = Some((i, j, u));
+                }
+            }
+        }
+        match best {
+            Some((i, j, u)) => {
+                rects[i] = u;
+                rects.swap_remove(j);
+            }
+            None => break,
+        }
+    }
+    rects
 }
 
 /// Drop any rect that is fully contained in another rect of the
@@ -456,6 +530,29 @@ mod tests {
     }
 
     #[test]
+    fn coalesces_aligned_horizontal_strip() {
+        // 6 icons in a horizontal strip, each 200×200 with a 20px
+        // gap. Coalescing should merge them all into one 1300×200
+        // rect (or close to it) because each pairwise merge wastes
+        // only the inter-icon gaps.
+        let icons: Vec<PixelRect> =
+            (0..6).map(|i| r(100 + i * 220, 200, 200, 200)).collect();
+        let merged = coalesce_nearby(icons);
+        assert!(merged.len() <= 2, "expected ≤2, got {merged:?}");
+    }
+
+    #[test]
+    fn does_not_merge_far_apart_corners() {
+        // Two small rects in opposite corners: their union would
+        // cover essentially the whole screen, which would defeat
+        // damage tracking. Coalescing should leave them alone.
+        let a = r(0, 0, 50, 50);
+        let b = r(1800, 1000, 50, 50);
+        let merged = coalesce_nearby(vec![a, b]);
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
     fn damage_includes_old_and_new_when_bbox_changes() {
         let prev = PaintedScene {
             items: vec![PaintedItem {
@@ -472,8 +569,11 @@ mod tests {
             }],
         };
         let damage = compute_damage(&prev, &cur);
-        assert_eq!(damage.len(), 2);
-        assert!(damage.contains(&r(0, 0, 100, 100)));
-        assert!(damage.contains(&r(50, 50, 100, 100)));
+        // Coalescing may merge the old + new bbox into a single
+        // covering rect when they overlap heavily. Either form is
+        // correct — what matters is that the union covers both.
+        let union = union_rects(&damage).expect("non-empty damage");
+        assert!(r(0, 0, 100, 100).contained_in(&union));
+        assert!(r(50, 50, 100, 100).contained_in(&union));
     }
 }
