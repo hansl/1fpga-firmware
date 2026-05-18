@@ -108,6 +108,12 @@ export function iconCodepoint(name: IconName): string {
   return CODEPOINTS[name];
 }
 
+/** Every codepoint in the HEX table, packed into a single string.
+ *  Used by [`../index.tsx`]'s startup warmup so the icons atlas is
+ *  fully populated before the first render — no per-nav rebuilds when
+ *  a previously-unseen Icon appears. */
+export const ALL_ICON_CODEPOINTS: string = Object.values(CODEPOINTS).join('');
+
 interface IconProps {
   name: IconName;
   size?: number;
