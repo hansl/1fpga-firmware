@@ -434,13 +434,18 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     // shape close enough for our use cases.
     let raf_epoch = std::time::Instant::now();
 
-    // Per-FB content hash (fast skip check).
-    let mut scene_hash_per_fb: [Option<u64>; 3] = [None, None, None];
-    // Per-FB PaintedScene snapshot (drives the damage diff for the
-    // staging→FB copy step — only the rects that differ since this
-    // FB was last targeted get re-copied).
-    let mut scene_per_fb: [Option<damage::PaintedScene>; 3] =
-        [None, None, None];
+    // Single FB tracker — *not* per-render_idx. The FB slot pointers
+    // are aliased to the same physical address (see
+    // `damage.rs`'s top-level comment), so what's in memory at any
+    // moment is whatever the last *frame* painted regardless of
+    // which render_idx that frame used. Tracking per-slot would
+    // make the diff a 3-frame-old stale snapshot for an FB we
+    // rotated through, which both over-counts damage (icons that
+    // slid past in the meantime) and under-counts it (regions that
+    // matched 3 frames ago but were overwritten in between). One
+    // global snapshot is both correct and minimal.
+    let mut last_fb_hash: Option<u64> = None;
+    let mut last_fb_scene: Option<damage::PaintedScene> = None;
     // Hash + scene of what's currently rendered into the staging RT.
     // staging_scene drives the damage diff for the *paint* step;
     // staging_hash is the fast skip check.
@@ -469,6 +474,16 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     let mut t_paint = Duration::ZERO;
     let mut t_fence = Duration::ZERO;
     let mut t_scanout = Duration::ZERO;
+    // Damage-stage accounting: lets us see whether a high fence is
+    // caused by big damage areas or per-rect dispatch overhead.
+    // `staging_*` reflect what was painted into the staging RT this
+    // frame; `fb_*` reflect what was copied to FB.
+    let mut sum_staging_rect_count: u64 = 0;
+    let mut sum_staging_area_px: u64 = 0;
+    let mut sum_fb_rect_count: u64 = 0;
+    let mut sum_fb_area_px: u64 = 0;
+    let mut count_staging_full_paints: u32 = 0;
+    let mut count_fb_full_copies: u32 = 0;
 
     while running.load(Ordering::SeqCst) {
         let t0 = Instant::now();
@@ -575,20 +590,21 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         let t6 = Instant::now();
 
         // 6. Build the current PaintedScene snapshot, and skip
-        //    everything when this FB already has it. Computing the
-        //    scene is cheap (just a tree walk + small Vec) and gives
-        //    us both the fast skip-hash and the structure damage
-        //    needs to diff against the prior state.
-        let render_idx = (device.fb_state().render as usize).min(2);
+        //    everything when the FB already has it (memory hasn't
+        //    changed since the last frame, and the desired scene
+        //    matches what's there). Computing the scene is cheap
+        //    (just a tree walk + small Vec) and gives us both the
+        //    fast skip-hash and the structure damage needs to diff
+        //    against the prior state.
         let opacities = ui_state.with_tree(|tree| crate::style::resolve_opacity(tree, root));
         let transforms = ui_state.with_tree(|tree| crate::style::resolve_transforms(tree, root));
         let current_scene = ui_state.with_tree(|tree| {
             damage::compute_scene(tree, root, &layouts, &text_styles, &opacities, &transforms)
         });
         let current_hash = current_scene.hash();
-        if scene_hash_per_fb[render_idx] == Some(current_hash) {
-            // This FB already has the desired content. Sleep ~one
-            // vsync to bound the loop and continue.
+        if last_fb_hash == Some(current_hash) {
+            // FB memory already matches the desired scene. Sleep
+            // ~one vsync to bound the loop and continue.
             fps_counter.record_frame();
             std::thread::sleep(Duration::from_millis(16));
             continue;
@@ -602,17 +618,21 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         //       per-rect clipped paints. The blit engine evaluates
         //       dst ∩ clip up front, so an op fully outside the clip
         //       produces zero DDR work.
-        //    b. Copy staging→FB[render_idx]. Either one full-screen
-        //       copy or a copy per damage rect (relative to the
-        //       prior contents of THIS FB).
-        //
-        //    Each damage diff is computed against the destination's
-        //    own prior snapshot — staging diffs against staging's
-        //    last scene, FB diffs against this FB's last scene. The
-        //    three FBs progress independently, which is why they each
-        //    need their own snapshot.
+        //    b. Copy staging→FB. Either one full-screen copy or a
+        //       copy per damage rect (relative to FB's last-frame
+        //       snapshot — see `last_fb_scene`'s declaration for why
+        //       there's no per-render_idx tracking).
         let frame = device.begin_frame();
         let frame = crate::paint::render_pending_text(frame, &pendings, &fonts)?;
+
+        // Track what we actually painted/copied this frame so the
+        // timing log can report damage areas alongside the fence.
+        let mut staging_rect_count: u32 = 0;
+        let mut staging_area_px: u64 = 0;
+        let mut staging_full_paint = false;
+        let mut fb_rect_count: u32 = 0;
+        let mut fb_area_px: u64 = 0;
+        let mut fb_full_copy = false;
 
         let frame = if scene_hash_in_staging != Some(current_hash) {
             let frame = frame.set_target(&staging_rt)?;
@@ -631,6 +651,8 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
             };
             let frame = match damage_paint_plan {
                 Some(rects) => {
+                    staging_rect_count = rects.len() as u32;
+                    staging_area_px = damage::total_area(&rects);
                     // Per-rect clipped paint. clear_clip after each
                     // rect so the next rect's set_clip replaces it
                     // cleanly (not unions/intersects with it).
@@ -655,20 +677,25 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                     }
                     frame
                 }
-                None => ui_state.with_tree(|tree| {
-                    crate::paint::paint(
-                        tree,
-                        root,
-                        &fb,
-                        &layouts,
-                        &text_styles,
-                        &text_cache,
-                        &images,
-                        &opacities,
-                        &transforms,
-                        frame,
-                    )
-                })?,
+                None => {
+                    staging_full_paint = true;
+                    staging_rect_count = 1;
+                    staging_area_px = fb_area;
+                    ui_state.with_tree(|tree| {
+                        crate::paint::paint(
+                            tree,
+                            root,
+                            &fb,
+                            &layouts,
+                            &text_styles,
+                            &text_cache,
+                            &images,
+                            &opacities,
+                            &transforms,
+                            frame,
+                        )
+                    })?
+                }
             };
             scene_hash_in_staging = Some(current_hash);
             staging_scene = Some(current_scene.clone());
@@ -677,11 +704,12 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
             frame
         };
 
-        // Copy staging→FB[render_idx]. Damage diff is against this
-        // FB's own prior snapshot.
+        // Copy staging→FB. Damage diff is against the single global
+        // last_fb_scene snapshot (NOT a per-render_idx slot — see
+        // last_fb_scene's declaration).
         let frame = frame.set_target_framebuffer()?;
         let fb_damage_plan: Option<Vec<damage::PixelRect>> =
-            match &scene_per_fb[render_idx] {
+            match &last_fb_scene {
                 Some(prev) => {
                     let d = damage::compute_damage(prev, &current_scene);
                     let area = damage::total_area(&d);
@@ -695,6 +723,8 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
             };
         let frame = match fb_damage_plan {
             Some(rects) => {
+                fb_rect_count = rects.len() as u32;
+                fb_area_px = damage::total_area(&rects);
                 let mut frame = frame;
                 for r in &rects {
                     let rect: menu_core_host::protocol::Rect = (*r).into();
@@ -707,12 +737,17 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                 }
                 frame
             }
-            None => frame.copy_rect(
-                &staging_rt,
-                menu_core_host::protocol::Rect::new(0, 0, fb.width, fb.height),
-                menu_core_host::protocol::Rect::new(0, 0, fb.width, fb.height),
-                menu_core_host::frame::CopyOpts::default(),
-            )?,
+            None => {
+                fb_full_copy = true;
+                fb_rect_count = 1;
+                fb_area_px = fb_area;
+                frame.copy_rect(
+                    &staging_rt,
+                    menu_core_host::protocol::Rect::new(0, 0, fb.width, fb.height),
+                    menu_core_host::protocol::Rect::new(0, 0, fb.width, fb.height),
+                    menu_core_host::frame::CopyOpts::default(),
+                )?
+            }
         };
 
         let t7 = Instant::now();
@@ -720,10 +755,21 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         let (_count, fence_dt, scanout_dt) =
             frame.present()?.submit()?.wait_presented_timed(timeout)?;
 
-        scene_hash_per_fb[render_idx] = Some(current_hash);
-        scene_per_fb[render_idx] = Some(current_scene);
+        last_fb_hash = Some(current_hash);
+        last_fb_scene = Some(current_scene);
         ui_state.with_tree_mut(|t| t.clear_dirty());
         fps_counter.record_frame();
+
+        sum_staging_rect_count += staging_rect_count as u64;
+        sum_staging_area_px += staging_area_px;
+        sum_fb_rect_count += fb_rect_count as u64;
+        sum_fb_area_px += fb_area_px;
+        if staging_full_paint {
+            count_staging_full_paints += 1;
+        }
+        if fb_full_copy {
+            count_fb_full_copies += 1;
+        }
 
         t_jobs += t1 - t0;
         t_input += t2 - t1;
@@ -753,6 +799,28 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                 avg(t_scanout),
                 avg(t_jobs + t_input + t_text_prep + t_images + t_text_pop + t_layout + t_paint + t_fence + t_scanout),
             );
+            // Damage / pixel accounting. "rects" is average rect count
+            // per frame (after coalescing); "area_pct" is average
+            // damaged pixels per frame as a percentage of the FB;
+            // "full" is the number of frames in this window that
+            // fell back to a full repaint / full copy (above the
+            // 70 % threshold or first-frame). Lets us correlate fence
+            // cost with the actual painted area, separately for the
+            // staging-RT paint step and the staging→FB copy step.
+            let pct = |area: u64| {
+                if fb_area == 0 { 0u32 } else {
+                    ((area * 100) / (fb_area * n as u64)) as u32
+                }
+            };
+            tracing::info!(
+                "damage avg over {n}: staging rects={:.1} area={}% full={} | fb rects={:.1} area={}% full={}",
+                (sum_staging_rect_count as f32) / (n as f32),
+                pct(sum_staging_area_px),
+                count_staging_full_paints,
+                (sum_fb_rect_count as f32) / (n as f32),
+                pct(sum_fb_area_px),
+                count_fb_full_copies,
+            );
             t_jobs = Duration::ZERO;
             t_input = Duration::ZERO;
             t_text_prep = Duration::ZERO;
@@ -762,6 +830,12 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
             t_paint = Duration::ZERO;
             t_fence = Duration::ZERO;
             t_scanout = Duration::ZERO;
+            sum_staging_rect_count = 0;
+            sum_staging_area_px = 0;
+            sum_fb_rect_count = 0;
+            sum_fb_area_px = 0;
+            count_staging_full_paints = 0;
+            count_fb_full_copies = 0;
         }
     }
 
