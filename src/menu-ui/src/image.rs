@@ -46,6 +46,14 @@ pub enum CachedImage {
         texture: TextureHandle,
         width: u16,
         height: u16,
+        /// True when every pixel in the source had alpha == 0xFF (or
+        /// the source format has no alpha channel at all). Lets the
+        /// paint path pick the Opaque blend fast path, which is
+        /// write-only — half the DDR traffic of SrcAlpha for these
+        /// images. The wallpaper is the dominant example: with
+        /// SrcAlpha its 1920×1080 paint costs ~28 ms per frame (read
+        /// + write), with Opaque ~14 ms (write only).
+        fully_opaque: bool,
     },
     Failed {
         reason: String,
@@ -72,10 +80,11 @@ impl ImageRegistry {
             return entry.clone();
         }
         let entry = match decode_and_upload(device, src) {
-            Ok((texture, width, height)) => CachedImage::Loaded {
+            Ok((texture, width, height, fully_opaque)) => CachedImage::Loaded {
                 texture,
                 width,
                 height,
+                fully_opaque,
             },
             Err(e) => {
                 tracing::warn!("image '{src}' failed to load: {e}");
@@ -99,7 +108,7 @@ impl ImageRegistry {
 fn decode_and_upload(
     device: &mut Device,
     src: &str,
-) -> Result<(TextureHandle, u16, u16), ImageError> {
+) -> Result<(TextureHandle, u16, u16, bool), ImageError> {
     let file = std::fs::File::open(Path::new(src)).map_err(|e| ImageError::Io {
         path: src.to_string(),
         source: e,
@@ -134,6 +143,17 @@ fn decode_and_upload(
         detail: d,
     })?;
 
+    // RGB / Grayscale sources always become alpha=0xFF; RGBA /
+    // GrayscaleAlpha need a scan. Scanning the converted BGRA is
+    // straightforward — every 4th byte is the alpha.
+    let fully_opaque = match info.color_type {
+        png::ColorType::Rgb | png::ColorType::Grayscale => true,
+        png::ColorType::Rgba | png::ColorType::GrayscaleAlpha => {
+            pixels.chunks_exact(4).all(|px| px[3] == 0xFF)
+        }
+        png::ColorType::Indexed => false,
+    };
+
     let texture = device
         .upload_texture(&TextureSpec {
             format: TextureFormat::Rgba8888,
@@ -147,13 +167,14 @@ fn decode_and_upload(
             source: e,
         })?;
     tracing::info!(
-        "image '{}' loaded: {}x{}, tex_id={}",
+        "image '{}' loaded: {}x{}, tex_id={}, opaque={}",
         src,
         width,
         height,
-        texture.id
+        texture.id,
+        fully_opaque,
     );
-    Ok((texture, width, height))
+    Ok((texture, width, height, fully_opaque))
 }
 
 /// Convert PNG-decoded bytes to in-memory BGRA8888 (the FB / texture

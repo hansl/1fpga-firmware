@@ -210,11 +210,12 @@ fn paint_img<'a>(
     xf: Transform,
     frame: Frame<'a>,
 ) -> Result<Frame<'a>, DeviceError> {
-    let cached = match images.get(src) {
-        Some(CachedImage::Loaded { texture, width, height }) => (*texture, *width, *height),
+    let (texture, src_w, src_h, fully_opaque) = match images.get(src) {
+        Some(CachedImage::Loaded { texture, width, height, fully_opaque }) => {
+            (*texture, *width, *height, *fully_opaque)
+        }
         _ => return Ok(frame),
     };
-    let (texture, src_w, src_h) = cached;
     if src_w == 0 || src_h == 0 || lay.w < 0.5 || lay.h < 0.5 {
         return Ok(frame);
     }
@@ -225,15 +226,22 @@ fn paint_img<'a>(
         clamp_u16(tw),
         clamp_u16(th),
     );
+    // Pick the cheapest correct blend. Opaque is write-only; SrcAlpha
+    // needs a dst read + math + write. For a fully-opaque image
+    // rendered at opacity 1.0 the two produce identical pixels, but
+    // Opaque has half the DDR traffic — load-bearing for the
+    // full-screen wallpaper (1920×1080 → ~14 ms vs ~28 ms per paint).
+    let blend = if fully_opaque && opacity_u8 == 0xFF {
+        BlendMode::Opaque
+    } else {
+        BlendMode::SrcAlpha
+    };
     frame.copy_rect(
         &texture,
         Rect::new(0, 0, src_w, src_h),
         dst,
         CopyOpts {
-            // Use SrcAlpha so PNGs with transparency composite over
-            // whatever's behind them. Fully-opaque images degrade
-            // gracefully (alpha=255 → out = src).
-            blend: BlendMode::SrcAlpha,
+            blend,
             filter: Filter::Nearest,
             tint: opacity_tint(opacity_u8),
         },
