@@ -391,11 +391,20 @@ pub fn compute_damage(prev: &PaintedScene, cur: &PaintedScene) -> Vec<PixelRect>
 /// Tuning knob: a merge is accepted when
 ///     `union.area <= (a.area + b.area) * (1 + SLOP)`
 /// i.e., the merged rect can be at most `SLOP` larger than the sum of
-/// the two it replaced. Generous enough to combine abutting/aligned
-/// strips, tight enough to avoid joining far-apart corners into a
-/// near-fullscreen rect (which would defeat damage tracking).
+/// the two it replaced.
+///
+/// `SLOP = 4.0` (aggressive). Bumped up from the original 0.5 because
+/// recent timing data showed the FPGA `fence` doesn't scale with
+/// painted pixel area — it scales with the *number of damage rects*.
+/// Each rect costs ~15-18 ms of fence regardless of how big it is,
+/// suggesting per-rect setup (set_clip + tree-walk dispatch + DDR3 row
+/// activation) dominates over per-pixel work. Generous coalescing lets
+/// us spend a bit more painted area in exchange for far fewer rects;
+/// the union check at the call site still falls back to a single full
+/// paint above the 70 % threshold, so we can't accidentally union-grow
+/// past that ceiling.
 fn coalesce_nearby(mut rects: Vec<PixelRect>) -> Vec<PixelRect> {
-    const SLOP: f64 = 0.50;
+    const SLOP: f64 = 4.0;
     if rects.len() <= 1 {
         return rects;
     }
