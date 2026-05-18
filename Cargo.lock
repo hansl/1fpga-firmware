@@ -3430,6 +3430,7 @@ dependencies = [
  "evdev",
  "fontdue",
  "futures-lite",
+ "image",
  "menu-core-host",
  "png 0.17.16",
  "taffy",

@@ -36,6 +36,7 @@ ctrlc = "3.4"
 evdev = "0.13"
 fontdue = "0.9"
 futures-lite = "2"
+image = { workspace = true }
 menu-core-host = { workspace = true }
 png = "0.17"
 taffy = { version = "0.10", default-features = false, features = ["std", "flexbox", "block_layout", "taffy_tree"] }

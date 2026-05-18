@@ -29,11 +29,12 @@ const bgImageStyle: CSSProperties = {
   left: 0,
   width: 1920,
   height: 1080,
-  // Dim the wallpaper slightly so the UI on top reads cleanly.
-  // True per-pixel "tint darker" needs FPGA work; for now we lean
-  // on opacity over the dark root background to get the same
-  // visual effect cheaply.
-  opacity: 0.55,
+  // Wallpaper is pre-darkened during PNG conversion (see
+  // src/menu-ui/src/bin/gen_demo_assets.rs) so we can render it
+  // fully opaque here. The FPGA blit takes the Opaque blend fast
+  // path — no dst read per pixel — which more than halves the
+  // background's per-frame DDR3 traffic vs. the previous
+  // `opacity: 0.55 over root_bg` approach.
 };
 
 export function App() {

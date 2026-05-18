@@ -16,18 +16,81 @@ const BG_H: u32 = 1080;
 const ICON: u32 = 128;
 
 fn main() -> std::io::Result<()> {
-    let out_dir = workspace_root().join("docs/assets/menu-ui-demo");
+    let root = workspace_root();
+    let out_dir = root.join("docs/assets/menu-ui-demo");
     fs::create_dir_all(&out_dir)?;
 
-    write_png(&out_dir.join("bg.png"), BG_W, BG_H, &background())?;
+    // Convert the existing background.jpg into a 16:9 PNG suitable
+    // for the wallpaper image element. We pre-darken the RGB during
+    // conversion so the host can render it with `opacity: 1.0` and
+    // the FPGA can use the Opaque blend path — saves a dst read per
+    // pixel relative to the previous "opacity: 0.55 over root_bg"
+    // approach, which is the dominant per-frame cost.
+    let src_jpg = root.join("src/firmware-script/assets/background.jpg");
+    convert_wallpaper(&src_jpg, &out_dir.join("bg.png"))?;
+
     write_png(&out_dir.join("nes.png"),     ICON, ICON, &icon_nes())?;
     write_png(&out_dir.join("snes.png"),    ICON, ICON, &icon_snes())?;
     write_png(&out_dir.join("genesis.png"), ICON, ICON, &icon_genesis())?;
     write_png(&out_dir.join("gameboy.png"), ICON, ICON, &icon_gameboy())?;
     write_png(&out_dir.join("atari.png"),   ICON, ICON, &icon_atari())?;
 
-    println!("wrote {} PNGs to {}", 6, out_dir.display());
+    println!("wrote 6 PNGs to {}", out_dir.display());
     Ok(())
+}
+
+/// Load `src` (JPG or PNG), centre-crop to 16:9 against the
+/// framebuffer's 1920×1080 target, multiply each pixel's RGB by
+/// `DARKEN` so the foreground UI reads cleanly without needing a
+/// runtime opacity blend, and write `dst` as an opaque PNG.
+fn convert_wallpaper(src: &Path, dst: &Path) -> std::io::Result<()> {
+    /// How much of the original luminance to keep. 0.55 matches the
+    /// previous in-engine `opacity: 0.55` value the App was using.
+    const DARKEN: f32 = 0.55;
+
+    let img = image::ImageReader::open(src)
+        .map_err(|e| std::io::Error::other(format!("open {}: {e}", src.display())))?
+        .decode()
+        .map_err(|e| std::io::Error::other(format!("decode {}: {e}", src.display())))?
+        .to_rgb8();
+    let (w, h) = (img.width(), img.height());
+
+    // Centre-crop to BG_W × BG_H — keep the central strip when the
+    // source is taller than 16:9.
+    let target_aspect = BG_W as f32 / BG_H as f32;
+    let src_aspect = w as f32 / h as f32;
+    let (crop_w, crop_h) = if src_aspect > target_aspect {
+        // Source is wider — crop sides.
+        ((h as f32 * target_aspect) as u32, h)
+    } else {
+        // Source is taller — crop top + bottom.
+        (w, (w as f32 / target_aspect) as u32)
+    };
+    let x0 = (w - crop_w) / 2;
+    let y0 = (h - crop_h) / 2;
+    let cropped = image::imageops::crop_imm(&img, x0, y0, crop_w, crop_h).to_image();
+
+    // Resize to exact BG_W × BG_H. Use a triangle (linear) filter —
+    // fast and adequate for a softly-textured wallpaper.
+    let resized = image::imageops::resize(
+        &cropped,
+        BG_W,
+        BG_H,
+        image::imageops::FilterType::Triangle,
+    );
+
+    // Darken + emit as RGBA8 (alpha = 0xFF so the FPGA paint can
+    // pick the Opaque blend fast path).
+    let mut rgba = Vec::with_capacity((BG_W * BG_H * 4) as usize);
+    for px in resized.pixels() {
+        let [r, g, b] = px.0;
+        let darken = |c: u8| ((c as f32 * DARKEN).clamp(0.0, 255.0)) as u8;
+        rgba.push(darken(r));
+        rgba.push(darken(g));
+        rgba.push(darken(b));
+        rgba.push(0xFF);
+    }
+    write_png(dst, BG_W, BG_H, &rgba)
 }
 
 /// Walk up from CARGO_MANIFEST_DIR until we find a `Cargo.lock` (the
@@ -56,44 +119,6 @@ fn write_png(path: &Path, w: u32, h: u32, rgba: &[u8]) -> std::io::Result<()> {
         .write_image_data(rgba)
         .map_err(|e| std::io::Error::other(format!("png data: {e}")))?;
     Ok(())
-}
-
-// ---- Background -----------------------------------------------------
-
-/// Subtle radial-ish gradient from a slightly warmer dark blue at the
-/// center toward near-black at the edges. Adds vignette so the focused
-/// card pops more.
-fn background() -> Vec<u8> {
-    let cx = (BG_W as f32) * 0.5;
-    let cy = (BG_H as f32) * 0.5;
-    let r_max = ((cx * cx + cy * cy) as f32).sqrt();
-    let mut out = Vec::with_capacity((BG_W * BG_H * 4) as usize);
-    for y in 0..BG_H {
-        for x in 0..BG_W {
-            let dx = x as f32 - cx;
-            let dy = y as f32 - cy;
-            let r = (dx * dx + dy * dy).sqrt() / r_max;       // 0..1
-            // Inner color (center): #181830; outer color (corners): #050510.
-            let t = clamp01(r);
-            let (ir, ig, ib) = (0x18, 0x18, 0x30);
-            let (or_, og, ob) = (0x05, 0x05, 0x10);
-            let r8 = lerp(ir, or_, t);
-            let g8 = lerp(ig, og, t);
-            let b8 = lerp(ib, ob, t);
-            out.extend_from_slice(&[r8, g8, b8, 0xFF]);
-        }
-    }
-    out
-}
-
-fn lerp(a: u8, b: u8, t: f32) -> u8 {
-    let a = a as f32;
-    let b = b as f32;
-    (a + (b - a) * t).round().clamp(0.0, 255.0) as u8
-}
-
-fn clamp01(t: f32) -> f32 {
-    t.clamp(0.0, 1.0)
 }
 
 // ---- Icons ----------------------------------------------------------
