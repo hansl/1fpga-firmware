@@ -200,21 +200,54 @@ fn prepare_images(
     images: &mut ImageRegistry,
     device: &mut Device,
 ) {
-    fn walk(tree: &Tree, id: NodeId, images: &mut ImageRegistry, device: &mut Device) {
+    fn walk(
+        tree: &Tree,
+        id: NodeId,
+        images: &mut ImageRegistry,
+        device: &mut Device,
+        nodes_visited: &mut u32,
+        imgs_checked: &mut u32,
+        imgs_loaded: &mut u32,
+    ) {
         let Some(node) = tree.get(id) else {
             return;
         };
+        *nodes_visited += 1;
         if let NodeKind::Img { src } = &node.kind
-            && images.get(src).is_none()
             && !src.is_empty()
         {
-            let _ = images.get_or_load(device, src);
+            *imgs_checked += 1;
+            if images.get(src).is_none() {
+                *imgs_loaded += 1;
+                let _ = images.get_or_load(device, src);
+            }
         }
         for &child in &node.children {
-            walk(tree, child, images, device);
+            walk(tree, child, images, device, nodes_visited, imgs_checked, imgs_loaded);
         }
     }
-    walk(tree, root, images, device);
+    // One-shot debug counters so we can verify whether prepare_images
+    // is actually doing work proportional to its measured cost. If it
+    // visits ~30 nodes and loads 0 images yet still appears as ~16 ms
+    // in the timing log, the cost is being attributed to the wrong
+    // bracket (e.g., a hidden GC/borrow cost) rather than real
+    // walk-and-lookup work.
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static LOG_COUNTDOWN: AtomicU32 = AtomicU32::new(60);
+    let mut nodes_visited = 0;
+    let mut imgs_checked = 0;
+    let mut imgs_loaded = 0;
+    let t = std::time::Instant::now();
+    walk(tree, root, images, device, &mut nodes_visited, &mut imgs_checked, &mut imgs_loaded);
+    let dt = t.elapsed();
+    let prev = LOG_COUNTDOWN.fetch_sub(1, Ordering::Relaxed);
+    if prev == 1 {
+        tracing::info!(
+            "prepare_images probe: nodes={nodes_visited} imgs_checked={imgs_checked} imgs_loaded={imgs_loaded} dt={}us",
+            dt.as_micros(),
+        );
+        LOG_COUNTDOWN.store(60, Ordering::Relaxed);
+    }
 }
 
 /// Verbose tree dump used for diagnostics. Only emits at DEBUG level
