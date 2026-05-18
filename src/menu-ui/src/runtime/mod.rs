@@ -243,6 +243,7 @@ pub mod damage;
 pub mod dump;
 pub mod fps;
 pub mod raf;
+pub mod viewport;
 pub mod warmup;
 
 /// Configuration for [`run`].
@@ -254,6 +255,12 @@ pub struct RunConfig {
     /// Override the reserved DDR3 base address (must be 32 MB
     /// aligned). When `None`, [`mem::DEFAULT_BASE`] is used.
     pub base_phys_addr: Option<u32>,
+    /// Override the render resolution (FB dimensions). When `None`,
+    /// uses the HDMI mode's native resolution from VIDEO_INFO. The
+    /// framework's ASCAL block upscales smaller FBs to the active
+    /// HDMI mode — so smaller render resolutions trade visual
+    /// crispness for proportional reduction in per-frame DDR3 work.
+    pub render_res: Option<(u16, u16)>,
 }
 
 #[derive(Debug, Error)]
@@ -298,12 +305,24 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         ..DeviceConfig::default()
     })?;
     let info = device.video_info();
-    let fb = FramebufferConfig::for_video(info, base);
+    // FB resolution: explicit override > HDMI native. The framework
+    // reads pixels from the FB and feeds ASCAL, which upscales to the
+    // active HDMI mode — so render < HDMI is "free" beyond the loss
+    // of visual crispness on text/icons.
+    let (render_w, render_h) = cfg.render_res.unwrap_or((info.width, info.height));
+    let fb = FramebufferConfig {
+        width: render_w,
+        height: render_h,
+        stride: (render_w as u32) * 4,
+        fb0_phys: base + mem::FB0_OFFSET as u32,
+        fb1_phys: base + mem::FB1_OFFSET as u32,
+        fb2_phys: base + mem::FB2_OFFSET as u32,
+    };
     device.configure_framebuffer(fb)?;
     device.start()?;
     info!(
-        "menu-ui {}: device open, framebuffer {}×{}",
-        BUILD_ID, info.width, info.height
+        "menu-ui {}: device open, HDMI {}×{}, FB {}×{}",
+        BUILD_ID, info.width, info.height, fb.width, fb.height,
     );
 
     // 2. Load the JS bundle.
@@ -332,12 +351,14 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     let raf_state = raf::RafState::new();
     let warmup_queue = warmup::WarmupQueue::new();
     let anim_mgr = anim::AnimationManager::new();
+    let viewport = viewport::Viewport::new(fb.width, fb.height);
     context.insert_data(ui_state.clone());
     context.insert_data(input_state.clone());
     context.insert_data(fps_counter.clone());
     context.insert_data(raf_state.clone());
     context.insert_data(warmup_queue.clone());
     context.insert_data(anim_mgr.clone());
+    context.insert_data(viewport.clone());
 
     let module = {
         let source = Source::from_bytes(&bundle);
@@ -411,6 +432,10 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         }
     }
     let mut images = ImageRegistry::new();
+    // Aspect-fit any oversized PNGs to the FB on load — e.g., the
+    // 1920×1080 wallpaper at a 720p render target gets resized to
+    // 1280×720 once, then every paint hits the 1:1 burst path.
+    images.set_max_dims(fb.width, fb.height);
     let mut pump = Pump::open_all();
     let router = IntentRouter::new();
     let mut event_buf: Vec<RawInputEvent> = Vec::new();

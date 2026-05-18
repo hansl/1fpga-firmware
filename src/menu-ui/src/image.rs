@@ -62,14 +62,31 @@ pub enum CachedImage {
 
 /// Path-keyed image cache. Lookup-and-load is `&mut` because misses
 /// upload a new texture; once cached, lookups are read-only.
+///
+/// `max_dims` is the render-target dimensions: any decoded image
+/// larger than this in either axis is downscaled (aspect-preserving,
+/// `image::imageops::Triangle`) before being uploaded. This makes
+/// the runtime resolution-agnostic without forcing assets to ship
+/// at the exact FB size — a 1920×1080 wallpaper PNG used at 1280×720
+/// resizes once at startup instead of paying per-pixel FPGA scaling
+/// on every frame's wallpaper paint (the COPY_RECT scale path is
+/// much slower than the 1:1 burst path).
 #[derive(Debug, Default)]
 pub struct ImageRegistry {
     entries: HashMap<String, CachedImage>,
+    max_dims: Option<(u16, u16)>,
 }
 
 impl ImageRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Cap the dimensions of any image loaded after this call.
+    /// Larger images are aspect-fit-resized; smaller ones (icons,
+    /// glyphs) are left at native size.
+    pub fn set_max_dims(&mut self, width: u16, height: u16) {
+        self.max_dims = Some((width, height));
     }
 
     /// Get-or-load. Returns the cached entry for `src`, decoding
@@ -79,7 +96,7 @@ impl ImageRegistry {
         if let Some(entry) = self.entries.get(src) {
             return entry.clone();
         }
-        let entry = match decode_and_upload(device, src) {
+        let entry = match decode_and_upload(device, src, self.max_dims) {
             Ok((texture, width, height, fully_opaque)) => CachedImage::Loaded {
                 texture,
                 width,
@@ -108,6 +125,7 @@ impl ImageRegistry {
 fn decode_and_upload(
     device: &mut Device,
     src: &str,
+    max_dims: Option<(u16, u16)>,
 ) -> Result<(TextureHandle, u16, u16, bool), ImageError> {
     let file = std::fs::File::open(Path::new(src)).map_err(|e| ImageError::Io {
         path: src.to_string(),
@@ -130,7 +148,8 @@ fn decode_and_upload(
 
     // Convert to BGRA8888 (the FB / texture format) regardless of
     // the input PNG's color type. We use a small per-source-format
-    // expander rather than pulling in the heavier `image` crate.
+    // expander rather than pulling in the heavier `image` crate
+    // for decoding.
     let pixels = expand_to_bgra(
         &buf[..frame.buffer_size()],
         info.color_type,
@@ -146,7 +165,7 @@ fn decode_and_upload(
     // RGB / Grayscale sources always become alpha=0xFF; RGBA /
     // GrayscaleAlpha need a scan. Scanning the converted BGRA is
     // straightforward — every 4th byte is the alpha.
-    let fully_opaque = match info.color_type {
+    let src_opaque = match info.color_type {
         png::ColorType::Rgb | png::ColorType::Grayscale => true,
         png::ColorType::Rgba | png::ColorType::GrayscaleAlpha => {
             pixels.chunks_exact(4).all(|px| px[3] == 0xFF)
@@ -154,13 +173,29 @@ fn decode_and_upload(
         png::ColorType::Indexed => false,
     };
 
+    // Aspect-fit downscale if the source exceeds the render target.
+    // The FPGA's COPY_RECT scale path reads per-pixel (no burst) and
+    // is much slower than the 1:1 burst path; resizing once at load
+    // means every subsequent frame's wallpaper paint runs the fast
+    // path. Small images (icons, glyphs) are below max_dims in both
+    // axes and pass through unchanged.
+    let (final_w, final_h, final_pixels) = match max_dims {
+        Some((mw, mh)) if width > mw || height > mh => {
+            let (rw, rh) = aspect_fit(width, height, mw, mh);
+            let resized = resize_bgra(&pixels, width, height, rw, rh);
+            tracing::info!("image '{src}' downscaled {width}x{height} → {rw}x{rh} (max {mw}x{mh})");
+            (rw, rh, resized)
+        }
+        _ => (width, height, pixels),
+    };
+
     let texture = device
         .upload_texture(&TextureSpec {
             format: TextureFormat::Rgba8888,
-            width,
-            height,
-            stride: (width as u32) * 4,
-            data: &pixels,
+            width: final_w,
+            height: final_h,
+            stride: (final_w as u32) * 4,
+            data: &final_pixels,
         })
         .map_err(|e| ImageError::Device {
             path: src.to_string(),
@@ -169,12 +204,42 @@ fn decode_and_upload(
     tracing::info!(
         "image '{}' loaded: {}x{}, tex_id={}, opaque={}",
         src,
-        width,
-        height,
+        final_w,
+        final_h,
         texture.id,
-        fully_opaque,
+        src_opaque,
     );
-    Ok((texture, width, height, fully_opaque))
+    Ok((texture, final_w, final_h, src_opaque))
+}
+
+/// Largest (w, h) within `(max_w, max_h)` that preserves the source's
+/// aspect ratio. Rounded to nearest integer; both dims at least 1.
+fn aspect_fit(src_w: u16, src_h: u16, max_w: u16, max_h: u16) -> (u16, u16) {
+    let sx = max_w as f32 / src_w as f32;
+    let sy = max_h as f32 / src_h as f32;
+    let s = sx.min(sy);
+    let w = ((src_w as f32 * s).round() as u16).max(1);
+    let h = ((src_h as f32 * s).round() as u16).max(1);
+    (w, h)
+}
+
+/// Resize a packed BGRA8888 buffer with a triangle (linear) filter.
+/// Uses the `image` crate because rolling a proper filter by hand
+/// isn't worth it; the cost lands once per load, never per frame.
+fn resize_bgra(pixels: &[u8], src_w: u16, src_h: u16, dst_w: u16, dst_h: u16) -> Vec<u8> {
+    // `image::RgbaImage` stores RGBA in memory order. Our buffer is
+    // BGRA. Build the wrapper as if it were RGBA — the channel swap
+    // is irrelevant to the resize math (each channel is filtered
+    // independently). The output stays in BGRA byte order.
+    let buf = image::RgbaImage::from_raw(src_w as u32, src_h as u32, pixels.to_vec())
+        .expect("BGRA buffer length matches src dims");
+    let resized = image::imageops::resize(
+        &buf,
+        dst_w as u32,
+        dst_h as u32,
+        image::imageops::FilterType::Triangle,
+    );
+    resized.into_raw()
 }
 
 /// Convert PNG-decoded bytes to in-memory BGRA8888 (the FB / texture

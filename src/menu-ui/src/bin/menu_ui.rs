@@ -42,6 +42,27 @@ struct Flags {
     /// Override the reserved DDR3 base address (default: 0x30000000).
     #[clap(long, value_parser = parse_u32_hex_or_dec)]
     base_addr: Option<u32>,
+
+    /// Render resolution as WIDTHxHEIGHT (e.g. `1280x720`, `1920x1080`,
+    /// `640x480`). Defaults to the HDMI mode's native resolution
+    /// (read from VIDEO_INFO). The framework's ASCAL block handles
+    /// the scale-to-HDMI step, so any resolution ≤ the HDMI mode is
+    /// safe. Smaller render resolutions reduce per-frame DDR3 work
+    /// proportionally — useful on slower mash-FPS at 1080p.
+    #[clap(long, value_parser = parse_resolution)]
+    render_res: Option<(u16, u16)>,
+}
+
+fn parse_resolution(s: &str) -> Result<(u16, u16), String> {
+    let (w, h) = s
+        .split_once(['x', 'X'])
+        .ok_or_else(|| format!("expected WIDTHxHEIGHT, got `{s}`"))?;
+    let w: u16 = w.trim().parse().map_err(|e| format!("bad width: {e}"))?;
+    let h: u16 = h.trim().parse().map_err(|e| format!("bad height: {e}"))?;
+    if w == 0 || h == 0 {
+        return Err(format!("resolution must be positive, got {w}x{h}"));
+    }
+    Ok((w, h))
 }
 
 fn parse_u32_hex_or_dec(s: &str) -> Result<u32, std::num::ParseIntError> {
@@ -82,6 +103,7 @@ fn main() {
     let cfg = menu_ui::RunConfig {
         bundle_override: flags.bundle,
         base_phys_addr: flags.base_addr,
+        render_res: flags.render_res,
     };
     if let Err(e) = menu_ui::run(cfg) {
         error!("{e}");

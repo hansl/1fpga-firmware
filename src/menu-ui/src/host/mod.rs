@@ -140,6 +140,10 @@ pub fn register(loader: &MapModuleLoader, context: &mut Context) -> JsResult<()>
             NativeFunction::from_fn_ptr(fps_host),
         ),
         (
+            js_string!("viewport"),
+            NativeFunction::from_fn_ptr(viewport_host),
+        ),
+        (
             js_string!("requestAnimationFrame"),
             NativeFunction::from_fn_ptr(request_animation_frame),
         ),
@@ -521,6 +525,23 @@ fn fps_host(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResu
         .map(|c| c.current())
         .unwrap_or(0.0);
     Ok(JsValue::from(fps))
+}
+
+/// `gui.viewport()` → `{ width, height }`. Returns the render-target
+/// dimensions configured at startup. JS code should size everything
+/// relative to these instead of hardcoding 1920×1080 so the same
+/// bundle works at 1080p / 720p / 480p / 320×240. The values are
+/// fixed for the lifetime of the runtime — no reactivity needed yet.
+fn viewport_host(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    use crate::runtime::viewport::Viewport;
+    let (w, h) = context
+        .get_data::<Viewport>()
+        .map(|v| v.get())
+        .unwrap_or((0, 0));
+    let obj = JsObject::with_null_proto();
+    obj.set(js_string!("width"), JsValue::from(w), false, context)?;
+    obj.set(js_string!("height"), JsValue::from(h), false, context)?;
+    Ok(JsValue::from(obj))
 }
 
 fn raf_state(context: &mut Context) -> JsResult<RafState> {
