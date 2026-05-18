@@ -656,10 +656,14 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                     staging_area_px = damage::total_area(&rects);
                     // Per-rect clipped paint. clear_clip after each
                     // rect so the next rect's set_clip replaces it
-                    // cleanly (not unions/intersects with it).
+                    // cleanly (not unions/intersects with it). The
+                    // host-side bbox cull inside paint() also uses
+                    // the rect so nodes outside it never get a blit
+                    // op issued — saves dispatch + DDR arbitration.
                     let mut frame = frame;
                     for r in &rects {
-                        let f = frame.set_clip((*r).into())?;
+                        let clip_rect: menu_core_host::protocol::Rect = (*r).into();
+                        let f = frame.set_clip(clip_rect)?;
                         let f = ui_state.with_tree(|tree| {
                             crate::paint::paint(
                                 tree,
@@ -671,6 +675,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                                 &images,
                                 &opacities,
                                 &transforms,
+                                Some(clip_rect),
                                 f,
                             )
                         })?;
@@ -693,6 +698,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                             &images,
                             &opacities,
                             &transforms,
+                            None,
                             frame,
                         )
                     })?

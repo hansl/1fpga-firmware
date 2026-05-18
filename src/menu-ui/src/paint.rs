@@ -82,7 +82,15 @@ pub fn render_pending_text<'a>(
     frame.set_target_framebuffer()
 }
 
-/// Walk the tree and paint each node into `frame`.
+/// Walk the tree and paint each node into `frame`. `clip` is the
+/// damage-paint clip rect currently active on the frame (i.e., the
+/// argument the caller passed to `Frame::set_clip`). When provided,
+/// the walker skips issuing blit ops for any node whose transformed
+/// bbox doesn't intersect it — saving the per-op FPGA dispatch +
+/// DDR3 arbitration cost for nodes that would have produced zero
+/// pixels anyway. This is a host-side cull; the engine's `dst ∩ clip`
+/// check would also zero them out, but only after the op has been
+/// fetched and decoded by the ring fetcher.
 pub fn paint<'a>(
     tree: &Tree,
     root: NodeId,
@@ -93,6 +101,7 @@ pub fn paint<'a>(
     images: &ImageRegistry,
     opacities: &HashMap<NodeId, f32>,
     transforms: &HashMap<NodeId, Transform>,
+    clip: Option<Rect>,
     mut frame: Frame<'a>,
 ) -> Result<Frame<'a>, DeviceError> {
     // Background clear. Use the clip-respecting variant so damage
@@ -122,6 +131,7 @@ pub fn paint<'a>(
         images,
         opacities,
         transforms,
+        clip,
         frame,
         /* skip_root_bg */ true,
     )?;
@@ -137,6 +147,7 @@ fn paint_subtree<'a>(
     images: &ImageRegistry,
     opacities: &HashMap<NodeId, f32>,
     transforms: &HashMap<NodeId, Transform>,
+    clip: Option<Rect>,
     mut frame: Frame<'a>,
     skip_root_bg: bool,
 ) -> Result<Frame<'a>, DeviceError> {
@@ -163,43 +174,73 @@ fn paint_subtree<'a>(
     // just changes the rect size.
     let scaled = !xf.is_identity();
 
+    // Transformed bbox for this node, for clip culling. Computed
+    // once; the leaf branches reuse the same rect for their actual
+    // blit so the math doesn't repeat.
+    let (tx, ty, tw, th) = xf.apply_to_rect(lay.x, lay.y, lay.w, lay.h);
+    let dx = clamp_u16(tx);
+    let dy = clamp_u16(ty);
+    let dw = clamp_u16(tw);
+    let dh = clamp_u16(th);
+
     match &node.kind {
         NodeKind::Div => {
             if !skip_root_bg
                 && let Some(color) = node.style.background_color
                 && lay.w > 0.5
                 && lay.h > 0.5
+                && dw > 0 && dh > 0
+                && rect_intersects_clip(dx, dy, dw, dh, clip)
             {
-                let (tx, ty, tw, th) = xf.apply_to_rect(lay.x, lay.y, lay.w, lay.h);
-                let dx = clamp_u16(tx);
-                let dy = clamp_u16(ty);
-                let dw = clamp_u16(tw);
-                let dh = clamp_u16(th);
-                if dw > 0 && dh > 0 {
-                    // Clip-respecting: paint::paint may be called
-                    // under a damage-rect clip; outside that clip the
-                    // blit engine zeroes eff_w/eff_h and skips work.
-                    let (effective_color, blend) = apply_opacity_to_color(color, opacity_u8);
-                    frame = frame.fill_rect(
-                        Rect::new(dx, dy, dw, dh),
-                        effective_color,
-                        blend,
-                    )?;
-                }
+                // Clip-respecting: paint::paint may be called
+                // under a damage-rect clip; outside that clip the
+                // blit engine zeroes eff_w/eff_h and skips work.
+                let (effective_color, blend) = apply_opacity_to_color(color, opacity_u8);
+                frame = frame.fill_rect(
+                    Rect::new(dx, dy, dw, dh),
+                    effective_color,
+                    blend,
+                )?;
             }
         }
         NodeKind::Text { content } => {
-            frame = paint_text(content, id, lay, text_styles, text_cache, opacity_u8, xf, scaled, frame)?;
+            // Skip culling for scaled text — paint_text uses a
+            // different dst sizing path; the no-cull case still
+            // benefits from the engine's own clip rejection.
+            if scaled || rect_intersects_clip(dx, dy, dw, dh, clip) {
+                frame = paint_text(content, id, lay, text_styles, text_cache, opacity_u8, xf, scaled, frame)?;
+            }
         }
         NodeKind::Img { src } => {
-            frame = paint_img(src, lay, images, opacity_u8, xf, frame)?;
+            if rect_intersects_clip(dx, dy, dw, dh, clip) {
+                frame = paint_img(src, lay, images, opacity_u8, xf, frame)?;
+            }
         }
     }
 
     for &child in &node.children {
-        frame = paint_subtree(tree, child, layouts, text_styles, text_cache, images, opacities, transforms, frame, false)?;
+        frame = paint_subtree(tree, child, layouts, text_styles, text_cache, images, opacities, transforms, clip, frame, false)?;
     }
     Ok(frame)
+}
+
+/// True when the rect `(x, y, w, h)` overlaps `clip`, or `clip` is
+/// `None` (no clip → always paint). Pure host-side check used to
+/// avoid issuing blit ops the engine would clip to zero anyway.
+#[inline]
+fn rect_intersects_clip(x: u16, y: u16, w: u16, h: u16, clip: Option<Rect>) -> bool {
+    let Some(c) = clip else { return true; };
+    if w == 0 || h == 0 || c.w == 0 || c.h == 0 {
+        return false;
+    }
+    let ax2 = x as u32 + w as u32;
+    let ay2 = y as u32 + h as u32;
+    let bx2 = c.x as u32 + c.w as u32;
+    let by2 = c.y as u32 + c.h as u32;
+    ax2 > c.x as u32
+        && bx2 > x as u32
+        && ay2 > c.y as u32
+        && by2 > y as u32
 }
 
 fn paint_img<'a>(
