@@ -595,9 +595,31 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         // 3. Prepare images: walk the tree, decode + upload any
         //    `<img>` whose `src` we haven't seen yet. Failures are
         //    cached so we don't retry every frame.
-        ui_state.with_tree(|tree| prepare_images(tree, root, &mut images, &mut device));
-
+        //
+        // The closure returns the time it spent on the inner walk
+        // so we can compare it against `t4 - t3`. Probe (1) inside
+        // prepare_images already reports the walk dt; this captures
+        // it through `with_tree` so we can attribute any residual
+        // to the borrow/closure/drop path on the way in and out.
+        let walk_dt = ui_state.with_tree(|tree| {
+            let t = Instant::now();
+            prepare_images(tree, root, &mut images, &mut device);
+            t.elapsed()
+        });
         let t4 = Instant::now();
+        {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static LOG_COUNTDOWN: AtomicU32 = AtomicU32::new(60);
+            let prev = LOG_COUNTDOWN.fetch_sub(1, Ordering::Relaxed);
+            if prev == 1 {
+                tracing::info!(
+                    "t_images probe: bracket={}us walk_inside_with_tree={}us",
+                    (t4 - t3).as_micros(),
+                    walk_dt.as_micros(),
+                );
+                LOG_COUNTDOWN.store(60, Ordering::Relaxed);
+            }
+        }
 
         // 4. Populate text cache: allocate render-target textures for
         //    any (content, font, size, color) tuples we haven't seen
