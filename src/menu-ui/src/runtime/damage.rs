@@ -12,15 +12,16 @@
 //! screen — fence drops from ~50ms to ~5ms on those frames, and to
 //! literally zero on idle frames where the scene is identical.
 //!
-//! The triple-buffer dance is sidestepped by configuring the
-//! framebuffer with all three slot pointers aliased to the same
-//! physical address. PRESENT still rotates the FPGA's internal
-//! display/render/ready indices, but every index points to the same
-//! memory, so damage tracking sees one consistent buffer. Trade-off:
-//! when our damage paint runs concurrently with HDMI scanout, a
-//! single-frame tear is possible. With damage typically painting in
-//! under one vsync interval, this is hard to notice in practice; if
-//! it ever shows up we can switch to per-FB scene tracking.
+//! The three FB slots have *distinct* physical addresses (see
+//! `mem::FB0_OFFSET` etc. — 8 MB apart). PRESENT rotates which slot
+//! is being scanned out / rendered into, and the staging→FB copy
+//! step lands on the current `render` slot. Because each slot's
+//! memory is independent, the damage diff that drives the copy must
+//! be against THAT slot's last-painted snapshot — comparing against
+//! a single global "last frame painted anywhere" would skip copying
+//! regions that are stale in this slot but up-to-date in a different
+//! slot we hit two frames ago. The runtime keeps a `scene_per_fb`
+//! array of three snapshots for exactly this reason.
 
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;

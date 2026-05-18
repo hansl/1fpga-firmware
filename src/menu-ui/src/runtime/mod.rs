@@ -434,18 +434,20 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     // shape close enough for our use cases.
     let raf_epoch = std::time::Instant::now();
 
-    // Single FB tracker — *not* per-render_idx. The FB slot pointers
-    // are aliased to the same physical address (see
-    // `damage.rs`'s top-level comment), so what's in memory at any
-    // moment is whatever the last *frame* painted regardless of
-    // which render_idx that frame used. Tracking per-slot would
-    // make the diff a 3-frame-old stale snapshot for an FB we
-    // rotated through, which both over-counts damage (icons that
-    // slid past in the meantime) and under-counts it (regions that
-    // matched 3 frames ago but were overwritten in between). One
-    // global snapshot is both correct and minimal.
-    let mut last_fb_hash: Option<u64> = None;
-    let mut last_fb_scene: Option<damage::PaintedScene> = None;
+    // Per-FB content hash + scene snapshot. The three FB slots have
+    // *distinct* physical addresses (`mem::FB0_OFFSET`/`FB1_OFFSET`/
+    // `FB2_OFFSET` — 8 MB apart), so each render_idx slot's memory
+    // is independent. The diff that drives the staging→FB copy must
+    // therefore be against THAT slot's prior snapshot, not against a
+    // single "last frame" — otherwise we'd skip copying regions that
+    // are stale in *this* slot just because they're up-to-date in
+    // a different slot we painted recently. (A previous version of
+    // the code did exactly this on the mistaken belief that the FB
+    // pointers were aliased; the result was visible ghosts/duplicates
+    // during slide animations.)
+    let mut scene_hash_per_fb: [Option<u64>; 3] = [None, None, None];
+    let mut scene_per_fb: [Option<damage::PaintedScene>; 3] =
+        [None, None, None];
     // Hash + scene of what's currently rendered into the staging RT.
     // staging_scene drives the damage diff for the *paint* step;
     // staging_hash is the fast skip check.
@@ -590,20 +592,19 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         let t6 = Instant::now();
 
         // 6. Build the current PaintedScene snapshot, and skip
-        //    everything when the FB already has it (memory hasn't
-        //    changed since the last frame, and the desired scene
-        //    matches what's there). Computing the scene is cheap
-        //    (just a tree walk + small Vec) and gives us both the
-        //    fast skip-hash and the structure damage needs to diff
-        //    against the prior state.
+        //    everything when this FB slot already has it. Computing
+        //    the scene is cheap (just a tree walk + small Vec) and
+        //    gives us both the fast skip-hash and the structure
+        //    damage needs to diff against the prior state.
+        let render_idx = (device.fb_state().render as usize).min(2);
         let opacities = ui_state.with_tree(|tree| crate::style::resolve_opacity(tree, root));
         let transforms = ui_state.with_tree(|tree| crate::style::resolve_transforms(tree, root));
         let current_scene = ui_state.with_tree(|tree| {
             damage::compute_scene(tree, root, &layouts, &text_styles, &opacities, &transforms)
         });
         let current_hash = current_scene.hash();
-        if last_fb_hash == Some(current_hash) {
-            // FB memory already matches the desired scene. Sleep
+        if scene_hash_per_fb[render_idx] == Some(current_hash) {
+            // This FB slot already has the desired content. Sleep
             // ~one vsync to bound the loop and continue.
             fps_counter.record_frame();
             std::thread::sleep(Duration::from_millis(16));
@@ -704,12 +705,13 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
             frame
         };
 
-        // Copy staging→FB. Damage diff is against the single global
-        // last_fb_scene snapshot (NOT a per-render_idx slot — see
-        // last_fb_scene's declaration).
+        // Copy staging→FB[render_idx]. Damage diff is against THIS
+        // slot's own prior snapshot — the three FB slots are at
+        // distinct physical addresses (see `scene_per_fb`'s
+        // declaration).
         let frame = frame.set_target_framebuffer()?;
         let fb_damage_plan: Option<Vec<damage::PixelRect>> =
-            match &last_fb_scene {
+            match &scene_per_fb[render_idx] {
                 Some(prev) => {
                     let d = damage::compute_damage(prev, &current_scene);
                     let area = damage::total_area(&d);
@@ -755,8 +757,8 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         let (_count, fence_dt, scanout_dt) =
             frame.present()?.submit()?.wait_presented_timed(timeout)?;
 
-        last_fb_hash = Some(current_hash);
-        last_fb_scene = Some(current_scene);
+        scene_hash_per_fb[render_idx] = Some(current_hash);
+        scene_per_fb[render_idx] = Some(current_scene);
         ui_state.with_tree_mut(|t| t.clear_dirty());
         fps_counter.record_frame();
 
