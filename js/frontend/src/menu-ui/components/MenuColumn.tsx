@@ -4,13 +4,18 @@
 // Selected row is brighter and very slightly larger; others sit at
 // rest size and dimmed.
 //
-// When the category changes (and therefore the items list changes
-// identity), the whole column cross-fades: the old items tween
-// out, the new items mount once invisible, and tween in. Selection
-// state is reset by the parent on the same edge, so the new
-// items show the new selection ready when the fade-in begins.
+// We previously cross-faded the entire column when items changed,
+// using a setTimeout to swap a `shown` snapshot mid-fade. Under
+// rapid input the setTimeout was repeatedly cancelled, leaving
+// `shown` stuck on stale items while the title (rendered from
+// `cat` directly) raced ahead — visually the column displayed the
+// wrong category's items. The reconciler's clobber of style on
+// every commit also fought the opacity tween. We now render the
+// current items synchronously; the brightness / scale transition
+// on the *selected* row already provides enough motion that the
+// loss of the column-wide cross-fade isn't visually jarring.
 
-import { memo, useEffect, useRef, useState } from 'react';
+import { memo, useRef } from 'react';
 import type { CSSProperties } from 'react';
 import * as gui from '1fpga:gui';
 
@@ -105,11 +110,6 @@ const Row = memo(function Row({
   );
 });
 
-/** Cross-fade duration for each half (out / in) when the items
- *  list identity changes (i.e., user navigates between categories).
- *  Total swap time = 2× this. */
-const FADE_MS = 140;
-
 export function MenuColumn({
   items,
   selected,
@@ -117,34 +117,9 @@ export function MenuColumn({
   items: MenuItem[];
   selected: number;
 }) {
-  const ref = useRef<gui.NodeId | null>(null);
-  // What's currently rendered. Lags behind `items` during the
-  // fade-out half so the old list stays visible until it's
-  // invisible, then swaps in one tick.
-  const [shown, setShown] = useState(items);
-  const [targetOpacity, setTargetOpacity] = useState(1);
-
-  useEffect(() => {
-    if (items === shown) return;
-    // Phase 1: fade out the current list.
-    setTargetOpacity(0);
-    const id = setTimeout(() => {
-      // Phase 2: swap content (now invisible) and fade back in.
-      setShown(items);
-      setTargetOpacity(1);
-    }, FADE_MS);
-    return () => clearTimeout(id);
-  }, [items, shown]);
-
-  useTween(
-    ref,
-    { opacity: targetOpacity },
-    { duration: FADE_MS, easing: 'easeOut' },
-  );
-
   return (
-    <div ref={ref} style={{ ...rootStyle, opacity: targetOpacity }}>
-      {shown.map((it, i) => (
+    <div style={rootStyle}>
+      {items.map((it, i) => (
         <Row key={it.name} item={it} selected={i === selected} />
       ))}
     </div>
