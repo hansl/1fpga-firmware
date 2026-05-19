@@ -223,9 +223,12 @@ fn aspect_fit(src_w: u16, src_h: u16, max_w: u16, max_h: u16) -> (u16, u16) {
     (w, h)
 }
 
-/// Resize a packed BGRA8888 buffer with a triangle (linear) filter.
-/// Uses the `image` crate because rolling a proper filter by hand
-/// isn't worth it; the cost lands once per load, never per frame.
+/// Resize a packed BGRA8888 buffer with a Lanczos3 filter. Uses the
+/// `image` crate because rolling a proper filter by hand isn't worth
+/// it; the cost lands once per load, never per frame. Lanczos3 over
+/// Triangle (bilinear) gives noticeably sharper output for static
+/// wallpapers — at the small extra CPU cost of a one-shot operation
+/// this is a clear win.
 fn resize_bgra(pixels: &[u8], src_w: u16, src_h: u16, dst_w: u16, dst_h: u16) -> Vec<u8> {
     // `image::RgbaImage` stores RGBA in memory order. Our buffer is
     // BGRA. Build the wrapper as if it were RGBA — the channel swap
@@ -237,7 +240,7 @@ fn resize_bgra(pixels: &[u8], src_w: u16, src_h: u16, dst_w: u16, dst_h: u16) ->
         &buf,
         dst_w as u32,
         dst_h as u32,
-        image::imageops::FilterType::Triangle,
+        image::imageops::FilterType::Lanczos3,
     );
     resized.into_raw()
 }
