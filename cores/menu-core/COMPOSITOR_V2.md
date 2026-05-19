@@ -13,6 +13,41 @@ this is in flight.
 
 ---
 
+## 0. Acronyms and terminology
+
+| Term | Expansion |
+|---|---|
+| **ASCAL** | The MiSTer framework's built-in scaler block (open-source IP). Takes the active core's video output at any timing and rescales/format-converts it to the active HDMI mode. The menu core's compositor and MISTER_FB scanout both feed ASCAL upstream of HDMI. |
+| **Avalon-MM** | Intel's memory-mapped bus protocol (the FPGA-side equivalent of AXI). The blit engine and compositor are Avalon-MM masters to DDR3. |
+| **BGRA** | 32-bit pixel format, byte order blue-green-red-alpha. The native format for the FB and all RTs in this core. |
+| **A8** | 8-bit grayscale-as-alpha texture format used for font glyph atlases. Tinted at sample time. |
+| **BRAM** | Block RAM. On-chip SRAM inside the FPGA, organised as small (M10K / MLAB) blocks. Single-cycle access; small total capacity (~700 KB on Cyclone V SE-A6). |
+| **DDR3** | Off-chip DRAM (~1 GB on the DE10-Nano via the HPS). Higher latency than BRAM, much larger capacity. Shared between host CPU and FPGA via memory arbiter. |
+| **DMA** | Direct Memory Access. A hardware block that moves bytes between memory regions without per-byte CPU involvement. |
+| **DOM** | Document Object Model. Borrowed from web frontends; refers to the React-managed UI tree the host renders into a layer source RT. |
+| **DSP** | Digital Signal Processing block on the FPGA. Pre-built multiply-add unit, used by the blit engine and (proposed v2) compositor blend stages. |
+| **FB / framebuffer** | A region of DDR3 containing a full screen's worth of pixels in linear scan order. v1 has one logical FB (triple-buffered as FB0/FB1/FB2 + fb_swapper). v2 keeps the same three physical FBs as the "scanout FB" that MISTER_FB reads. |
+| **FPGA** | Field-Programmable Gate Array. The reconfigurable part of the Cyclone V SoC on the DE10-Nano; runs the menu core RTL. |
+| **FSM** | Finite State Machine. The pattern most of the menu core's RTL modules are written in (compositor's scanline-build, blit engine's per-op pipeline, etc.). |
+| **HBlank** | Horizontal blanking interval. The gap between the end of one scanline's active pixels and the start of the next, used by the compositor to fetch the next scanline's layer rows. |
+| **HDMI** | The framework's HDMI transmitter output, downstream of ASCAL. |
+| **HPS** | Hard Processor System. The ARM cores on the Cyclone V SoC; runs Linux + the host binary. |
+| **LFB** | "Linear framebuffer" — MiSTer framework's term for the MISTER_FB scanout path. |
+| **LUT** | Lookup Table. The basic combinational logic primitive on the FPGA. Used as a rough proxy for "cost" of RTL features. |
+| **LWH2F** | Lightweight HPS-to-FPGA bridge. The Avalon-MM bridge the host uses to write FPGA control registers from Linux. |
+| **MISTER_FB** | The MiSTer framework's framebuffer scanout block. Reads pixels from a host-configured DDR3 region at HDMI pixel rate, feeds ASCAL. Activated by `FB_EN=1`. |
+| **M10K** | The 10 Kbit BRAM primitive on Cyclone V. The menu core uses these for line buffers, layer cache, prefetch buffers. |
+| **MLAB** | Memory LAB. A smaller BRAM primitive built from the FPGA's logic-array blocks. Less efficient per bit than M10K but useful for tiny memories. |
+| **Q16.16** | 16.16 fixed-point format (16 integer bits, 16 fractional bits). Used by the blit engine's scaled COPY_RECT to step through source pixels at sub-pixel rates; proposed for the compositor's per-layer scale. |
+| **RT** | Render target. A texture in DDR3 that the host (or compositor) writes pixels into. In v2, every UI layer has its own source RT; the compositor reads from those and writes to the scanout FB (also an RT). |
+| **RTL** | Register-Transfer Level. The Verilog/SystemVerilog code that defines the FPGA's behaviour at the hardware-pipeline level. |
+| **SoC** | System on a Chip. The Cyclone V chip combines an FPGA fabric and ARM cores; the DE10-Nano is one of these. |
+| **SrcAlpha** | A blend mode where the source pixel's alpha channel multiplies its contribution: `out = src·a + dst·(1-a)`. The painter's only blend mode in v1. |
+| **vsync** | Vertical sync pulse from HDMI timing. Marks the end of one frame's scanout and the start of the next. The compositor begins each frame on the vsync rising edge. |
+| **z-order** | The front-to-back ordering of layers. Layer slot index (0=back, 255=front) is the primary key; the proposed v2 `z_priority` field is a per-layer secondary key. |
+
+---
+
 ## 1. Goals
 
 The v1 protocol treats the FPGA as a host-driven 2D GPU: the host issues blit
@@ -70,8 +105,6 @@ Host (Rust + JS)
   │     │  L2 source RT (overlay)                                   │
   │     │  L3 source RT (notification)                              │
   │     │                                                            │
-  │     │  layer table A / B (descriptors, 256 × 32 B)              │
-  │     │                                                            │
   │     │  scanout FB (triple-buffered) ◄── compositor writes here  │
   │     │                                                            │
   │     └────────────────────────────────────────────────────────────┘
@@ -123,8 +156,6 @@ reserved 32 MB block (offsets within the host-side base):
 +0x0080_0000   FB1   ├── repurposed as the SCANOUT FB triple-buffer
 +0x0100_0000   FB2   ─┘    (compositor writes; MISTER_FB reads)
 +0x0180_0000   ring buffer
-+0x0188_0000   layer table A
-+0x018A_0000   layer table B
 +0x0200_0000   texture pool (decoded PNGs, glyph atlases — unchanged)
 +0x0E00_0000   per-layer source RT pool (NEW)
    each layer source RT is allocated host-side from this region
@@ -145,6 +176,12 @@ Notes:
   better suited to BRAM than DDR3 — single-cycle reads from the compositor
   FSM each scanline, single-cycle writes from the bus interface on
   `INVALIDATE_*` ops. No DDR3 traffic for the dirty mask at all.
+- The **layer descriptor tables also live entirely in BRAM** (§4.2). 256
+  descriptors × 32 B = 8 KB per table × 2 banks (active / building) = 16 KB
+  = ~13 M10K blocks. v1's pattern of "host writes table to DDR3 → layer_dma
+  copies to layer_cache BRAM on vsync" goes away — host writes descriptors
+  directly into the BRAM via a register-mapped window. Eliminates the
+  layer_dma module, one DDR3 master, and ~480 KB/s of DDR3 traffic.
 - All physical addresses are 32-byte aligned (matches DDR3 burst boundaries).
 
 ---
@@ -191,6 +228,47 @@ PNG textures.
 texture pool and the layer source RT pool — they're both bump allocators
 backed by the same DDR3 region in v1. v2 separates the regions only because
 layer source RTs tend to be very large vs the small textures.)
+
+### 4.2. Layer descriptor tables live in BRAM, not DDR3
+
+v1's pattern was: host builds the layer table in a DDR3 region; `layer_dma`
+copies it into the on-chip `layer_cache` BRAM on each vsync rising edge;
+the compositor reads from `layer_cache` during scanline build. v2 cuts out
+the DDR3 round-trip and the layer_dma module: the layer tables live
+directly in BRAM, host-writable via a memory-mapped register window.
+
+```
+v1:   host → DDR3 table → layer_dma → BRAM layer_cache → compositor
+v2:   host → BRAM layer table (A/B banks) → compositor
+                                ▲
+                                │ swapped on LAYER_COMMIT
+                                ▼
+```
+
+Sizing: 256 descriptors × 32 B per descriptor × 2 banks (active / building)
+= 16 KB total = ~13 M10K blocks. Comfortably affordable on Cyclone V SE-A6.
+
+Wins:
+
+- Eliminates the `layer_dma` module entirely (~164 lines of SystemVerilog).
+- One fewer DDR3 Avalon-MM master → simpler arbiter.
+- Removes ~480 KB/s of DDR3 traffic per frame (the table read).
+- Removes a class of races between layer_dma fetching and host mutating
+  the next table — v2's BRAM bank is host-writable until `LAYER_COMMIT`
+  swaps it to compositor-readable.
+
+Costs:
+
+- Host writes individual descriptor fields via per-register writes
+  (instead of bulk DDR3 build). Typical workload updates 4-8 descriptors
+  per frame × 8 × 32-bit writes = 32-64 LWH2F writes per frame ≈ a few µs.
+  Full table rewrite of all 256 slots ≈ 100 µs. Negligible either way.
+- Host can't easily mmap the table for direct user-mode inspection from
+  Linux (would need a debug register window if we want this later).
+
+API on the host side stays the same shape as v1: `device.layer_set(slot,
+descriptor)` writes the slot's fields into the BRAM via register writes;
+`device.layer_commit()` swaps the active bank.
 
 ---
 
@@ -334,8 +412,10 @@ Specifically dirty-mark conditions per slot diff:
 - Both enabled and any of {`dst_*`, `src_*`, `tex_id`, `color`, `flags`,
   `opacity`, `z_priority`} differ: mark union of both ranges.
 
-This is computed inside `layer_dma` when it DMAs the new table; it's cheap
-(per-slot field comparison + a y-range OR into the bitmask).
+This is computed inside the BRAM-bank-swap logic on `LAYER_COMMIT`: as the
+active index flips, the new and old banks' descriptors are compared
+slot-by-slot and a y-range OR into the bitmask updates the dirty bits.
+Cheap (per-slot field compare + an OR-into-place).
 
 ### 6.3. First-frame and full-screen invalidations
 
@@ -454,12 +534,12 @@ the same id space to include layer source RTs.)
 
 ### 9.1. When does it run
 
-The compositor's frame begins on each HDMI vsync rising edge (same trigger
-as v1's `layer_dma` kick). On vsync:
+The compositor's frame begins on each HDMI vsync rising edge. On vsync:
 
-1. `layer_dma` re-reads the active layer table into on-chip cache.
-2. Layer-vs-prev-layer diff fires for each slot; dirty bitmask is updated
-   with the unions of changed dst_y ranges (§6.2).
+1. If a `LAYER_COMMIT` is pending, the layer-table BRAM banks swap (the
+   "building" bank becomes active). Layer-vs-prev-layer diff fires for
+   each slot; dirty bitmask is updated with the unions of changed dst_y
+   ranges (§6.2). If no commit is pending, this step is skipped.
 3. The compositor begins processing scanlines y=0..1079, in order.
 4. For each scanline whose dirty bit is 1:
    - scanline_filter walks the layer cache, builds the active list.
@@ -590,7 +670,7 @@ descriptors. Bandwidth measurement: should be ~750 MB/s steady state
 
 - Add `DIRTY_BITMASK_BASE` register and the bitmask region.
 - Add `INVALIDATE_RECT`, `INVALIDATE_ALL`, `MASK_COMMIT` ops.
-- `layer_dma` auto-marks dirty scanlines on descriptor changes.
+- Bank-swap logic auto-marks dirty scanlines on descriptor changes (§4.2).
 - Compositor skips clean scanlines per §9.1.
 - Implement scanout FB management option B (§10.2).
 
@@ -658,7 +738,8 @@ host work proceeding in parallel where possible.
    Acceptable; the architecture's win is for static / partial-change frames.
 
 5. **DDR3 arbiter priority.** Add compositor as a master; priority
-   `blit > layer_dma > tex_unit > compositor > scanout_fetcher`. Compositor
+   `blit > tex_unit > compositor > scanout_fetcher`. (`layer_dma` is gone
+   per §4.2.) Compositor
    can tolerate stalls; scanout can't.
 
 6. **Per-scanline dirty granularity vs per-rect.** Per-scanline is
@@ -715,3 +796,9 @@ cleanly.
   is no longer host-mappable. `MASK_COMMIT` semantics clarified (BRAM
   active/building index swap). Memory layout, register table, and §6 rewritten
   accordingly.
+- v0.2: layer descriptor tables also moved from DDR3 to BRAM (16 KB total,
+  ~13 M10K). `layer_dma` module eliminated; bank-swap logic auto-marks
+  dirty scanlines on `LAYER_COMMIT`. Memory layout, §4.2, §6.2, §9.1, §12.5
+  updated; new section §4.2 documents BRAM-resident tables. Acronym glossary
+  added as §0 to keep readers unfamiliar with MiSTer / FPGA / Avalon
+  terminology grounded.
