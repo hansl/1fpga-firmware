@@ -359,9 +359,24 @@ descriptor table. Default 0 = use slot index ordering.
 ### 5.5. `opacity`
 
 8-bit alpha multiplier applied to the layer's contribution at blend time.
-0 = layer invisible (output unchanged), 255 = full strength. Cheap to add
-in RTL (one 8×8 multiply per blend stage). v1 left this field unread; v2
-wires it through `scanline_filter` to the painter.
+255 = full strength; lower values fade the layer. Cheap to add in RTL (one
+8×8 multiply per blend stage). v1 left this field unread; v2 wires it
+through `scanline_filter` to the painter.
+
+**v1 backward-compat exception**: v1 documented this byte as
+"reserved, host MUST write 0", which means every v1 descriptor has
+opacity = 0. To avoid making every v1 layer invisible when the v2 RBF
+runs, the painter treats `opacity == 0` as `opacity = 255` (no
+multiplier). Hosts that want a logically-invisible layer set
+`flags[0] = 0` (descriptor disabled) instead of opacity=0; the latter
+no longer has special meaning. This is documented at
+`scanline_filter.sv` `opacity_raw → opacity` substitution.
+
+The lost expressivity (no "opacity exactly 0" via this byte) is
+acceptable for the use cases this field exists for: fades animate from
+255 down to 1 and then host disables the layer; modal overlays use
+opacity=128 etc. Nobody needs a still-enabled-but-completely-invisible
+layer slot.
 
 ---
 
@@ -850,3 +865,7 @@ cleanly.
   explicitly deferred — needs either parallel texture_unit dispatch or
   halved compositor effective frame rate; not in scope without a concrete
   use case.
+- v0.4: §5.5 clarified with v1 backward-compat substitution. v1 hosts
+  wrote 0 to the (then-reserved) opacity byte; v2 painter treats raw
+  opacity=0 as opacity=255 so existing descriptor formation paths keep
+  working unchanged. Matches the just-landed RTL in commit `bf8ef32`.
