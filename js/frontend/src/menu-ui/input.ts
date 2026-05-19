@@ -71,25 +71,64 @@ function snapshot<T>(list: T[] | undefined): T[] {
   return list ? list.slice() : [];
 }
 
+/** Throttle interval per (intent name, kind). Held-key autorepeat
+ *  arrives at ~30/sec on evdev; we cap it at ~15/sec which is fast
+ *  enough to feel responsive and slow enough that a held-key sweep
+ *  doesn't pin React to ~10 fps. Pressed/Released for human-paced
+ *  taps are well under this threshold and pass through unchanged. */
+const COALESCE_MS = 66;
+const lastIntentAt: Map<string, number> = new Map();
+
 function dispatch(events: gui.InputBatchEntry[]): void {
+  // Coalesce all events first so we know how many distinct intents
+  // we'll actually fire. Then dispatch the deduped set.
+  //
+  // Why coalesce: each setState that produces a *different* state
+  // triggers a React commit, and each commit costs ~5-10 ms in Boa's
+  // interpreter. Held-key autorepeat at 30/sec → ~30 commits/sec →
+  // ~150-300 ms of commit work per second, stealing time from
+  // everything else. After coalescing the same key down to ~15/sec
+  // we halve that floor.
+  const now = Date.now();
+  const intentsToFire: gui.IntentEvent[] = [];
+  // Raw events stay as-is — there's no equivalent semantic
+  // collapsing for "key 0xFF pressed" repeated 30 times.
   for (const ev of events) {
     const rawList = snapshot(rawBySource.get(ev.raw.source));
     for (const l of rawList) {
       try {
         l.handler(ev.raw);
       } catch (err) {
-        // Don't let one handler's throw skip the rest of the batch.
         console.warn(`raw handler ${l.id} threw:`, err);
       }
     }
     for (const intent of ev.intents) {
-      const list = snapshot(intentByName.get(intent.name));
-      for (const l of list) {
-        try {
-          l.handler(intent);
-        } catch (err) {
-          console.warn(`intent handler '${intent.name}' threw:`, err);
-        }
+      // Released always fires (so press → release pairs stay
+      // semantically intact; otherwise a held key could "stick"
+      // visually). Pressed / Repeat are throttled by (name, kind).
+      if (intent.kind === 'released') {
+        intentsToFire.push(intent);
+        lastIntentAt.delete(`${intent.name}:pressed`);
+        lastIntentAt.delete(`${intent.name}:repeat`);
+        continue;
+      }
+      const key = `${intent.name}:${intent.kind}`;
+      const last = lastIntentAt.get(key);
+      if (last !== undefined && now - last < COALESCE_MS) {
+        // Skip — same (name, kind) fired too recently.
+        continue;
+      }
+      lastIntentAt.set(key, now);
+      intentsToFire.push(intent);
+    }
+  }
+  for (const intent of intentsToFire) {
+    const list = snapshot(intentByName.get(intent.name));
+    for (const l of list) {
+      try {
+        l.handler(intent);
+      } catch (err) {
+        console.warn(`intent handler '${intent.name}' threw:`, err);
       }
     }
   }
