@@ -227,6 +227,29 @@ declare module '1fpga:gui' {
   /** Unsubscribe a listener previously returned by `add*Listener`. */
   export function removeListener(id: number): boolean;
 
+  /**
+   * One entry in the input batch passed to a dispatcher: the raw
+   * evdev-derived event plus any intents the host's router produced
+   * for it (may be empty).
+   */
+  export interface InputBatchEntry {
+    raw: RawInputEvent;
+    intents: IntentEvent[];
+  }
+
+  /**
+   * Register (or clear with `null`) a single batch dispatcher. When
+   * set, the runtime drains pending input events into one JS array
+   * per loop iteration and calls `fn` exactly once with that array,
+   * instead of crossing the Rust→Boa boundary once per evdev event.
+   * The dispatcher is responsible for routing entries to whatever
+   * listeners JS has registered locally — typically a small Map
+   * keyed by intent name / raw source.
+   */
+  export function setInputDispatcher(
+    fn: ((events: InputBatchEntry[]) => void) | null,
+  ): void;
+
   /** Push `node` onto the focus stack — it becomes the active focus. */
   export function pushFocus(node: NodeId): void;
   /** Pop the top of the focus stack and return the previous value. */

@@ -6,6 +6,12 @@
 
 import * as gui from '1fpga:gui';
 
+// Side-effect import: registers the JS-side input dispatcher with the
+// host BEFORE any component mounts and calls useIntent/useRawInput.
+// Without this, the runtime would fall back to per-event Rust→Boa
+// crossings (5-10× more boundary cost under heavy mash).
+import './input';
+
 import { App } from './App';
 import { ALL_ICON_CODEPOINTS } from './components/Icon';
 import { render } from './reconciler';

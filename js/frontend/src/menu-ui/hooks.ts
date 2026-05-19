@@ -11,32 +11,37 @@
 import { useCallback, useLayoutEffect, useRef, useState } from 'react';
 import * as gui from '1fpga:gui';
 
+import { addIntent, addRaw, remove } from './input';
+
 export function useIntent(
   name: string,
   handler: (e: gui.IntentEvent) => void,
-  opts?: gui.ListenerOpts,
+  _opts?: gui.ListenerOpts,
 ): void {
   useLayoutEffect(() => {
-    const id = gui.addIntentListener(name, handler, opts);
+    // _opts (scope / focus) is currently unused by the JS-side
+    // registry — focus filtering can be reintroduced as JS state if
+    // it becomes load-bearing again. Argument kept for source-compat.
+    const id = addIntent(name, handler);
     return () => {
-      gui.removeListener(id);
+      remove(id);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [name, handler, opts?.global, opts?.nodeId]);
+  }, [name, handler]);
 }
 
 export function useRawInput(
   source: 'keyboard' | 'gamepad' | 'mouse',
   handler: (e: gui.RawInputEvent) => void,
-  opts?: gui.ListenerOpts,
+  _opts?: gui.ListenerOpts,
 ): void {
   useLayoutEffect(() => {
-    const id = gui.addRawInputListener(source, handler, opts);
+    const id = addRaw(source, handler);
     return () => {
-      gui.removeListener(id);
+      remove(id);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [source, handler, opts?.global, opts?.nodeId]);
+  }, [source, handler]);
 }
 
 /**
@@ -131,13 +136,13 @@ export function useInputSource(initial: 'keyboard' | 'gamepad' | 'mouse' = 'keyb
   const onPad = useCallback(() => setSource((s) => (s === 'gamepad' ? s : 'gamepad')), []);
   const onMouse = useCallback(() => setSource((s) => (s === 'mouse' ? s : 'mouse')), []);
   useLayoutEffect(() => {
-    const a = gui.addRawInputListener('keyboard', onKb, { global: true });
-    const b = gui.addRawInputListener('gamepad', onPad, { global: true });
-    const c = gui.addRawInputListener('mouse', onMouse, { global: true });
+    const a = addRaw('keyboard', onKb);
+    const b = addRaw('gamepad', onPad);
+    const c = addRaw('mouse', onMouse);
     return () => {
-      gui.removeListener(a);
-      gui.removeListener(b);
-      gui.removeListener(c);
+      remove(a);
+      remove(b);
+      remove(c);
     };
   }, [onKb, onPad, onMouse]);
   return source;
