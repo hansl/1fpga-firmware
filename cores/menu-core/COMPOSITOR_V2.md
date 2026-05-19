@@ -646,9 +646,11 @@ architecture if DDR3 has headroom. Measure phase 1 bandwidth first.)
 
 ## 11. Phasing — staged rollout
 
-Five phases, each independently reviewable and reverable. The
-`SCANOUT_FB_SELECT` toggle lets us A/B between v1 and v2 paths on the same
-RBF for direct comparison.
+Phases 1-5 ship v2 at `MAX_TEXTURED = 4` (the L0/L1/L2/L3 plan from §2);
+phase 3.5 is a stretch follow-on that bumps to `MAX_TEXTURED = 6` once
+the four-layer path is proven. Each phase is independently reviewable
+and revertable. The `SCANOUT_FB_SELECT` toggle lets us A/B between v1
+and v2 paths on the same RBF for direct comparison.
 
 ### Phase 1 — Compositor writes to DDR (no dirty tracking yet)
 
@@ -668,8 +670,8 @@ descriptors. Bandwidth measurement: should be ~750 MB/s steady state
 
 ### Phase 2 — Per-scanline dirty tracking
 
-- Add `DIRTY_BITMASK_BASE` register and the bitmask region.
-- Add `INVALIDATE_RECT`, `INVALIDATE_ALL`, `MASK_COMMIT` ops.
+- Add `INVALIDATE_RECT`, `INVALIDATE_ALL`, `MASK_COMMIT` ops (bitmask is
+  BRAM-resident per §6, no DDR3 region needed).
 - Bank-swap logic auto-marks dirty scanlines on descriptor changes (§4.2).
 - Compositor skips clean scanlines per §9.1.
 - Implement scanout FB management option B (§10.2).
@@ -686,10 +688,50 @@ tracking).
   worst-case defer.
 - Per-layer `z_priority` (§5.4, small).
 
+**MAX_TEXTURED stays at 4 for v2.** The painter is hand-unrolled per layer
+in v1; reworking that into a parameterised structure is real work and
+adds nothing for the L0/L1/L2/L3 plan in §2. We ship v2 at 4 — that's the
+intentional sweet spot for the four-layer model (wallpaper + menu DOM +
+overlay + notification).
+
 **Validation:** unit-test each feature with a small example.
 
 **Cost estimate:** ~1 week, mostly the scale feature. Could parallelise
 with phase 2.
+
+### Phase 3.5 — MAX_TEXTURED = 6 (target, not a v2-ship requirement)
+
+Once v2 lands at 4 layers and is stable, the immediate stretch goal is
+bumping `MAX_TEXTURED` from 4 to 6 to give headroom for realistic
+"busy-screen" cases (modal dialog + animated transition + notification
+*on top of* menu + wallpaper = 5; with one slot of slack = 6).
+
+What this requires in `compositor.sv`:
+
+1. Two additional `line_buffer` instances (each ~8 M10K BRAM, total +16 M10K).
+2. Two additional painter pipeline stages (each ~3 DSPs + ~120 LUTs).
+3. Two additional iterations in the per-scanline texture_unit dispatcher.
+4. `H_BP` (horizontal back porch) bumped by ~700 cycles so the dispatcher
+   fits the worst-case 6-layer scanline build in HBlank. Pushes the
+   compositor's effective frame rate from ~26.6 Hz to ~21 Hz on the
+   internal raster; doesn't matter for MISTER_FB-mode scanout (HDMI
+   timing is owned by ASCAL anyway).
+5. The hand-unrolled blend stages in `compositor.sv:519-668` get two
+   additional stages 6 and 7 added in the same shape as 5.
+
+**Validation:** the existing v1-style 4-layer regression set must still
+pass; then a new 6-layer test case (5 textured layers crossing one
+scanline). Bandwidth check: 6 full-screen textured layers at 1080p60 =
+~3 GB/s, well over budget — so 6 layers must be used with smaller
+layers, which is the entire point of the variable-size-layer design.
+
+**Cost estimate:** ~3-5 days of FPGA work plus sim + fitter + timing
+closure. Done as a follow-on after v2 ships.
+
+**Do NOT target 8 layers in v2 or v2-stretch.** 8 needs either a
+parallel `texture_unit` dispatch path (real new feature) or a halved
+compositor effective frame rate. Defer until a concrete use case
+demands it.
 
 ### Phase 4 — Host-side migration
 
@@ -802,3 +844,9 @@ cleanly.
   updated; new section §4.2 documents BRAM-resident tables. Acronym glossary
   added as §0 to keep readers unfamiliar with MiSTer / FPGA / Avalon
   terminology grounded.
+- v0.3: locked `MAX_TEXTURED = 4` for v2 ship. Added phase 3.5 documenting
+  the 4 → 6 stretch goal (additional line buffers + painter stages +
+  HBlank extension) as a follow-on once v2 is proven. 8-layer path
+  explicitly deferred — needs either parallel texture_unit dispatch or
+  halved compositor effective frame rate; not in scope without a concrete
+  use case.
