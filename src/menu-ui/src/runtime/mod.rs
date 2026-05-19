@@ -26,6 +26,7 @@ use crate::text::TextCache;
 use crate::vdom::{NodeId, NodeKind, Tree};
 
 use boa_engine::{JsObject, JsValue};
+use boa_engine::object::builtins::JsFunction;
 
 /// Compile-time build identifier — package version. Logged at startup
 /// so a glance at the device output confirms which binary is running.
@@ -38,6 +39,43 @@ pub const BUILD_ID: &str = env!("CARGO_PKG_VERSION");
 /// global hotkeys work). Snapshot listener lists before calling so
 /// handlers that subscribe / unsubscribe during dispatch don't
 /// invalidate iteration.
+/// Build one batch of `{raw, intents?}` entries (one per evdev event)
+/// and invoke the JS dispatcher exactly once. Replaces the per-event
+/// crossings with a single Rust→Boa call — when the keyboard buffer
+/// has 6-18 events queued under spam, this drops the Boa-overhead
+/// cost by the same factor.
+///
+/// The intent router still runs in Rust (cheap) — only the *delivery*
+/// to listeners moves to JS.
+fn dispatch_input_batch(
+    router: &IntentRouter,
+    events: &[RawInputEvent],
+    dispatcher: &JsFunction,
+    context: &mut boa_engine::Context,
+) -> Result<(), RuntimeError> {
+    use boa_engine::object::builtins::JsArray;
+    let arr = JsArray::new(context).map_err(boa_err)?;
+    for ev in events {
+        let raw = raw_event_to_js(ev, context)?;
+        let intents = router.translate(ev);
+        let intents_js = JsArray::new(context).map_err(boa_err)?;
+        for intent in &intents {
+            let i = intent_to_js(intent, context)?;
+            intents_js.push(i, context).map_err(boa_err)?;
+        }
+        let entry = JsObject::with_null_proto();
+        entry.set(js_string!("raw"), raw, false, context).map_err(boa_err)?;
+        entry
+            .set(js_string!("intents"), JsValue::from(intents_js), false, context)
+            .map_err(boa_err)?;
+        arr.push(JsValue::from(entry), context).map_err(boa_err)?;
+    }
+    if let Err(e) = dispatcher.call(&JsValue::undefined(), &[JsValue::from(arr)], context) {
+        tracing::warn!("input batch dispatcher threw: {e}");
+    }
+    Ok(())
+}
+
 fn dispatch_input(
     input_state: &InputState,
     router: &IntentRouter,
@@ -505,11 +543,32 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         let t1 = Instant::now();
 
         // 0b. Pump input. Drain pending evdev events, translate to
-        //     intents, dispatch any subscribed JS listeners.
+        //     intents, dispatch any subscribed JS listeners. When a
+        //     batch dispatcher is registered (via
+        //     `gui.setInputDispatcher`), we cross the Rust→Boa
+        //     boundary once per drain regardless of event count —
+        //     JS owns the per-listener routing. The per-event path
+        //     stays as the fallback for any bundle that hasn't
+        //     registered a dispatcher.
         event_buf.clear();
         pump.drain(&mut event_buf);
-        for ev in event_buf.drain(..) {
-            dispatch_input(&input_state, &router, &ev, &mut context)?;
+        if !event_buf.is_empty() {
+            match input_state.batch_dispatcher() {
+                Some(dispatcher) => {
+                    dispatch_input_batch(
+                        &router,
+                        &event_buf,
+                        &dispatcher,
+                        &mut context,
+                    )?;
+                    event_buf.clear();
+                }
+                None => {
+                    for ev in event_buf.drain(..) {
+                        dispatch_input(&input_state, &router, &ev, &mut context)?;
+                    }
+                }
+            }
         }
 
         // 0c. Tick jobs again — handlers above may have called

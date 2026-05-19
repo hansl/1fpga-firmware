@@ -120,6 +120,10 @@ pub fn register(loader: &MapModuleLoader, context: &mut Context) -> JsResult<()>
             NativeFunction::from_fn_ptr(remove_listener),
         ),
         (
+            js_string!("setInputDispatcher"),
+            NativeFunction::from_fn_ptr(set_input_dispatcher),
+        ),
+        (
             js_string!("pushFocus"),
             NativeFunction::from_fn_ptr(push_focus),
         ),
@@ -491,6 +495,41 @@ fn remove_listener(_this: &JsValue, args: &[JsValue], context: &mut Context) -> 
     let id = ListenerId(args.get_or_undefined(0).to_u32(context)?);
     let state = input_state(context)?;
     Ok(JsValue::from(state.remove(id)))
+}
+
+/// `gui.setInputDispatcher(fn | null)`. When set, the runtime drains
+/// pending input events into a single JS array and invokes `fn` once
+/// per loop iteration instead of crossing the Rust→Boa boundary once
+/// per evdev event. JS is then responsible for routing events to the
+/// listeners it cares about — typically through a small JS-side
+/// registry that wraps useIntent / useRawInput.
+///
+/// Pass `null` to clear and fall back to the per-listener path. The
+/// stored function isn't cloned per-call; the same handle is invoked
+/// every drain, so JS-side state mutations (closed-over Maps, etc.)
+/// persist naturally.
+fn set_input_dispatcher(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let state = input_state(context)?;
+    let arg = args.get_or_undefined(0);
+    if arg.is_null() || arg.is_undefined() {
+        state.set_batch_dispatcher(None);
+        return Ok(JsValue::undefined());
+    }
+    let f = arg
+        .as_object()
+        .and_then(|o| JsFunction::from_object(o.clone()))
+        .ok_or_else(|| {
+            JsError::from_native(
+                JsNativeError::typ()
+                    .with_message("setInputDispatcher: expected function or null"),
+            )
+        })?;
+    state.set_batch_dispatcher(Some(f));
+    Ok(JsValue::undefined())
 }
 
 fn push_focus(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {

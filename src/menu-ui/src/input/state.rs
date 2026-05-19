@@ -55,6 +55,14 @@ struct InputStateInner {
     listeners: Vec<Listener>,
     focus_stack: Vec<u32>,
     next_id: u32,
+    /// Optional batch dispatcher. When set, the runtime ignores the
+    /// per-listener vec above and instead translates the whole drain
+    /// into a single JS array, invoking this function once. Wins ~5×
+    /// on Boa per-call overhead under heavy mash (no Rust→JS crossing
+    /// per evdev event). Set via `gui.setInputDispatcher(fn)`; the
+    /// per-listener path stays as the fallback when JS hasn't
+    /// registered a dispatcher.
+    batch_dispatcher: Option<JsFunction>,
 }
 
 struct Listener {
@@ -125,6 +133,16 @@ impl InputState {
             .filter(|l| scope_matches(l.scope, focus))
             .map(|l| l.handler.clone())
             .collect()
+    }
+
+    // --- Batch dispatcher --------------------------------------------
+
+    pub fn set_batch_dispatcher(&self, dispatcher: Option<JsFunction>) {
+        self.inner.borrow_mut().batch_dispatcher = dispatcher;
+    }
+
+    pub fn batch_dispatcher(&self) -> Option<JsFunction> {
+        self.inner.borrow().batch_dispatcher.clone()
     }
 
     // --- Focus stack -------------------------------------------------
