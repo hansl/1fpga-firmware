@@ -73,7 +73,6 @@ Host (Rust + JS)
   │     │  layer table A / B (descriptors, 256 × 32 B)              │
   │     │                                                            │
   │     │  scanout FB (triple-buffered) ◄── compositor writes here  │
-  │     │  per-scanline dirty bitmask                                │
   │     │                                                            │
   │     └────────────────────────────────────────────────────────────┘
   │                ▲                            │
@@ -84,9 +83,15 @@ Host (Rust + JS)
   └──────────►│ Compositor│               │ MISTER_FB scanout │
    layer      │  (FSM +   │               │ (framework)        │
    descriptor │  arbiter) │               └─────────┬──────────┘
-   updates    └───────────┘                         │
-   + dirty                                          ▼
-   bitmask                                       ASCAL → HDMI
+   updates    │           │                         │
+   + ops      │  dirty    │                         │
+   (INVALIDATE│  bitmask  │                         │
+    _RECT etc)│  (1024 b  │                         │
+              │  × 2,     │                         │
+              │  BRAM)    │                         │
+              └───────────┘                         │
+                                                    ▼
+                                                  ASCAL → HDMI
 ```
 
 ### Comparison with v1
@@ -120,8 +125,6 @@ reserved 32 MB block (offsets within the host-side base):
 +0x0180_0000   ring buffer
 +0x0188_0000   layer table A
 +0x018A_0000   layer table B
-+0x018C_0000   per-scanline dirty bitmask (256 B; 2 × 1024-bit slots, A/B,
-                                           swaps with the layer table on commit)
 +0x0200_0000   texture pool (decoded PNGs, glyph atlases — unchanged)
 +0x0E00_0000   per-layer source RT pool (NEW)
    each layer source RT is allocated host-side from this region
@@ -136,9 +139,12 @@ Notes:
 - The "per-layer source RT pool" is a new region. Allocation strategy:
   bump-allocated by the host at startup based on the layer config. Same
   approach as the texture pool.
-- The "per-scanline dirty bitmask" is 1024 bits to comfortably fit the
-  worst-case 1080 scanlines (we round up to 1024 for word alignment). Two
-  buffers (A and B), swapped atomically with the layer table on `LAYER_COMMIT`.
+- The per-scanline dirty bitmask **lives entirely in BRAM, not DDR3** (§6).
+  At 1024 bits per buffer × 2 buffers = 256 B total, the BRAM cost is
+  negligible (a fraction of one M10K block) and the access pattern is much
+  better suited to BRAM than DDR3 — single-cycle reads from the compositor
+  FSM each scanline, single-cycle writes from the bus interface on
+  `INVALIDATE_*` ops. No DDR3 traffic for the dirty mask at all.
 - All physical addresses are 32-byte aligned (matches DDR3 burst boundaries).
 
 ---
@@ -284,20 +290,34 @@ wires it through `scanline_filter` to the painter.
 ## 6. Dirty tracking
 
 The per-frame dirty bitmask is 1024 bits (one per scanline; bits 1080-1023
-unused). Stored in DDR3 at the per-scanline-dirty-bitmask offset.
-Double-buffered (A and B) so the host can write the next frame's mask while
-the compositor reads the current one.
+unused). It lives in **on-chip BRAM**, not DDR3 — 128 B per buffer × 2
+buffers (A active, B building) = 256 B total, well under the noise floor of
+the FPGA's BRAM budget. The host never directly touches the BRAM; bits are
+set via ops in the ring-buffer command stream that the FPGA decodes into
+single-cycle BRAM writes.
+
+Two reasons for BRAM over DDR3 here:
+
+1. **Access pattern.** The compositor's FSM reads one bit per scanline (1080
+   reads per frame). DDR3 reads cost ~10 cycles minimum and waste burst
+   capacity on 1-bit fetches. BRAM reads are single-cycle and free.
+2. **Size.** 256 B doesn't justify a DDR3 region; it doesn't even fill a
+   single M10K block (1280 B).
 
 ### 6.1. Writing the dirty bitmask
 
-The host writes the bitmask by issuing an `INVALIDATE_RECT(x, y, w, h)` op
-(see §8), which the FPGA decodes to "set bits y..y+h in the next-frame mask."
-The host can issue multiple `INVALIDATE_RECT`s per frame; bits accumulate
-(OR).
+The host issues `INVALIDATE_RECT(x, y, w, h)` ops (see §8). The FPGA decodes
+each into a y-range bit-set on the "building" bitmask. The host can issue
+multiple `INVALIDATE_RECT`s per frame; bits accumulate (OR-into-place).
 
-The host MAY also write the raw mask directly via a single 256-byte burst to
-the bitmask region followed by `MASK_COMMIT`. Useful for bulk invalidations
-(e.g. "all scanlines dirty" = mark all bits set).
+For full-screen invalidations (boot, resolution change, etc.), the
+`INVALIDATE_ALL` op sets all 1024 bits in a single bus write. The host
+SHOULD NOT issue 1080 individual `INVALIDATE_RECT`s for "all scanlines";
+use `INVALIDATE_ALL`.
+
+The host has **no read path** to the bitmask in the normal flow. If we ever
+need one for diagnostics, the host can mmap a debug register window that
+exposes the active BRAM contents read-only.
 
 ### 6.2. Automatic dirty propagation from layer descriptor changes
 
@@ -345,7 +365,6 @@ unchanged; v2 indices added in the previously-reserved range.
 0x60  LAYER_COUNT          (existing)
 0x68  LAYER_TABLE_BASE     (existing)
 0x6C  LAYER_COMMIT         (existing; semantics extended — see §8)
-0x80  DIRTY_BITMASK_BASE   (new) host phys addr of bitmask A/B region
 0x84  COMPOSITOR_CONTROL   (new) bit 0 = enable; bit 1 = pause; bit 2 = use_compositor_scanout
 0x88  COMPOSITOR_STATUS    (new) bit 0 = busy; bit 1..2 = current_buffer (0/1/2)
 0x8C  SCANOUT_FB_SELECT    (new) bit 0 = 0:use MISTER_FB direct (v1) / 1:use compositor output
@@ -409,13 +428,16 @@ bits to 1 in one register write.
 
 ### 8.3. `MASK_COMMIT`
 
-Atomically swap the active dirty bitmask buffer with the inactive one. Done
-in the same edge as `LAYER_COMMIT` if both are pending; the host typically
-batches them at the end of frame.
+Atomically swap the active BRAM-resident dirty bitmask buffer with the
+inactive one. The host typically issues this at end-of-frame after all
+`INVALIDATE_*` ops have been queued.
 
-(Open question: should `LAYER_COMMIT` implicitly also commit the bitmask, or
-do we want them separate? Provisional answer: implicit commit is simpler
-for the host. Bitmask swap happens whenever `LAYER_COMMIT` is processed.)
+`LAYER_COMMIT` implicitly also commits the bitmask: when the FPGA processes
+a `LAYER_COMMIT` it swaps both the layer table active/inactive index *and*
+the bitmask active/building index in a single cycle. Hosts that don't need
+separate timing for the two MAY just call `LAYER_COMMIT` and skip
+`MASK_COMMIT`; hosts that want to commit dirty bits without changing
+descriptors (rare) use `MASK_COMMIT` standalone.
 
 ### 8.4. `SET_LAYER_RT_BASE(rt_id, phys_addr)`
 
@@ -688,3 +710,8 @@ cleanly.
 
 - v0 (initial draft, this file): describes the architecture and phases for
   scanline-cached layered rendering. Pre-implementation.
+- v0.1: dirty bitmask moved from DDR3 to BRAM (256 B total, fits in a
+  fraction of one M10K). `DIRTY_BITMASK_BASE` register removed; the bitmask
+  is no longer host-mappable. `MASK_COMMIT` semantics clarified (BRAM
+  active/building index swap). Memory layout, register table, and §6 rewritten
+  accordingly.
