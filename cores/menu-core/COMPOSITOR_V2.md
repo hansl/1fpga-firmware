@@ -501,13 +501,15 @@ descriptor commit has fully taken effect.
 
 ## 8. New ops in the ring buffer command stream
 
-v1 ops remain. v2 adds:
+v1 ops remain. v2 adds (the 0x10/0x11 slots are already FILL_RECT /
+COPY_RECT in v1's PROTOCOL.md §5.2, so v2 uses 0x20+ to avoid the
+collision):
 
 ```
-0x10  INVALIDATE_RECT      args: x16, y16, w16, h16   (8 bytes)
-0x11  INVALIDATE_ALL       no args                    (0 bytes)
-0x12  MASK_COMMIT          no args                    (0 bytes)
-0x13  SET_LAYER_RT_BASE    args: rt_id16, phys_addr32 (6 bytes)
+0x20  INVALIDATE_RECT      args: x16, y16, w16, h16   (8 bytes)
+0x21  INVALIDATE_ALL       no args                    (0 bytes)
+0x22  MASK_COMMIT          no args                    (0 bytes)
+0x23  SET_LAYER_RT_BASE    args: rt_id16, phys_addr32 (6 bytes)
 ```
 
 ### 8.1. `INVALIDATE_RECT(x, y, w, h)`
@@ -869,3 +871,8 @@ cleanly.
   wrote 0 to the (then-reserved) opacity byte; v2 painter treats raw
   opacity=0 as opacity=255 so existing descriptor formation paths keep
   working unchanged. Matches the just-landed RTL in commit `bf8ef32`.
+- v0.5: opcode collision fix in §8 (INVALIDATE_RECT / INVALIDATE_ALL
+  / MASK_COMMIT / SET_LAYER_RT_BASE moved from 0x10..0x13 → 0x20..0x23
+  because PROTOCOL.md §5.2 already assigned 0x10 = FILL_RECT and 0x11
+  = COPY_RECT in v1). Pure spec correction — no RTL impact since none
+  of these were implemented yet.
