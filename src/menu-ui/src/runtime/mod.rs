@@ -232,13 +232,24 @@ fn boa_err(e: boa_engine::JsError) -> RuntimeError {
 /// Walk the tree under `root` and load every `<img src>` we haven't
 /// seen yet. Failed loads are recorded as `Failed` entries so we
 /// don't retry on every frame.
+/// Walks the tree, decode+upload-ing any `<img>` whose `src` isn't
+/// already cached. Returns the number of decode+upload operations
+/// performed this frame — should be 0 in steady state. A non-zero
+/// value indicates either first-time content or an animated source
+/// changing every frame.
 fn prepare_images(
     tree: &Tree,
     root: NodeId,
     images: &mut ImageRegistry,
     device: &mut Device,
-) {
-    fn walk(tree: &Tree, id: NodeId, images: &mut ImageRegistry, device: &mut Device) {
+) -> u32 {
+    fn walk(
+        tree: &Tree,
+        id: NodeId,
+        images: &mut ImageRegistry,
+        device: &mut Device,
+        loaded: &mut u32,
+    ) {
         let Some(node) = tree.get(id) else {
             return;
         };
@@ -247,12 +258,15 @@ fn prepare_images(
             && !src.is_empty()
         {
             let _ = images.get_or_load(device, src);
+            *loaded += 1;
         }
         for &child in &node.children {
-            walk(tree, child, images, device);
+            walk(tree, child, images, device, loaded);
         }
     }
-    walk(tree, root, images, device);
+    let mut loaded = 0;
+    walk(tree, root, images, device, &mut loaded);
+    loaded
 }
 
 /// Verbose tree dump used for diagnostics. Only emits at DEBUG level
@@ -512,9 +526,27 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     use std::time::Instant;
     const TIMING_LOG_PERIOD: u32 = 60;
     let mut t_jobs = Duration::ZERO;
-    let mut t_input = Duration::ZERO;
+    // The t_input bucket got large enough in production (~20 ms/frame
+    // steady state) that conflating evdev syscalls with React/JS work
+    // hid the cause. Split into four sub-buckets so the timing log
+    // can localize the cost:
+    //   drain    = pump.drain (evdev fd reads + translate)
+    //   dispatch = JS dispatcher call(s) for the drained batch
+    //   jobs2    = boa::tick_jobs that drains React's microtask queue
+    //              triggered by input handlers
+    //   raf      = RAF callback list + the tick_jobs that follows
+    // Their sum should approximate the legacy t_input value.
+    let mut t_drain = Duration::ZERO;
+    let mut t_dispatch = Duration::ZERO;
+    let mut t_jobs2 = Duration::ZERO;
+    let mut t_raf = Duration::ZERO;
     let mut t_text_prep = Duration::ZERO;
     let mut t_images = Duration::ZERO;
+    // Diagnostic: how many image decode+upload operations actually
+    // happen per frame. Hits the cache for already-loaded sources, so
+    // steady-state should be 0. If it's not, t_images is being eaten
+    // by re-uploads (an image src changing every frame, etc.).
+    let mut images_loaded_total: u64 = 0;
     let mut t_text_pop = Duration::ZERO;
     let mut t_layout = Duration::ZERO;
     let mut t_paint = Duration::ZERO;
@@ -552,6 +584,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         //     registered a dispatcher.
         event_buf.clear();
         pump.drain(&mut event_buf);
+        let t1a = Instant::now();
         if !event_buf.is_empty() {
             match input_state.batch_dispatcher() {
                 Some(dispatcher) => {
@@ -570,12 +603,15 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                 }
             }
         }
+        let t1b = Instant::now();
 
         // 0c. Tick jobs again — handlers above may have called
         //     setTimeout (directly or via React's setState scheduler).
         if let Err(e) = boa::tick_jobs(&executor, &mut context) {
             tracing::warn!("tick_jobs error: {e}");
         }
+
+        let t1c = Instant::now();
 
         // 0d. Drain the requestAnimationFrame queue. Each callback
         //     receives ms-since-runtime-start, matching the browser's
@@ -600,6 +636,11 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
 
         let t2 = Instant::now();
 
+        t_drain    += t1a - t1;
+        t_dispatch += t1b - t1a;
+        t_jobs2    += t1c - t1b;
+        t_raf      += t2  - t1c;
+
         // 0e. Advance any in-flight tweens. Runs before layout so
         //     tweens of layout-affecting properties (width, height,
         //     etc.) take effect this frame. Each tween mutates the
@@ -621,8 +662,12 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
 
         // 3. Prepare images: walk the tree, decode + upload any
         //    `<img>` whose `src` we haven't seen yet. Failures are
-        //    cached so we don't retry every frame.
-        ui_state.with_tree(|tree| prepare_images(tree, root, &mut images, &mut device));
+        //    cached so we don't retry every frame. The returned count
+        //    feeds the diagnostic so we can tell cache hits from
+        //    repeated re-decodes.
+        let loaded_this_frame =
+            ui_state.with_tree(|tree| prepare_images(tree, root, &mut images, &mut device));
+        images_loaded_total += loaded_this_frame as u64;
 
         let t4 = Instant::now();
 
@@ -779,7 +824,8 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         }
 
         t_jobs += t1 - t0;
-        t_input += t2 - t1;
+        // t_drain/dispatch/jobs2/raf were already accumulated above
+        // (split out of the legacy t_input bucket).
         t_text_prep += t3 - t2;
         t_images += t4 - t3;
         t_text_pop += t5 - t4;
@@ -793,18 +839,28 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         if frame_idx % TIMING_LOG_PERIOD == 0 {
             let n = TIMING_LOG_PERIOD as u32;
             let avg = |t: Duration| t.as_micros() as u32 / n;
+            // The four input-related buckets (drain/dispatch/jobs2/raf)
+            // replace the legacy `input=` total. Their sum should
+            // approximate what the old `input=` printed; if one is the
+            // outlier we now see which one.
+            let t_input_total = t_drain + t_dispatch + t_jobs2 + t_raf;
             tracing::info!(
-                "frame timings (us avg over {n}): jobs={} input={} text_prep={} images={} text_pop={} layout={} paint={} fence={} scanout={} total={}",
+                "frame timings (us avg over {n}): jobs={} drain={} dispatch={} jobs2={} raf={} (input={}) text_prep={} images={} (loaded={}) text_pop={} layout={} paint={} fence={} scanout={} total={}",
                 avg(t_jobs),
-                avg(t_input),
+                avg(t_drain),
+                avg(t_dispatch),
+                avg(t_jobs2),
+                avg(t_raf),
+                avg(t_input_total),
                 avg(t_text_prep),
                 avg(t_images),
+                images_loaded_total,
                 avg(t_text_pop),
                 avg(t_layout),
                 avg(t_paint),
                 avg(t_fence),
                 avg(t_scanout),
-                avg(t_jobs + t_input + t_text_prep + t_images + t_text_pop + t_layout + t_paint + t_fence + t_scanout),
+                avg(t_jobs + t_input_total + t_text_prep + t_images + t_text_pop + t_layout + t_paint + t_fence + t_scanout),
             );
             // Damage / pixel accounting. "rects" is average rect
             // count per frame (after coalescing); "area" is average
@@ -824,9 +880,13 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                 count_full_paints,
             );
             t_jobs = Duration::ZERO;
-            t_input = Duration::ZERO;
+            t_drain = Duration::ZERO;
+            t_dispatch = Duration::ZERO;
+            t_jobs2 = Duration::ZERO;
+            t_raf = Duration::ZERO;
             t_text_prep = Duration::ZERO;
             t_images = Duration::ZERO;
+            images_loaded_total = 0;
             t_text_pop = Duration::ZERO;
             t_layout = Duration::ZERO;
             t_paint = Duration::ZERO;
