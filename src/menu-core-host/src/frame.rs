@@ -255,6 +255,37 @@ impl<'a> Frame<'a> {
         Ok(self)
     }
 
+    /// Mark scanlines `y..y+h` dirty in the compositor's per-scanline
+    /// bitmask (COMPOSITOR_V2.md §6 / §8.1). `x` and `w` are reserved
+    /// for future per-rect dirty tracking; today they're encoded but
+    /// unused on the FPGA side.
+    ///
+    /// Multiple calls in one frame accumulate (OR-into-place). The
+    /// host typically calls [`Self::mask_commit`] once at the end of
+    /// the frame to promote the rectangles into the compositor's
+    /// active bank.
+    pub fn invalidate_rect(mut self, rect: Rect) -> Result<Self, DeviceError> {
+        self.push_cmd(&Command::InvalidateRect(rect))?;
+        Ok(self)
+    }
+
+    /// Mark every scanline dirty in one op (§8.2). Used on boot and
+    /// after any operation that changes the entire scene (e.g.
+    /// resolution switch).
+    pub fn invalidate_all(mut self) -> Result<Self, DeviceError> {
+        self.push_cmd(&Command::InvalidateAll)?;
+        Ok(self)
+    }
+
+    /// Atomically promote queued INVALIDATE_RECT / INVALIDATE_ALL
+    /// writes into the compositor's active dirty bitmask (§8.3). The
+    /// previously-active bank is zeroed so the next frame's host
+    /// invalidations start from a clean slate.
+    pub fn mask_commit(mut self) -> Result<Self, DeviceError> {
+        self.push_cmd(&Command::MaskCommit)?;
+        Ok(self)
+    }
+
     /// Append a trailing `FENCE`, advance `RING_TAIL`, and pulse
     /// `RING_KICK`.
     ///

@@ -79,6 +79,12 @@ pub const OP_CLEAR_CLIP: u8 = 0x04;
 pub const OP_SET_RENDER_TARGET: u8 = 0x05;
 pub const OP_FILL_RECT: u8 = 0x10;
 pub const OP_COPY_RECT: u8 = 0x11;
+// Compositor v2 ops (COMPOSITOR_V2.md §8). The 0x20+ range avoids a
+// collision with FILL_RECT / COPY_RECT that the original spec draft
+// had at 0x10/0x11.
+pub const OP_INVALIDATE_RECT: u8 = 0x20;
+pub const OP_INVALIDATE_ALL: u8 = 0x21;
+pub const OP_MASK_COMMIT: u8 = 0x22;
 pub const OP_EXTENDED: u8 = 0xFF;
 
 // --- Flag bits ---------------------------------------------------------
@@ -141,6 +147,22 @@ pub enum Command {
         filter: Filter,
         tint: Option<Rgba>,
     },
+
+    /// Mark scanlines `y..y+h` dirty in the compositor's per-scanline
+    /// dirty bitmask (COMPOSITOR_V2.md §6 / §8.1). `x` and `w` are
+    /// carried in the encoded args for future per-rect tracking but
+    /// the FPGA ignores them today — granularity is per-scanline.
+    InvalidateRect(Rect),
+
+    /// Mark all 1024 scanlines dirty in one register-write (§8.2).
+    /// Fast path for full-screen invalidations; equivalent in effect
+    /// to `InvalidateRect(0, 0, fb_w, fb_h)`.
+    InvalidateAll,
+
+    /// Atomically swap the active / building dirty bitmask banks
+    /// (§8.3). The host issues this after queueing the frame's
+    /// `INVALIDATE_*` ops so the compositor sees a coherent set.
+    MaskCommit,
 }
 
 /// Error type for [`Command::encode`].
@@ -170,6 +192,9 @@ impl Command {
                     5
                 }
             }
+            Command::InvalidateRect(_) => 2,
+            Command::InvalidateAll => 0,
+            Command::MaskCommit => 0,
         }
     }
 
@@ -206,7 +231,8 @@ impl Command {
                     write_u32_le(&mut args[i * 4..i * 4 + 4], 0);
                 }
             }
-            Command::Present | Command::ClearClip => {
+            Command::Present | Command::ClearClip
+            | Command::InvalidateAll | Command::MaskCommit => {
                 // No argument words.
             }
             Command::Fence { value } => {
@@ -240,6 +266,14 @@ impl Command {
                 if let Some(t) = tint {
                     write_u32_le(&mut args[20..24], t.to_u32());
                 }
+            }
+            Command::InvalidateRect(r) => {
+                // Same packed x|y / w|h layout as SET_CLIP; the FPGA
+                // currently uses only y/h but we send x/w so the
+                // future per-rect tracking path doesn't need an
+                // opcode bump.
+                write_u32_le(&mut args[0..4], pack_xy(r.x, r.y));
+                write_u32_le(&mut args[4..8], pack_xy(r.w, r.h));
             }
         }
 
@@ -279,6 +313,9 @@ impl Command {
                 }
                 (OP_COPY_RECT, length_w, flags)
             }
+            Command::InvalidateRect(_) => (OP_INVALIDATE_RECT, length_w, 0),
+            Command::InvalidateAll       => (OP_INVALIDATE_ALL,  length_w, 0),
+            Command::MaskCommit          => (OP_MASK_COMMIT,     length_w, 0),
         }
     }
 }
@@ -564,5 +601,34 @@ mod tests {
         let mut small = [0u8; 2];
         let r = cmd.encode(&mut small);
         assert_eq!(r, Err(EncodeError::BufferTooSmall { needed: 4, have: 2 }));
+    }
+
+    #[test]
+    fn invalidate_rect_packs_xy_wh() {
+        // INVALIDATE_RECT (0x20), length_w=2, flags=0
+        //   header LE: [00, 00, 02, 20]
+        //   x=0x0010, y=0x0020 → packed (0x10<<16)|0x20 → LE [20, 00, 10, 00]
+        //   w=0x0040, h=0x0050 → packed → LE [50, 00, 40, 00]
+        let bytes = enc(&Command::InvalidateRect(Rect::new(0x10, 0x20, 0x40, 0x50)));
+        assert_eq!(
+            bytes,
+            vec![
+                0x00, 0x00, 0x02, 0x20,
+                0x20, 0x00, 0x10, 0x00,
+                0x50, 0x00, 0x40, 0x00,
+            ]
+        );
+    }
+
+    #[test]
+    fn invalidate_all_is_4_bytes() {
+        let bytes = enc(&Command::InvalidateAll);
+        assert_eq!(bytes, vec![0x00, 0x00, 0x00, 0x21]);
+    }
+
+    #[test]
+    fn mask_commit_is_4_bytes() {
+        let bytes = enc(&Command::MaskCommit);
+        assert_eq!(bytes, vec![0x00, 0x00, 0x00, 0x22]);
     }
 }
