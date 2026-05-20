@@ -40,36 +40,60 @@ Monorepo with a Rust workspace (13 crates) and NPM workspaces (5 packages).
 - Rust 1.88 stable (via `rust-toolchain.toml`)
 - Node.js + npm
 - Docker (for ARM cross-compilation)
+- `just` (https://github.com/casey/just) — build/deploy entry point
 
 ### Key Commands
 
+Build/deploy is driven by `just` recipes in `./justfile`. There is no
+Makefile. Run `just --list` (or `just` with no args) to see every
+recipe.
+
 ```bash
-# Full build (frontend + ARM binary via Docker)
-make build
+# Full build (frontend + ARM binary via Docker). Default mode is
+# release-dev; pass `release` for a fully-optimized build.
+just build               # = just build release-dev
+just build release
 
 # Frontend only
-make build-frontend
-# or: npm run build
+just build-frontend
+# or, equivalently: npm run build
 
 # ARM binary only (requires Docker)
-make build-1fpga
+just build-1fpga          # = just build-1fpga release-dev
+just build-1fpga release
 
-# Build and sign binary
-make build-and-sign PUBLIC_KEY_PATH=/path/to/key
+# Build and sign binary. Positional args: mode then key path.
+# Omit the key path and the recipe prompts for it.
+just build-and-sign release /path/to/key
 
 # Desktop build (no FPGA support, for UI development)
 cargo run --bin one_fpga
 
+# Menu-core (FPGA RBF) build via Dockerized Quartus
+just build-menu-core
+just deploy-menu-core     # build + scp .rbf to the device
+
+# Menu-ui (host-side React-on-Boa runtime)
+just build-menu-ui        # cross-compile via musl image
+just deploy-menu-ui       # build + scp to /media/fat/menu_ui
+just run-menu-ui          # ssh + run on device with the deployed bundle
+just demo-menu-ui         # build + deploy bundle + assets + run in one shot
+
 # Run tests
-cargo test          # Rust tests
-npm test            # JS tests (@1fpga/schemas + @1fpga/frontend)
+cargo test                # Rust tests
+npm test                  # JS tests (@1fpga/schemas + @1fpga/frontend)
 
 # Deploy frontend to device
-make deploy-frontend  # rsync to MISTER_IP (default 192.168.1.79)
+just deploy-frontend      # rsync to MISTER_IP (default 192.168.1.79)
 
 # Create new DB migration
-make new-migration name=my_migration
+just new-migration my_migration
 ```
+
+Recipe arguments are positional, not env-var style (`just build
+release`, not `make build MODE=release`). Override the deploy target
+via `MISTER_IP=… just deploy-…` (the justfile reads `MISTER_IP` from
+the environment).
 
 ### Docker Cross-Compilation
 
@@ -125,13 +149,28 @@ Target binary: `target/armv7-unknown-linux-gnueabihf/release/one_fpga`
 
 Target device: DE10-Nano at `MISTER_IP` (default `192.168.1.79`).
 
+Prefer the `just` deploy recipes — they handle the kill-current-procs
++ scp + run dance automatically:
+
+```bash
+just deploy-menu-core      # FPGA bitstream
+just deploy-menu-ui        # main launcher binary
+just demo-menu-ui          # build + deploy bundle + assets + run
+just probe-menu-core       # device-side probe / smoke tests
+```
+
+The recipes assume `MISTER_IP` (the env var or its default
+`192.168.1.79`). Override via `MISTER_IP=10.0.0.5 just deploy-…`.
+
+For one-off manual deploys of the firmware binary:
+
 ```bash
 ssh root@$MISTER_IP 'killall MiSTer one_fpga'
 scp target/armv7-unknown-linux-gnueabihf/release/one_fpga root@$MISTER_IP:/media/fat/one_fpga
 ssh root@$MISTER_IP 'sync; /media/fat/one_fpga'
 ```
 
-Frontend deployed via `make deploy-frontend` (rsync to `/root/frontend`).
+Frontend deployed via `just deploy-frontend` (rsync to `/root/frontend`).
 
 ## License
 
