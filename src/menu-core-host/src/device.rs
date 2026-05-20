@@ -27,6 +27,13 @@ use crate::texture::{TextureHandle, TextureSpec};
 /// Default LW_H2F register block physical address (PROTOCOL.md §3).
 pub const REGS_PHYS_ADDR: u32 = 0xFF21_0000;
 
+/// LW_H2F-mapped BRAM window for the compositor-v2 layer descriptor
+/// tables (COMPOSITOR_V2.md §4.2). 16 KB = 2 banks × 256 slots × 32 B.
+/// Bank A at offset 0x0000..0x1FFF, bank B at 0x2000..0x3FFF.
+pub const LAYER_BRAM_PHYS_ADDR: u32 = 0xFF22_0000;
+pub const LAYER_BRAM_WINDOW_SIZE: usize = 0x4000;
+const LAYER_BRAM_BANK_SIZE: usize = 0x2000;
+
 /// Alignment in bytes used for both the base address and the row stride
 /// of texture allocations. 64 = 16 RGBA pixels = the largest burst the
 /// FPGA blit engine emits, so every aligned-row pixel-zero qualifies for
@@ -132,6 +139,13 @@ pub struct Device {
     /// `LAYER_ACTIVE` register; in Phase 0 this just provides write
     /// targets for the host.
     layer_table_map: Option<DevMemMap>,
+    /// LW_H2F BRAM window for compositor-v2's layer table (§4.2 of
+    /// COMPOSITOR_V2.md). Mapped lazily alongside `layer_table_map`
+    /// in [`Self::init_layer_storage`]. Phase 2c step 3: writes
+    /// land in both the DDR3 layer_table_map *and* this window, so
+    /// the FPGA-side switchover can repoint the compositor's read
+    /// source without a flag-day. Later commits drop the DDR3 path.
+    layer_bram_map: Option<DevMemMap>,
     /// Which layer table the host is currently writing to (0 = A,
     /// 1 = B). Toggled by [`Self::commit_layers`].
     layer_back_idx: u8,
@@ -207,6 +221,7 @@ impl Device {
             tex_pool_map: None,
             tex_table_map: None,
             layer_table_map: None,
+            layer_bram_map: None,
             layer_back_idx: 1, // active starts at A (0); host writes B first.
             back_valid_count: 0,
             tex_alloc: BumpAllocator::new(tex_pool_phys, mem::TEX_POOL_SIZE as u32),
@@ -393,9 +408,17 @@ impl Device {
         let phys = self.cfg.base_phys_addr + mem::LAYER_TABLE_OFFSET as u32;
         let map = DevMemMap::create(phys, mem::LAYER_REGION_SIZE)?;
         self.layer_table_map = Some(map);
-        // Zero-initialise both tables so any future scanout sees only
-        // disabled (flags == 0) descriptors until the host populates
-        // real layers.
+        // Map the LW_H2F BRAM window for the compositor-v2 layer
+        // table (COMPOSITOR_V2.md §4.2). Phase 2c step 3 writes
+        // descriptors into both this window and the DDR3 region
+        // above; later commits drop the DDR3 writes.
+        let bram_map = DevMemMap::create(LAYER_BRAM_PHYS_ADDR, LAYER_BRAM_WINDOW_SIZE)?;
+        self.layer_bram_map = Some(bram_map);
+        // Zero-initialise the DDR3 region so any future scanout
+        // sees only disabled (flags == 0) descriptors until the
+        // host populates real layers. The BRAM window starts at
+        // power-on zero from the M10K storage cells, so no
+        // explicit clear is required there.
         let zero = [0u8; mem::LAYER_DESCRIPTOR_SIZE];
         let map = self
             .layer_table_map
@@ -458,6 +481,29 @@ impl Device {
         // LAYER_REGION_SIZE).
         unsafe {
             let dst = map.as_mut_ptr().add(entry_offset);
+            volatile_copy_to_devmem(dst, bytes);
+        }
+        // Phase 2c step 3 (COMPOSITOR_V2.md §4.2): same descriptor
+        // also written into the LW_H2F BRAM window. The FPGA hosts
+        // both v1's layer_dma path (consumed by layer_cache) and the
+        // new layer_table_bram in parallel; this double-write lets
+        // a follow-up commit repoint the compositor's read source
+        // without a flag-day. layer_back_idx selects which bank we
+        // write into (0 = A at offset 0, 1 = B at offset 0x2000).
+        let bram_offset =
+            (self.layer_back_idx as usize) * LAYER_BRAM_BANK_SIZE
+            + (slot as usize) * mem::LAYER_DESCRIPTOR_SIZE;
+        let bram = self
+            .layer_bram_map
+            .as_mut()
+            .expect("init_layer_storage maps both layer_table_map and layer_bram_map");
+        // SAFETY: layer_bram_map covers LAYER_BRAM_WINDOW_SIZE
+        // (0x4000) bytes; bram_offset + 32 ≤ 0x4000 because
+        // layer_back_idx ∈ {0, 1} caps the high half at 0x2000 and
+        // slot < LAYERS_PER_TABLE = 256 keeps the low half within
+        // a single bank.
+        unsafe {
+            let dst = bram.as_mut_ptr().add(bram_offset);
             volatile_copy_to_devmem(dst, bytes);
         }
         let want_count = (slot as u16).saturating_add(1);
