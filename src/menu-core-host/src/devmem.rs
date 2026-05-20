@@ -65,10 +65,21 @@ pub struct DevMemError {
     pub detail: &'static str,
 }
 
-/// Volatile byte-copy from `src` into a `/dev/mem`-mapped buffer.
+/// Volatile copy from `src` into a `/dev/mem`-mapped buffer.
 ///
 /// Use this for any write into a `/dev/mem` mapping; do not write
 /// through a `&mut [u8]` slice. See module-level docs for why.
+///
+/// Performs the bulk of the transfer as 32-bit volatile stores (the
+/// largest unit the kernel's strongly-ordered `/dev/mem` mapping on
+/// ARMv7 tolerates without SIGBUS — see [`volatile_copy_within_devmem`]
+/// for the same rule). A `dst`-aligned head of up to 3 bytes and a
+/// trailing tail of up to 3 bytes are handled with byte stores. This
+/// is ~4× faster than the previous byte-per-iteration loop for the
+/// large texture uploads where wallclock cost actually shows up
+/// (8 MB framebuffer-sized PNGs, font glyph atlases). For small
+/// writes (descriptors, ring ops) the head/bulk/tail split degenerates
+/// to ≤2 word stores plus a few bytes — no slower than before.
 ///
 /// # Safety
 ///
@@ -76,9 +87,36 @@ pub struct DevMemError {
 /// originating from a valid `/dev/mem` mmap.
 #[inline]
 pub fn volatile_copy_to_devmem(dst: *mut u8, src: &[u8]) {
-    for (i, b) in src.iter().enumerate() {
-        // SAFETY: caller guarantees `dst..dst+src.len()` is writable.
-        unsafe { core::ptr::write_volatile(dst.add(i), *b) };
+    let len = src.len();
+
+    // 1. Head: byte stores until `dst` is 4-byte aligned. Caps at
+    //    `len` so a short src that fits entirely in the head doesn't
+    //    overrun.
+    let head = ((4 - ((dst as usize) & 3)) & 3).min(len);
+    for j in 0..head {
+        // SAFETY: j < len ≤ src.len(); j < head ≤ writable region.
+        unsafe { core::ptr::write_volatile(dst.add(j), src[j]) };
+    }
+
+    // 2. Bulk: 32-bit stores. `src` is unaligned in the general case
+    //    (PNG decode buffers, descriptor byte slices) so reads go
+    //    through `read_unaligned`. `dst` is word-aligned after step 1
+    //    so the volatile writes are safe.
+    let words = (len - head) / 4;
+    let src_w_off = src.as_ptr().wrapping_add(head);
+    let dst_w_off = dst.wrapping_add(head) as *mut u32;
+    for w in 0..words {
+        // SAFETY: head + w*4 + 4 ≤ len for w < words; src valid for
+        // len bytes; dst writable for len bytes (caller invariant).
+        let v = unsafe { core::ptr::read_unaligned(src_w_off.add(w * 4) as *const u32) };
+        unsafe { core::ptr::write_volatile(dst_w_off.add(w), v) };
+    }
+
+    // 3. Tail: trailing 0..3 bytes that didn't fit in the word loop.
+    let tail_start = head + words * 4;
+    for j in tail_start..len {
+        // SAFETY: j < len ≤ src.len() and writable region.
+        unsafe { core::ptr::write_volatile(dst.add(j), src[j]) };
     }
 }
 
@@ -110,5 +148,48 @@ pub unsafe fn volatile_copy_within_devmem(src: *const u8, dst: *mut u8, len: usi
         // bytes and aligned to 4 bytes.
         let v = unsafe { core::ptr::read_volatile(src_w.add(i)) };
         unsafe { core::ptr::write_volatile(dst_w.add(i), v) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Drive the head/bulk/tail split with every possible
+    /// (dst_misalign, src_misalign, len) corner that matters for the
+    /// large texture upload path: shorter than the head, exactly the
+    /// head, several full words, a tail of 0..3 trailing bytes, and
+    /// the misaligned dst that exercises all three sub-loops at once.
+    #[test]
+    fn volatile_copy_to_devmem_handles_alignment_corners() {
+        for total_len in [0, 1, 2, 3, 4, 5, 7, 8, 11, 16, 31, 32, 64, 65, 1023, 1024] {
+            for dst_off in 0..8 {
+                for src_off in 0..8 {
+                    let src_pool: Vec<u8> = (0..(total_len + src_off))
+                        .map(|i| (i as u8).wrapping_mul(31))
+                        .collect();
+                    let src = &src_pool[src_off..];
+                    let mut dst_pool = vec![0xCDu8; total_len + dst_off + 8];
+                    let dst_ptr = unsafe { dst_pool.as_mut_ptr().add(dst_off) };
+                    volatile_copy_to_devmem(dst_ptr, &src[..total_len]);
+                    assert_eq!(
+                        &dst_pool[dst_off..dst_off + total_len],
+                        &src[..total_len],
+                        "dst_off={dst_off} src_off={src_off} len={total_len}",
+                    );
+                    // Bytes outside the written window must stay 0xCD.
+                    if dst_off > 0 {
+                        assert!(
+                            dst_pool[..dst_off].iter().all(|&b| b == 0xCD),
+                            "head overrun: dst_off={dst_off} len={total_len}"
+                        );
+                    }
+                    assert!(
+                        dst_pool[dst_off + total_len..].iter().all(|&b| b == 0xCD),
+                        "tail overrun: dst_off={dst_off} len={total_len}"
+                    );
+                }
+            }
+        }
     }
 }

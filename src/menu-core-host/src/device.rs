@@ -327,7 +327,9 @@ impl Device {
         let pool_map = self.tex_pool_map.as_mut().expect("init checked above");
         // SAFETY: bump allocator guarantees `phys + needed_bytes <=
         // pool_base_phys + TEX_POOL_SIZE`, so the dst window is in
-        // bounds. `volatile_copy_to_devmem` writes byte-by-byte volatile.
+        // bounds. `volatile_copy_to_devmem` uses 32-bit volatile
+        // stores for the bulk (head/tail bytes for misalignment), so
+        // the copy runs at DDR3-write rate rather than per-byte.
         unsafe {
             let dst = pool_map.as_mut_ptr().add(offset_in_pool);
             volatile_copy_to_devmem(dst, &spec.data[..needed_bytes]);
