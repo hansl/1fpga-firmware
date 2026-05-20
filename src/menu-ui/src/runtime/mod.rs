@@ -458,6 +458,23 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
 
     let timeout = Duration::from_millis(500);
     let mut frame_idx: u32 = 0;
+
+    // Phase 2 smoke test: when MENU_UI_COMPOSITOR_V2_SMOKE_TEST is set,
+    // append INVALIDATE_ALL + MASK_COMMIT to every frame so the new
+    // ring opcodes flow through ring_fetcher and the dirty_bitmask
+    // module. Default behavior is unchanged — the FPGA boots with
+    // active bank = all-1, so the smoke test's repeating
+    // {all-1 → swap, building cleared, swap-back} cycle keeps every
+    // scanline marked dirty and the displayed image matches v1. If
+    // ring_fetcher fails to decode either opcode it'll halt with
+    // ERR_UNKNOWN_OPCODE and the fence wait below will time out;
+    // that's the failure signal we're looking for.
+    let smoke_test_phase2 = std::env::var("MENU_UI_COMPOSITOR_V2_SMOKE_TEST")
+        .is_ok_and(|v| !v.is_empty() && v != "0");
+    if smoke_test_phase2 {
+        info!("compositor-v2 Phase 2 smoke test enabled: appending INVALIDATE_ALL + MASK_COMMIT to every frame");
+    }
+
     let mut fonts = FontRegistry::new();
     let mut text_cache = TextCache::new();
 
@@ -809,8 +826,24 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
 
         let t7 = Instant::now();
 
-        let (_count, fence_dt, scanout_dt) =
-            frame.present()?.submit()?.wait_presented_timed(timeout)?;
+        // Phase 2 smoke test: drive the new compositor-v2 ring ops on
+        // every frame to verify ring_fetcher decode + dirty_bitmask
+        // execution work end-to-end. INVALIDATE_ALL sets all 1024
+        // building bits; MASK_COMMIT swaps banks and clears the new
+        // building bank — so the active bank ends up all-1 every
+        // frame (same as the FPGA's boot default), keeping visible
+        // output unchanged. A bad opcode would halt ring_fetcher and
+        // the fence wait below would time out.
+        let frame_for_submit = if smoke_test_phase2 {
+            frame.invalidate_all()?.mask_commit()?
+        } else {
+            frame
+        };
+
+        let (_count, fence_dt, scanout_dt) = frame_for_submit
+            .present()?
+            .submit()?
+            .wait_presented_timed(timeout)?;
 
         scene_hash_per_fb[render_idx] = Some(current_hash);
         scene_per_fb[render_idx] = Some(current_scene);
