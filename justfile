@@ -77,6 +77,21 @@ build-menu-core: _ensure-menu-core-image
         one-fpga-quartus:17.0.2 \
         --flow compile menu_core.qpf
 
+# Dump the 5 worst setup paths per clock to output_files/worst_*.txt
+# using the existing fitter output (no rebuild). Use after a
+# `just build-menu-core` to diagnose timing failures — the
+# standard menu_core.sta.rpt only includes summary tables, but
+# this recipe runs `report_timing` with -detail full_path so each
+# combinational chain is enumerated cell-by-cell.
+report-timing: _ensure-menu-core-image
+    docker run --rm -t \
+        --platform linux/amd64 \
+        -u "$(id -u):$(id -g)" \
+        -v "{{justfile_directory()}}/cores/menu-core-fpga":/work \
+        --entrypoint quartus_sta \
+        one-fpga-quartus:17.0.2 \
+        menu_core -t report_worst_paths.tcl
+
 # Open an interactive shell in the Quartus container
 quartus-shell:
     docker run --rm -it \
