@@ -152,6 +152,17 @@ pub enum Command {
     /// "host blits into textures, FPGA composites layers" model with
     /// honest text content.
     MenuTextDemo,
+
+    /// Compositor-v2 (Phase 1 + 2c) smoke test: flips
+    /// SCANOUT_FB_SELECT=1 and COMPOSITOR_CONTROL.enable=1 so
+    /// MISTER_FB reads from the compositor's scanout_writer output
+    /// instead of the host-painted FB. Configures the same 5-layer
+    /// scene as `LayerDraw` but the pixels flow through the v2 path
+    /// end-to-end: layer descriptors live in BRAM, compositor blends
+    /// per scanline, scanout_writer bursts pixels to FB[render_idx],
+    /// MISTER_FB reads FB[display_idx]. Reports COMPOSITE_FENCE per
+    /// second to confirm the writer's frame rate.
+    CompositorV2Test,
 }
 
 fn parse_u32_hex_or_dec(s: &str) -> Result<u32, std::num::ParseIntError> {
@@ -222,6 +233,7 @@ fn main() {
         Some(Command::LayerA8Probe) => layer_a8_probe(base).map_err(Into::into),
         Some(Command::LayerMultiTexProbe) => layer_multitex_probe(base).map_err(Into::into),
         Some(Command::MenuTextDemo) => menu_text_demo(base),
+        Some(Command::CompositorV2Test) => compositor_v2_test(base).map_err(Into::into),
         None => {
             info!(
                 "no subcommand given — re-run with `probe`, `ring-test`, `draw-test`, …, or `--print-layout`"
@@ -1694,6 +1706,106 @@ fn print_layout(base: u32) {
         protocol::FB_WIDTH,
         protocol::FB_HEIGHT
     );
+}
+
+/// Compositor-v2 (Phase 1 + 2c) end-to-end smoke test.
+///
+/// Configures the same 5-solid-layer scene as `layer_draw`, then
+/// flips the v2 path live:
+///   - FB_BASE          ← reserved-carve-out + FB0_OFFSET (= same
+///                        physical FB triple-buffer the v1 path uses;
+///                        we're not issuing host blits so there's no
+///                        collision)
+///   - SCANOUT_FB_SELECT ← 1 (MISTER_FB reads compositor-written FB)
+///   - COMPOSITOR_CONTROL ← 1 (scanout_writer starts draining to DDR3)
+///
+/// HDMI should converge in 1-2 frames to the layer scene. We then
+/// poll COMPOSITE_FENCE every second to confirm the scanout_writer
+/// is producing frames at its 26.6 Hz internal rate.
+fn compositor_v2_test(base: u32) -> Result<(), menu_core_host::error::DeviceError> {
+    use menu_core_host::error::DeviceError;
+    let mut device = Device::open_with(DeviceConfig {
+        base_phys_addr: base,
+        ..DeviceConfig::default()
+    })?;
+
+    let info = device.video_info();
+    println!(
+        "Framework HDMI mode (VIDEO_INFO): {}x{}",
+        info.width, info.height
+    );
+
+    // Same 5-layer scene as layer_draw, so the visual outcome is
+    // directly comparable to the v1-VGA-path test.
+    let navy    = 0xFF_05_10_40u32;
+    let header  = 0xFF_10_30_80u32;
+    let cyan    = 0xFF_00_FF_FFu32;
+    let magenta = 0xFF_FF_00_FFu32;
+    let yellow  = 0xFF_FF_FF_00u32;
+
+    device.set_layer(0, &protocol::LayerDescriptor::solid(navy,      0,   0, 1920, 1080))?;
+    device.set_layer(1, &protocol::LayerDescriptor::solid(header,    0,   0, 1920,  120))?;
+    device.set_layer(2, &protocol::LayerDescriptor::solid(cyan,     160, 320,  420,  280))?;
+    device.set_layer(3, &protocol::LayerDescriptor::solid(magenta,  360, 400,  420,  280))?;
+    device.set_layer(4, &protocol::LayerDescriptor::solid(yellow,   560, 480,  420,  280))?;
+    device.commit_layers();
+    println!("Committed 5-layer scene.");
+
+    // Compositor's scanout triple-buffer base. Aliasing the v1 FB0
+    // address is safe here because this test issues no host blits.
+    // The compositor's scanout_writer writes to
+    //   FB_BASE + render_idx × 0x800000
+    // which lines up with FB0/FB1/FB2 by construction.
+    let fb_base = base + menu_core_host::mem::FB0_OFFSET as u32;
+    device.set_compositor_fb_base(fb_base);
+    println!("FB_BASE  = {fb_base:#010X} (= FB0); scanout triple-buffer at {fb_base:#010X}, {:#010X}, {:#010X}",
+             fb_base + 0x0080_0000, fb_base + 0x0100_0000);
+
+    device.set_scanout_select(true);
+    device.set_compositor_enable(true);
+    println!("Compositor-v2 path active: SCANOUT_FB_SELECT=1, COMPOSITOR_CONTROL.enable=1");
+    println!("HDMI should display the layer scene within ~2 frames (display_idx rotates off boot-default once compositor's first frame retires).");
+    println!();
+    println!("Compositor FPS sampled every second via COMPOSITE_FENCE. Ctrl-C to exit (max 60 s).");
+
+    let running = Arc::new(AtomicBool::new(true));
+    {
+        let r = running.clone();
+        ctrlc::set_handler(move || r.store(false, Ordering::SeqCst))
+            .map_err(|e| DeviceError::Io(std::io::Error::other(e.to_string())))?;
+    }
+
+    let start = Instant::now();
+    let mut last_t = start;
+    let mut last_f = device.composite_fence();
+    let max_dur = Duration::from_secs(60);
+
+    while running.load(Ordering::SeqCst) && start.elapsed() < max_dur {
+        std::thread::sleep(Duration::from_millis(1000));
+        let now = Instant::now();
+        let f = device.composite_fence();
+        let elapsed = (now - last_t).as_secs_f32();
+        let frames = f.wrapping_sub(last_f) as f32;
+        let fps = frames / elapsed;
+        let status = device.compositor_status();
+        let busy = (status & 1) != 0;
+        let render_idx = (status >> 1) & 0x3;
+        println!(
+            "compositor: {fps:5.1} fps  (Δfence={frames:>5.0} / {elapsed:.3}s, \
+             render_idx={render_idx}, busy={busy})"
+        );
+        last_t = now;
+        last_f = f;
+    }
+
+    // Clean exit: drop back to v1 path so the next boot doesn't
+    // come up in an unexpected state. Layers stay committed but the
+    // compositor stops draining.
+    device.set_compositor_enable(false);
+    device.set_scanout_select(false);
+    device.clear_layers();
+    println!("Disabled compositor + scanout_select; cleared layers. HDMI returns to v1 path.");
+    Ok(())
 }
 
 fn humanize(bytes: usize) -> String {

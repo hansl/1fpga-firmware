@@ -629,9 +629,68 @@ impl Device {
     /// been called and the compositor is running. A static value means
     /// the DMA isn't ticking — most often because LAYER_COMMIT.count
     /// is still 0 or because the FPGA is in error.
+    ///
+    /// In compositor-v2 builds (Phase 2c onwards) layer_dma has been
+    /// removed; this register reads 0 unconditionally. Use
+    /// [`Self::composite_fence`] for frame-progress diagnostics
+    /// instead.
     #[inline]
     pub fn layer_dma_descriptors(&self) -> u32 {
         self.regs.read32(registers::LAYER_DEBUG)
+    }
+
+    // --- Compositor-v2 register accessors (COMPOSITOR_V2.md §7) -----
+
+    /// Set the base physical address of the compositor's scanout
+    /// triple-buffer. `FB[N]` resolves to `addr + N × 0x800000`. Used
+    /// when `SCANOUT_FB_SELECT.bit0 = 1` (v2 path); ignored otherwise.
+    #[inline]
+    pub fn set_compositor_fb_base(&self, addr: u32) {
+        self.regs.write32(registers::FB_BASE, addr);
+    }
+
+    /// Pick which framebuffer MISTER_FB scans out:
+    ///   - `false` → v1 path: host's blit_engine writes into FB0/1/2
+    ///     and MISTER_FB indexes those.
+    ///   - `true`  → v2 path: compositor's scanout_writer writes into
+    ///     FB_BASE + idx × 0x800000 and MISTER_FB reads from there.
+    /// Also retargets fb_swapper's PRESENT pulse source: v1 mode uses
+    /// the ring fetcher's PRESENT op; v2 mode uses the compositor's
+    /// frame-done pulse.
+    #[inline]
+    pub fn set_scanout_select(&self, compositor_owns: bool) {
+        self.regs.write32(
+            registers::SCANOUT_FB_SELECT,
+            if compositor_owns { registers::SCANOUT_SELECT_COMPOSITOR } else { 0 },
+        );
+    }
+
+    /// Enable / disable the compositor's scanout_writer FSM. When
+    /// disabled, the painter still runs (it's tied to video timing)
+    /// but no pixels reach DDR3 — the FB stays whatever it was when
+    /// the writer was last drained.
+    #[inline]
+    pub fn set_compositor_enable(&self, enable: bool) {
+        self.regs.write32(
+            registers::COMPOSITOR_CONTROL,
+            if enable { registers::COMP_CONTROL_ENABLE } else { 0 },
+        );
+    }
+
+    /// Free-running count of frames the compositor has finished
+    /// writing to DDR3. Increments on each `scanout_writer`
+    /// present-pulse, which fires after the last scanline of every
+    /// composited frame.
+    #[inline]
+    pub fn composite_fence(&self) -> u32 {
+        self.regs.read32(registers::COMPOSITE_FENCE)
+    }
+
+    /// Packed `COMPOSITOR_STATUS` (§7): bit 0 = scanout_writer busy,
+    /// bits 1..2 = current render-buffer index.
+    #[inline]
+    pub fn compositor_status(&self) -> u32 {
+        self.regs.read32(registers::COMPOSITOR_STATUS)
     }
 
     /// Reset the texture pool: drop all uploaded handles, return the

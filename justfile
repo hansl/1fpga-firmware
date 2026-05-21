@@ -222,3 +222,12 @@ clip-test-menu-core: _kill-fpga-users
 # Run the N4.5 SET_RENDER_TARGET visual test on the device (look at HDMI)
 rtt-test-menu-core: _kill-fpga-users
     ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core rtt-test'
+
+# Compositor-v2 (Phase 1 + 2c) smoke test on the device. Flips
+# SCANOUT_FB_SELECT and COMPOSITOR_CONTROL live, then holds a
+# 5-layer solid scene through the new BRAM-resident layer table →
+# scanout_writer → MISTER_FB path. Prints COMPOSITE_FENCE FPS every
+# second. Same visual outcome as `layer-draw-menu-core` if the v2
+# path works end-to-end.
+compositor-v2-test: _kill-fpga-users
+    ssh -t root@{{mister_ip}} '/media/fat/one_fpga_menu_core compositor-v2-test'
