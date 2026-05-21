@@ -90,7 +90,7 @@ report-timing: _ensure-menu-core-image
         -v "{{justfile_directory()}}/cores/menu-core-fpga":/work \
         --entrypoint quartus_sta \
         one-fpga-quartus:17.0.2 \
-        menu_core -t report_worst_paths.tcl
+        -t report_worst_paths.tcl
 
 # Open an interactive shell in the Quartus container
 quartus-shell:
