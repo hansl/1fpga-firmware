@@ -14,6 +14,90 @@ use tracing::{debug, error, info};
 use menu_core_host::device::{Device, DeviceConfig, FramebufferConfig};
 use menu_core_host::error::DeviceError;
 use menu_core_host::mem;
+use menu_core_host::protocol::{self, LayerBlend, registers};
+use menu_core_host::texture::TextureHandle;
+
+/// Dump every diagnostic register relevant to a v2 hang. Called both
+/// right after the v2 setup completes (sanity baseline) and on the
+/// first fence timeout so we can see how the chip's state changed.
+fn fmt_build_id(hash: u32) -> String {
+    // BUILD_ID is now a 32-bit content hash of the menu-core source
+    // tree (see `_gen-build-id` in the justfile). Stable across
+    // rebuilds when source hasn't changed, which is what we want
+    // for verifying "deployed RBF == source tree" — but the value
+    // has no time encoding any more, so display as raw hex. Match
+    // against the build's own hash via:
+    //     cat cores/menu-core-fpga/build_id.svh
+    if hash == 0 || hash == u32::MAX {
+        format!("{:#010X} (unset)", hash)
+    } else {
+        format!("{:#010X}", hash)
+    }
+}
+
+fn dump_compositor_regs(device: &Device, label: &str) {
+    let regs = device.register_block();
+    let status = regs.read32(registers::STATUS);
+    let error_info = regs.read32(registers::ERROR_INFO);
+    let ring_head = regs.read32(registers::RING_HEAD);
+    let ring_tail = regs.read32(registers::RING_TAIL);
+    let fence_val = regs.read32(registers::FENCE_VALUE);
+    let frame_cnt = regs.read32(registers::FRAME_COUNT);
+    let vsync = regs.read32(registers::VSYNC_COUNT);
+    let fb_state = regs.read32(registers::FB_STATE);
+    let comp_status = regs.read32(registers::COMPOSITOR_STATUS);
+    let comp_fence = regs.read32(registers::COMPOSITE_FENCE);
+    let layer_dbg = regs.read32(registers::LAYER_DEBUG);
+    let build_id = regs.read32(registers::BUILD_ID);
+
+    // LAYER_DEBUG carries the ring fetcher's state + pending opcode +
+    // bitmask/diff busy flags so we can tell exactly which pipeline
+    // stage is wedged when the fence times out. See the bit layout
+    // in menu_core.sv near layer_descriptors_i.
+    let f_state = layer_dbg & 0xF;
+    let f_opcode = (layer_dbg >> 4) & 0xFF;
+    let f_busy = (layer_dbg >> 12) & 0x1;
+    let f_err = (layer_dbg >> 13) & 0x1;
+    let bm_busy = (layer_dbg >> 16) & 0x1;
+    let diff_busy = (layer_dbg >> 17) & 0x1;
+    let owner = (layer_dbg >> 18) & 0x3;
+    let outstanding = (layer_dbg >> 20) & 0xFF;
+    let ddram_busy = (layer_dbg >> 28) & 0x1;
+    let pipe_idle = (layer_dbg >> 29) & 0x1;
+    let owner_name = match owner {
+        0 => "FETCH",
+        1 => "BLIT",
+        2 => "TEX",
+        3 => "SCAN",
+        _ => "???",
+    };
+    let state_name = match f_state {
+        0 => "IDLE",
+        1 => "FETCH_HEADER",
+        2 => "WAIT_HEADER",
+        3 => "DECODE",
+        4 => "FETCH_ARG",
+        5 => "WAIT_ARG",
+        6 => "FETCH_DESC",
+        7 => "WAIT_DESC",
+        8 => "BLIT_DISPATCH",
+        9 => "BLIT_WAIT",
+        10 => "RETIRE",
+        11 => "HALT",
+        _ => "???",
+    };
+    tracing::info!(
+        "[diag {label}] BUILD_ID={} STATUS={status:#010X} ERROR_INFO={error_info:#010X} \
+         RING_HEAD={ring_head:#010X} RING_TAIL={ring_tail:#010X} \
+         FENCE={fence_val} FRAME_COUNT={frame_cnt} VSYNC={vsync} \
+         FB_STATE={fb_state:#010X} COMP_STATUS={comp_status:#010X} \
+         COMP_FENCE={comp_fence} \
+         fetcher.state={state_name}({f_state}) opcode={f_opcode:#04X} \
+         fb={f_busy} fe={f_err} bm_busy={bm_busy} diff_busy={diff_busy} \
+         owner={owner_name}({owner}) outst={outstanding} ddram_busy={ddram_busy} pipe_idle={pipe_idle}",
+        fmt_build_id(build_id),
+    );
+}
 
 use crate::font::{FontError, FontRegistry};
 use crate::host::UiState;
@@ -475,6 +559,65 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         info!("compositor-v2 Phase 2 smoke test enabled: appending INVALIDATE_ALL + MASK_COMMIT to every frame");
     }
 
+    // Phase 4 (COMPOSITOR_V2.md §11.4): full v2 paint path. Host paints
+    // into a per-layer source RT instead of the FB; the FPGA's
+    // compositor reads that RT and writes the scanout FB. Gated on the
+    // MENU_UI_COMPOSITOR_V2 env var while the path stabilises — once
+    // shipped, the v1 paint path goes away (Phase 5).
+    //
+    // When enabled:
+    //   - allocate a single full-size L0 layer source RT at startup
+    //     and commit a `tex_id = rt.id` layer descriptor pointing at it,
+    //   - paint into the RT each frame (set_target instead of
+    //     set_target_framebuffer),
+    //   - emit INVALIDATE_RECT / INVALIDATE_ALL + MASK_COMMIT so the
+    //     compositor knows which scanlines to repaint,
+    //   - drop PRESENT — fb_swapper is now driven by the compositor's
+    //     frame-done pulse, not by the host,
+    //   - flip SCANOUT_FB_SELECT=1 + COMPOSITOR_CONTROL.enable=1.
+    let composite_v2 = std::env::var("MENU_UI_COMPOSITOR_V2")
+        .is_ok_and(|v| !v.is_empty() && v != "0");
+    let layer_rt: Option<[TextureHandle; 2]> = if composite_v2 {
+        info!("compositor-v2 Phase 4 paint path enabled");
+        let rt_a = device.create_layer_rt(fb.width, fb.height)?;
+        let rt_b = device.create_layer_rt(fb.width, fb.height)?;
+        info!(
+            "allocated L0 layer source RTs: A tex_id={} phys={:#010X}, B tex_id={} phys={:#010X}, {}x{}",
+            rt_a.id, rt_a.phys_addr, rt_b.id, rt_b.phys_addr, fb.width, fb.height,
+        );
+        // Start with the compositor reading RT-A. The host will
+        // paint into RT-B first, then swap on each frame closeout.
+        let desc = protocol::LayerDescriptor::textured(rt_a.id, 0, 0, fb.width, fb.height)
+            .with_blend(LayerBlend::Opaque);
+        device.set_layer(0, &desc)?;
+        device.commit_layers();
+        // Compositor's scanout triple-buffer base. We alias the v1
+        // FB0/1/2 region because the v1 paint path is now disabled —
+        // no collision. The compositor writes
+        //   FB_BASE + render_idx × 0x800000.
+        let fb_base = base + mem::FB0_OFFSET as u32;
+        device.set_compositor_fb_base(fb_base);
+        device.set_scanout_select(true);
+        device.set_compositor_enable(true);
+        info!(
+            "compositor-v2 path active: FB_BASE={:#010X}, SCANOUT_FB_SELECT=1, COMPOSITOR_CONTROL.enable=1",
+            fb_base,
+        );
+        // Let the compositor run for a few raster periods so we can
+        // observe whether its scanout pipeline is actually advancing
+        // before the first host frame submits commands. If COMP_FENCE
+        // is non-zero / advancing here, the compositor path is fine;
+        // if it's stuck at 0, the v2 setup itself is broken.
+        std::thread::sleep(Duration::from_millis(100));
+        dump_compositor_regs(&device, "post-setup");
+        Some([rt_a, rt_b])
+    } else {
+        None
+    };
+    // Double-buffer index: which RT the host paints into (the
+    // compositor reads the OTHER one). Flips after each frame.
+    let mut rt_write_idx: usize = 1;
+
     let mut fonts = FontRegistry::new();
     let mut text_cache = TextCache::new();
 
@@ -725,7 +868,8 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
             damage::compute_scene(tree, root, &layouts, &text_styles, &opacities, &transforms)
         });
         let current_hash = current_scene.hash();
-        if scene_hash_per_fb[render_idx] == Some(current_hash) {
+        let damage_idx = if composite_v2 { rt_write_idx } else { render_idx };
+        if scene_hash_per_fb[damage_idx] == Some(current_hash) {
             // This FB slot already has the desired content. Sleep
             // ~one vsync to bound the loop and continue.
             fps_counter.record_frame();
@@ -748,7 +892,14 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         //    tracked, so it was removed.
         let frame = device.begin_frame();
         let frame = crate::paint::render_pending_text(frame, &pendings, &fonts)?;
-        let frame = frame.set_target_framebuffer()?;
+        // v2: redirect host paints into the L0 layer source RT. v1:
+        // paint into FB[render_idx] as before. The damage / clip
+        // coordinate system is identical (the RT is exactly FB-sized),
+        // so the rect logic below is target-agnostic.
+        let frame = match &layer_rt {
+            Some(rts) => frame.set_target(&rts[rt_write_idx])?,
+            None => frame.set_target_framebuffer()?,
+        };
 
         // Track what we actually painted this frame for the timing
         // log's damage stats. Initialized in each arm of the match
@@ -758,7 +909,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         let mut paint_full = false;
 
         let damage_paint_plan: Option<Vec<damage::PixelRect>> =
-            match &scene_per_fb[render_idx] {
+            match &scene_per_fb[damage_idx] {
                 Some(prev) => {
                     let d = damage::compute_damage(prev, &current_scene);
                     let area = damage::total_area(&d);
@@ -778,7 +929,9 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                 // so the next rect's set_clip replaces it cleanly.
                 // The host-side bbox cull inside paint() also uses
                 // the rect so nodes outside it never get a blit op
-                // issued.
+                // issued. In v2 mode, an invalidate_rect alongside
+                // the clip tells the compositor's dirty bitmask that
+                // these scanlines need recomposition this frame.
                 let mut frame = frame;
                 for r in &rects {
                     let clip_rect: menu_core_host::protocol::Rect = (*r).into();
@@ -798,7 +951,12 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                             f,
                         )
                     })?;
-                    frame = f.clear_clip()?;
+                    let f = f.clear_clip()?;
+                    frame = if composite_v2 {
+                        f.invalidate_rect(clip_rect)?
+                    } else {
+                        f
+                    };
                 }
                 frame
             }
@@ -806,7 +964,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                 paint_full = true;
                 paint_rect_count = 1;
                 paint_area_px = fb_area;
-                ui_state.with_tree(|tree| {
+                let f = ui_state.with_tree(|tree| {
                     crate::paint::paint(
                         tree,
                         root,
@@ -820,33 +978,75 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                         None,
                         frame,
                     )
-                })?
+                })?;
+                if composite_v2 { f.invalidate_all()? } else { f }
             }
         };
 
         let t7 = Instant::now();
 
-        // Phase 2 smoke test: drive the new compositor-v2 ring ops on
-        // every frame to verify ring_fetcher decode + dirty_bitmask
-        // execution work end-to-end. INVALIDATE_ALL sets all 1024
-        // building bits; MASK_COMMIT swaps banks and clears the new
-        // building bank — so the active bank ends up all-1 every
-        // frame (same as the FPGA's boot default), keeping visible
-        // output unchanged. A bad opcode would halt ring_fetcher and
-        // the fence wait below would time out.
-        let frame_for_submit = if smoke_test_phase2 {
-            frame.invalidate_all()?.mask_commit()?
+        // Frame closeout. v1: PRESENT + wait_presented (the fb_swapper
+        // PRESENT op rotates display↔render, FRAME_COUNT advances on
+        // the next vsync). v2: MASK_COMMIT (promote queued invalidates
+        // into the compositor's active dirty bitmask) + fence-only
+        // wait — the compositor drives fb_swapper itself when its
+        // scanout_writer finishes a frame, asynchronously from us.
+        //
+        // The legacy Phase 2 smoke test is folded into the v1 branch:
+        // it ran a no-op {INVALIDATE_ALL → MASK_COMMIT} to exercise the
+        // ring opcodes without changing visible output. v2 always emits
+        // those ops with real semantics, so the smoke test is redundant
+        // when composite_v2 is on.
+        let (fence_dt, scanout_dt) = if composite_v2 {
+            let token = frame.mask_commit()?.submit()?;
+            let t_submit = Instant::now();
+            match token.wait(timeout) {
+                Ok(()) => {}
+                Err(e) => {
+                    dump_compositor_regs(&device, "fence-timeout");
+                    let ring_head = device.register_block()
+                        .read32(menu_core_host::protocol::registers::RING_HEAD);
+                    let bytes = device.read_ring_bytes(ring_head, 32);
+                    let hex: Vec<String> = bytes.iter()
+                        .map(|b| format!("{:02X}", b))
+                        .collect();
+                    tracing::info!(
+                        "ring[{:#06X}..+32] = {}",
+                        ring_head,
+                        hex.join(" "),
+                    );
+                    return Err(e.into());
+                }
+            }
+            // Blits are done — swap the compositor to read from the
+            // RT we just finished painting, and flip the write index
+            // so the next frame paints into the other RT.
+            if let Some(rts) = &layer_rt {
+                let read_idx = rt_write_idx;
+                rt_write_idx = 1 - rt_write_idx;
+                let desc = protocol::LayerDescriptor::textured(
+                    rts[read_idx].id, 0, 0, fb.width, fb.height,
+                ).with_blend(LayerBlend::Opaque);
+                device.set_layer(0, &desc)?;
+                device.commit_layers();
+            }
+            let t_done = Instant::now();
+            (t_done - t_submit, Duration::ZERO)
         } else {
-            frame
+            let frame_for_submit = if smoke_test_phase2 {
+                frame.invalidate_all()?.mask_commit()?
+            } else {
+                frame
+            };
+            let (_count, fdt, sdt) = frame_for_submit
+                .present()?
+                .submit()?
+                .wait_presented_timed(timeout)?;
+            (fdt, sdt)
         };
 
-        let (_count, fence_dt, scanout_dt) = frame_for_submit
-            .present()?
-            .submit()?
-            .wait_presented_timed(timeout)?;
-
-        scene_hash_per_fb[render_idx] = Some(current_hash);
-        scene_per_fb[render_idx] = Some(current_scene);
+        scene_hash_per_fb[damage_idx] = Some(current_hash);
+        scene_per_fb[damage_idx] = Some(current_scene);
         ui_state.with_tree_mut(|t| t.clear_dirty());
         fps_counter.record_frame();
 
@@ -912,6 +1112,71 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                 pct(sum_paint_area_px),
                 count_full_paints,
             );
+            // v2-path swap observability: confirm fb_swapper is
+            // actually rotating display/render in v2 mode (HDMI
+            // stays black if it doesn't, because MISTER_FB reads
+            // display_idx but the compositor writes render_idx).
+            if composite_v2 {
+                let fb_state = device.register_block().read32(registers::FB_STATE);
+                let comp_fence = device.register_block().read32(registers::COMPOSITE_FENCE);
+                let comp_status = device.register_block().read32(registers::COMPOSITOR_STATUS);
+                // Probe L0 RT (host's paint target) and the FB
+                // currently being displayed (compositor's scanout
+                // output). Compare both sides:
+                //   - L0 nonzero & FB nonzero & match: chain works,
+                //     HDMI black is a downstream issue (ASCAL, HDMI
+                //     mux, etc.).
+                //   - L0 nonzero, FB all-zero: compositor isn't
+                //     writing pixels — painter pipeline bug.
+                //   - L0 all-zero: host isn't painting into the RT.
+                let display_idx = (fb_state & 0x3) as u32;
+                let fb_base = base + mem::FB0_OFFSET as u32
+                            + display_idx * 0x0080_0000;
+                // Sample at 4 positions across scanline 0 of L0 RT and
+                // the currently-displayed FB. Same offsets in both —
+                // if the host paints the full width, L0 has data at
+                // every offset; if scanout writes the full width, FB
+                // does too. Comparing the two pinpoints which side is
+                // dropping data.
+                //   col 0   = top-left
+                //   col 480 = 25% across (1920*0.25)
+                //   col 960 = middle (1920*0.5)
+                //   col 1440 = 75% across
+                let stride_bytes = (fb.width as u32) * 4;
+                let mut l0_samples = Vec::with_capacity(4);
+                let mut fb_samples = Vec::with_capacity(4);
+                for col in [0u32, 480, 960, 1440] {
+                    let off = col * 4; // BGRA = 4 bytes per pixel
+                    let l0_b = device.read_tex_pool_bytes(off, 8).unwrap_or_default();
+                    let fb_b = device.read_fb_bytes(fb_base, off, 8).unwrap_or_default();
+                    l0_samples.push((col, l0_b));
+                    fb_samples.push((col, fb_b));
+                }
+                let _ = stride_bytes;
+                let fmt = |samples: &Vec<(u32, Vec<u8>)>| {
+                    samples.iter()
+                        .map(|(col, b)| {
+                            let hex = b.iter().map(|x| format!("{:02X}", x))
+                                .collect::<Vec<_>>().join("");
+                            format!("@{col}={hex}")
+                        })
+                        .collect::<Vec<_>>().join(" ")
+                };
+                tracing::info!(
+                    "v2: FB_STATE={:#010X} (display={} render={} ready={}) \
+                     COMP_FENCE={} COMP_STATUS={:#010X} \
+                     L0: {} FB{}: {}",
+                    fb_state,
+                    fb_state & 0x3,
+                    (fb_state >> 2) & 0x3,
+                    (fb_state >> 4) & 0x3,
+                    comp_fence,
+                    comp_status,
+                    fmt(&l0_samples),
+                    display_idx,
+                    fmt(&fb_samples),
+                );
+            }
             t_jobs = Duration::ZERO;
             t_drain = Duration::ZERO;
             t_dispatch = Duration::ZERO;
@@ -932,6 +1197,14 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     }
 
     info!("menu-ui: stopping engine");
+    // Drop the v2 compositor + scanout select back to v1 so a
+    // subsequent boot (or a v1-only tool like layer-draw) comes up
+    // in the expected state — symmetric with `compositor-v2-test`.
+    if composite_v2 {
+        device.set_compositor_enable(false);
+        device.set_scanout_select(false);
+        device.clear_layers();
+    }
     device.stop()?;
     Ok(())
 }

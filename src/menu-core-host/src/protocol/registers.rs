@@ -43,11 +43,15 @@ pub const LAYER_COMMIT: usize = 0x6C;
 /// should advance by `count` every frame once the compositor is live.
 /// Pure observability; the renderer does not depend on it.
 pub const LAYER_DEBUG: usize = 0x70;
+// BUILD_ID: read-only 32-bit unix epoch stamped at FPGA synthesis
+// time (see `just _gen-build-id`). Host probe compares against the
+// build's own epoch to confirm the deployed RBF matches the source
+// tree just built — avoids the "did you actually deploy?" debug
+// cycle. Zero / 0xFFFFFFFF indicates a build that predates this
+// register or a stale .svh.
+pub const BUILD_ID: usize = 0x80;
+
 // COMPOSITOR_V2.md §7 — compositor-v2 control register block.
-// (The 0x80 slot used to be marked PERF_CYCLES_BUSY in this header
-// for unimplemented perf counters; with the v2 register block now
-// occupying 0x84..0x94, those aspirational perf constants have been
-// removed to avoid alias confusion.)
 pub const COMPOSITOR_CONTROL: usize = 0x84;
 pub const COMPOSITOR_STATUS:  usize = 0x88;
 pub const SCANOUT_FB_SELECT:  usize = 0x8C;

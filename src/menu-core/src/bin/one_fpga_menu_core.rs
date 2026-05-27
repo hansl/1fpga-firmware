@@ -163,6 +163,13 @@ pub enum Command {
     /// MISTER_FB reads FB[display_idx]. Reports COMPOSITE_FENCE per
     /// second to confirm the writer's frame rate.
     CompositorV2Test,
+
+    /// Dump 32 bytes from each FB slot (FB0/FB1/FB2). Run AFTER
+    /// `compositor-v2-test` or after exiting menu-ui to inspect
+    /// whether the compositor's scanout writes actually landed in
+    /// DDR3 — distinguishes "compositor produced zero pixels" from
+    /// "MISTER_FB isn't reading the right FB".
+    DumpFbs,
 }
 
 fn parse_u32_hex_or_dec(s: &str) -> Result<u32, std::num::ParseIntError> {
@@ -234,6 +241,7 @@ fn main() {
         Some(Command::LayerMultiTexProbe) => layer_multitex_probe(base).map_err(Into::into),
         Some(Command::MenuTextDemo) => menu_text_demo(base),
         Some(Command::CompositorV2Test) => compositor_v2_test(base).map_err(Into::into),
+        Some(Command::DumpFbs) => dump_fbs(base).map_err(Into::into),
         None => {
             info!(
                 "no subcommand given — re-run with `probe`, `ring-test`, `draw-test`, …, or `--print-layout`"
@@ -1751,6 +1759,23 @@ fn compositor_v2_test(base: u32) -> Result<(), menu_core_host::error::DeviceErro
     device.commit_layers();
     println!("Committed 5-layer scene.");
 
+    // Verify the host's writes actually landed in the LW_H2F BRAM
+    // that the compositor reads from. After commit, layer_back_idx
+    // flipped, so the bank we just committed is the one with the
+    // OPPOSITE flag — bank B was written first (back_idx=1 at boot),
+    // so it's now active. Dump bank B slot 0 (offset 0x2000) — should
+    // start with `01 00 FF FF` = flags=ENABLED|tex_id=0xFFFF
+    // (solid layer 0 with the navy color).
+    for (label, off) in [
+        ("bank-A slot0 (0x0000)", 0x0000u32),
+        ("bank-B slot0 (0x2000)", 0x2000u32),
+    ] {
+        if let Some(bytes) = device.read_layer_bram_bytes(off, 32) {
+            let hex: Vec<String> = bytes.iter().map(|b| format!("{:02X}", b)).collect();
+            println!("LAYER_BRAM[{label}] = {}", hex.join(" "));
+        }
+    }
+
     // Compositor's scanout triple-buffer base. Aliasing the v1 FB0
     // address is safe here because this test issues no host blits.
     // The compositor's scanout_writer writes to
@@ -1805,6 +1830,30 @@ fn compositor_v2_test(base: u32) -> Result<(), menu_core_host::error::DeviceErro
     device.set_scanout_select(false);
     device.clear_layers();
     println!("Disabled compositor + scanout_select; cleared layers. HDMI returns to v1 path.");
+    Ok(())
+}
+
+fn dump_fbs(base: u32) -> Result<(), menu_core_host::error::DeviceError> {
+    let device = Device::open_with(DeviceConfig {
+        base_phys_addr: base,
+        ..DeviceConfig::default()
+    })?;
+    println!("FB dump (32 bytes from each slot):");
+    for slot in 0..3u32 {
+        let phys = base + slot * 0x0080_0000;
+        match device.read_fb_bytes(phys, 0, 32) {
+            Some(bytes) => {
+                let hex: Vec<String> = bytes.iter().map(|b| format!("{:02X}", b)).collect();
+                let any_nonzero = bytes.iter().any(|&b| b != 0);
+                println!(
+                    "FB{slot} @ {phys:#010X}: {} {}",
+                    hex.join(" "),
+                    if any_nonzero { "(non-zero)" } else { "(all zeros)" },
+                );
+            }
+            None => println!("FB{slot} @ {phys:#010X}: mmap failed"),
+        }
+    }
     Ok(())
 }
 
