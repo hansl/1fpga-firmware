@@ -117,6 +117,17 @@ module emu
 	output  [7:0] DDRAM_BE,
 	output        DDRAM_WE,
 
+	// Second DDR3 port (ram2) — dedicated to blit_engine_1.
+	input         DDRAM2_BUSY,
+	output  [7:0] DDRAM2_BURSTCNT,
+	output [28:0] DDRAM2_ADDR,
+	input  [63:0] DDRAM2_DOUT,
+	input         DDRAM2_DOUT_READY,
+	output        DDRAM2_RD,
+	output [63:0] DDRAM2_DIN,
+	output  [7:0] DDRAM2_BE,
+	output        DDRAM2_WE,
+
 	output        SDRAM_CLK,
 	output        SDRAM_CKE,
 	output [12:0] SDRAM_A,
@@ -162,6 +173,14 @@ assign ADC_BUS = 'Z;
 assign USER_OUT = '1;
 assign {UART_RTS, UART_TXD, UART_DTR} = 0;
 assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
+
+// DDRAM2 idle until blit_engine_1 is instantiated (Step 2).
+assign DDRAM2_ADDR     = 29'd0;
+assign DDRAM2_BURSTCNT = 8'd0;
+assign DDRAM2_RD       = 1'b0;
+assign DDRAM2_DIN      = 64'd0;
+assign DDRAM2_BE       = 8'd0;
+assign DDRAM2_WE       = 1'b0;
 assign {SDRAM_DQ, SDRAM_A, SDRAM_BA, SDRAM_CLK, SDRAM_CKE, SDRAM_DQML, SDRAM_DQMH, SDRAM_nWE, SDRAM_nCAS, SDRAM_nRAS, SDRAM_nCS} = 'Z;
 // DDRAM_* is driven by the M2b ring fetcher (see instantiation below).
 assign DDRAM_CLK = clk_sys;

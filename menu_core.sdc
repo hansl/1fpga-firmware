@@ -42,3 +42,11 @@ set_false_path -to [get_registers {emu:emu|tex_tint_sync_0[*]}]
 set_false_path -to [get_registers {emu:emu|tex_bufsel_sync_0[*]}]
 # Reverse-direction: texture_unit busy (clk_sys) -> compositor (clk_video).
 set_false_path -to [get_registers {emu:emu|tex_busy_sync_0}]
+
+# f2sdram ram2 boundary: ram2 was re-clocked from pll_audio to clk_sys
+# for blit_engine_1. The f2sdram_safe_terminator in sysmem.sv handles
+# the CDC between the user clock and the HPS DDR3 hard IP internally.
+# Without these false-paths, Quartus tries to time paths through the
+# HPS hard block (producing ~95 ns paths on a 20 ns clock).
+set_false_path -from [get_registers {sysmem:sysmem|f2sdram_safe_terminator:f2sdram_safe_terminator_ram2|*}]
+set_false_path -to   [get_registers {sysmem:sysmem|f2sdram_safe_terminator:f2sdram_safe_terminator_ram2|*}]

@@ -73,8 +73,8 @@ set_global_assignment -name VERILOG_MACRO "MISTER_FB=1"
 # Disable YC / Composite output to save some resources
 #set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_YC=1"
 
-# Disable ALSA audio output to save some resources
-#set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ALSA=1"
+# Disable ALSA audio — ram2 repurposed as dedicated blit_engine_1 DDR3 port.
+set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ALSA=1"
 
 source sys/sys.tcl
 source sys/sys_analog.tcl

@@ -611,8 +611,8 @@ sysmem_lite sysmem
 	.ram1_byteenable(ram_byteenable),
 	.ram1_write(ram_write),
 
-	//64-bit DDR3 RAM access
-	.ram2_clk(clk_audio),
+	//64-bit DDR3 RAM access — re-clocked to clk_sys for blit_engine_1
+	.ram2_clk(clk_sys),
 	.ram2_address(ram2_address),
 	.ram2_burstcount(ram2_burstcount),
 	.ram2_waitrequest(ram2_waitrequest),
@@ -648,35 +648,8 @@ wire        ram2_read;
 wire        ram2_write;
 wire  [7:0] ram2_bcnt;
 
-ddr_svc ddr_svc
-(
-	.clk(clk_audio),
-
-	.ram_waitrequest(ram2_waitrequest),
-	.ram_burstcnt(ram2_burstcount),
-	.ram_addr(ram2_address),
-	.ram_readdata(ram2_readdata),
-	.ram_read_ready(ram2_readdatavalid),
-	.ram_read(ram2_read),
-	.ram_writedata(ram2_writedata),
-	.ram_byteenable(ram2_byteenable),
-	.ram_write(ram2_write),
-	.ram_bcnt(ram2_bcnt),
-
-`ifndef MISTER_DISABLE_ALSA
-	.ch0_addr(alsa_address),
-	.ch0_burst(1),
-	.ch0_data(alsa_readdata),
-	.ch0_req(alsa_req),
-	.ch0_ready(alsa_ready),
-`endif
-
-	.ch1_addr(pal_addr),
-	.ch1_burst(128),
-	.ch1_data(pal_data),
-	.ch1_req(pal_req),
-	.ch1_ready(pal_wr)
-);
+// ram2 wired directly to emu as DDRAM2 (dedicated blit_engine_1 port).
+// ddr_svc bypassed — ALSA disabled, palette unused at 32bpp.
 
 wire clk_pal = clk_audio;
 
@@ -1005,10 +978,11 @@ end
 	assign led_locked = 0;
 `endif
 
-wire [63:0] pal_data;
-wire [47:0] pal_d = {pal_data[55:32], pal_data[23:0]};
-wire  [6:0] pal_a = ram2_bcnt[6:0];
-wire        pal_wr;
+// Palette path quiesced — ddr_svc bypassed, 32bpp format never triggers pal_req.
+wire [63:0] pal_data = 64'd0;
+wire [47:0] pal_d = 48'd0;
+wire  [6:0] pal_a = 7'd0;
+wire        pal_wr = 1'b0;
 
 reg  [28:0] pal_addr;
 reg         pal_req = 0;
@@ -1821,6 +1795,16 @@ emu emu
 	.DDRAM_DIN(ram_writedata),
 	.DDRAM_BE(ram_byteenable),
 	.DDRAM_WE(ram_write),
+
+	.DDRAM2_ADDR(ram2_address),
+	.DDRAM2_BURSTCNT(ram2_burstcount),
+	.DDRAM2_BUSY(ram2_waitrequest),
+	.DDRAM2_DOUT(ram2_readdata),
+	.DDRAM2_DOUT_READY(ram2_readdatavalid),
+	.DDRAM2_RD(ram2_read),
+	.DDRAM2_DIN(ram2_writedata),
+	.DDRAM2_BE(ram2_byteenable),
+	.DDRAM2_WE(ram2_write),
 
 	.SDRAM_DQ(SDRAM_DQ),
 	.SDRAM_A(SDRAM_A),
