@@ -86,9 +86,19 @@ quartus-shell:
         --entrypoint /bin/bash \
         one-fpga-quartus:17.0.2
 
-# Deploy the built menu-core .rbf to the device
+# Deploy the built menu-core .rbf to the device and reboot to load it
 deploy-menu-core: build-menu-core
     scp cores/menu-core-fpga/output_files/menu_core.rbf root@{{mister_ip}}:/media/fat/menu.rbf
+    ssh root@{{mister_ip}} 'sync && reboot' || true
+    @echo "Waiting for device to go down..."
+    @while ping -c1 -W1 {{mister_ip}} >/dev/null 2>&1; do sleep 1; done
+    @echo "Device is rebooting..."
+    @sleep 3
+    @echo "Waiting for device to come back online..."
+    @while ! ping -c1 -W1 {{mister_ip}} >/dev/null 2>&1; do sleep 1; done
+    @echo "Waiting for SSH..."
+    @while ! ssh -o ConnectTimeout=2 -o BatchMode=yes root@{{mister_ip}} true 2>/dev/null; do sleep 1; done
+    @echo "Device is ready."
 
 # Cross-compile the menu-core host probe binary for armv7 (musl, static)
 # Uses a separate community image because the device's glibc is older
