@@ -519,8 +519,10 @@ wire        blit_we;
 wire        blit_rd;
 wire        blit_busy;
 
-// Blit dispatch from fetcher.
-wire        blit_start;
+// Blit dispatch from fetcher — dual engines, ring fetcher gates
+// start signals on its active_engine toggle.
+wire        blit0_start;
+wire        blit1_start;
 wire        blit_mode;
 wire [1:0]  blit_blend;
 wire [15:0] blit_dst_x, blit_dst_y, blit_dst_w, blit_dst_h;
@@ -570,7 +572,10 @@ ring_fetcher u_ring_fetcher (
     .target_width_o  (target_width),
     .target_height_o (target_height),
 
-    .blit_start_o    (blit_start),
+    .blit0_start_o   (blit0_start),
+    .blit1_start_o   (blit1_start),
+    .blit0_done_i    (blit_done),     // engine 0 (u_blit_engine on ram1)
+    .blit1_done_i    (blit1_done),    // engine 1 (u_blit_engine_1 on ram2)
     .blit_mode_o     (blit_mode),
     .blit_blend_o    (blit_blend),
     .blit_dst_x_o    (blit_dst_x),
@@ -593,7 +598,6 @@ ring_fetcher u_ring_fetcher (
     .blit_clip_w_o     (blit_clip_w),
     .blit_clip_h_o     (blit_clip_h),
     .blit_ignore_clip_o(blit_ignore_clip),
-    .blit_done_i     (blit_done),
 
     .ddram_addr_o       (fetch_addr),
     .ddram_burstcnt_o   (fetch_burstcnt),
@@ -651,7 +655,7 @@ blit_engine u_blit_engine (
     .clk        (clk_sys),
     .rst_n      (fetcher_rst_n),
 
-    .start_i    (blit_start),
+    .start_i    (blit0_start),
     .mode_i     (blit_mode),
     .blend_i    (blit_blend),
     .dst_x_i    (blit_dst_x),
@@ -721,7 +725,7 @@ blit_engine u_blit_engine_1 (
     .clk        (clk_sys),
     .rst_n      (fetcher_rst_n),
 
-    .start_i    (1'b0),                  // Step 2: idle. Step 3: gated by active_engine.
+    .start_i    (blit1_start),           // Step 3: gated by active_engine in fetcher.
     .mode_i     (blit_mode),
     .blend_i    (blit_blend),
     .dst_x_i    (blit_dst_x),
@@ -1085,9 +1089,9 @@ wire _unused_kick = reg_ring_kick;
 // start of active scanout). Wire-suppress.
 wire _unused_layer = &{1'b0, layer_dma_done, tex_unit_done, 1'b0};
 
-// blit_engine_1 outputs unused in Step 2 (start_i tied to 0, so
-// busy/done never assert). Step 3 connects done_o to the ring fetcher.
-wire _unused_blit1 = &{1'b0, blit1_busy, blit1_done, 1'b0};
+// blit_engine_1's busy_o still unused — only done_o is consumed by
+// the ring fetcher (via active_engine_q muxing in S_BLIT_WAIT).
+wire _unused_blit1 = &{1'b0, blit1_busy, 1'b0};
 
 ////////////////////////////////////////////////////////////////////////////
 // MISTER_FB configuration. FB_FORMAT selects BGR 32bpp so the framework

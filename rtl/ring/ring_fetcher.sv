@@ -60,8 +60,13 @@ module ring_fetcher (
     output logic [15:0] target_width_o,
     output logic [15:0] target_height_o,
 
-    // Blit engine dispatch.
-    output logic        blit_start_o,
+    // Blit engine dispatch — two engines on independent DDR3 ports.
+    // active_engine_q flips on each OP_PRESENT so frames N and N+1
+    // run on different engines and their DDR3 traffic overlaps.
+    output logic        blit0_start_o,      // engine 0 (ram1)
+    output logic        blit1_start_o,      // engine 1 (ram2)
+    input  logic        blit0_done_i,
+    input  logic        blit1_done_i,
     output logic        blit_mode_o,        // 0 = FILL, 1 = COPY
     output logic [1:0]  blit_blend_o,       // header.flags[1:0]
     output logic [15:0] blit_dst_x_o,
@@ -84,7 +89,6 @@ module ring_fetcher (
     output logic [15:0] blit_clip_w_o,
     output logic [15:0] blit_clip_h_o,
     output logic        blit_ignore_clip_o,
-    input  logic        blit_done_i,
 
     // DDRAM_* read-master interface.
     output logic [28:0] ddram_addr_o,
@@ -132,6 +136,7 @@ module ring_fetcher (
     } state_e;
 
     state_e      state;
+    logic        active_engine_q;        // 0 = blit_engine_0 (ram1), 1 = blit_engine_1 (ram2)
     logic [31:0] head_q;
     logic [31:0] header_q;
     logic [31:0] arg_q  [0:5];       // up to 6 arg words (COPY_RECT + tint)
@@ -185,7 +190,12 @@ module ring_fetcher (
     wire [31:0] dst_xy_word = is_copy ? arg_q[3] : arg_q[0];
     wire [31:0] dst_wh_word = is_copy ? arg_q[4] : arg_q[1];
 
-    assign blit_start_o      = (state == S_BLIT_DISPATCH);
+    // Dual blit dispatch. The current frame's blits go to the engine
+    // selected by active_engine_q. active_engine_q flips on PRESENT
+    // (in S_RETIRE below).
+    assign blit0_start_o     = (state == S_BLIT_DISPATCH) & ~active_engine_q;
+    assign blit1_start_o     = (state == S_BLIT_DISPATCH) &  active_engine_q;
+    wire   blit_done_mux     = active_engine_q ? blit1_done_i : blit0_done_i;
     assign blit_mode_o       = is_copy ? MODE_COPY : MODE_FILL;
     // Blend mode lives in header.flags[1:0] for both FILL_RECT (§5.3
     // #FILL_RECT) and COPY_RECT (§5.3 #COPY_RECT).
@@ -231,6 +241,7 @@ module ring_fetcher (
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state          <= S_IDLE;
+            active_engine_q <= 1'b0;
             head_q         <= 32'd0;
             header_q       <= 32'd0;
             for (i = 0; i < 6; i = i + 1) arg_q[i]  <= 32'd0;
@@ -399,11 +410,12 @@ module ring_fetcher (
 
                 S_BLIT_DISPATCH: state <= S_BLIT_WAIT;
 
-                S_BLIT_WAIT: if (blit_done_i) state <= S_RETIRE;
+                S_BLIT_WAIT: if (blit_done_mux) state <= S_RETIRE;
 
                 S_RETIRE: begin
                     unique case (pending_opcode)
                         OP_FENCE: fence_value_q <= arg_q[0];
+                        OP_PRESENT: active_engine_q <= ~active_engine_q;
                         OP_SET_CLIP: begin
                             // Word 0: x|y, Word 1: w|h (PROTOCOL.md §5.3).
                             clip_x_q  <= arg_q[0][31:16];
