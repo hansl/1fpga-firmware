@@ -115,6 +115,7 @@ module blit_engine (
     // burstcnt tolerates this — FILL_BURST already uses up to 255.
     typedef enum logic [4:0] {
         S_IDLE,
+        S_DIV_WAIT,        // wait for pipelined lpm_divide on scaled COPY_RECT
         S_ROW_INIT,
         S_NEXT_PIXEL,
         S_FETCH_SRC,
@@ -166,6 +167,72 @@ module blit_engine (
     logic [31:0] src_y_acc_q;    // Q16.16, advanced per row
     logic [31:0] src_x_init_q;   // Q16.16: initial src_x_acc (clipped sox in src space)
     logic [31:0] src_y_init_q;   // Q16.16: initial src_y_acc
+
+    // ---- Pipelined divider for the Q16.16 step computation -------
+    // Inferred combinational `/` flattened the entire 32/16 divider
+    // chain into one clock cycle (60 LUT levels, -72 ns clk_sys
+    // slack — see worst-paths report). Replace with two
+    // LPM_PIPELINE=8 lpm_divide instances. On entry to the scaled
+    // path the FSM latches numerators/denominators (clipped to
+    // dst==0 → step=1.0 below), enters S_DIV_WAIT for 8 cycles,
+    // then samples div_quot_x/y on the last wait cycle.
+    //
+    // 8 stages × 20 ns clk_sys = 160 ns total latency, but a single
+    // blit op already runs for thousands of cycles of pixel work,
+    // so the overhead is negligible (and non-scaled blits skip the
+    // wait entirely).
+    localparam int DIV_PIPELINE_STAGES = 8;
+    logic [31:0] div_num_x_q;
+    logic [15:0] div_den_x_q;
+    logic [31:0] div_num_y_q;
+    logic [15:0] div_den_y_q;
+    logic        div_den_x_zero_q;  // dst_w_i was 0 → use step=1.0
+    logic        div_den_y_zero_q;
+    logic [15:0] sox_q, soy_q;      // clipped left/top offset, latched for S_DIV_WAIT
+    logic [3:0]  div_wait_cnt_q;    // 0..DIV_PIPELINE_STAGES-1
+
+    wire  [31:0] div_quot_x;
+    wire  [31:0] div_quot_y;
+    wire  [15:0] div_rem_x;
+    wire  [15:0] div_rem_y;
+
+    lpm_divide #(
+        .LPM_WIDTHN         (32),
+        .LPM_WIDTHD         (16),
+        .LPM_NREPRESENTATION("UNSIGNED"),
+        .LPM_DREPRESENTATION("UNSIGNED"),
+        .LPM_PIPELINE       (DIV_PIPELINE_STAGES),
+        .LPM_TYPE           ("LPM_DIVIDE")
+    ) u_step_div_x (
+        .clock    (clk),
+        .clken    (1'b1),
+        .aclr     (1'b0),
+        .numer    (div_num_x_q),
+        .denom    (div_den_x_q),
+        .quotient (div_quot_x),
+        .remain   (div_rem_x)
+    );
+
+    lpm_divide #(
+        .LPM_WIDTHN         (32),
+        .LPM_WIDTHD         (16),
+        .LPM_NREPRESENTATION("UNSIGNED"),
+        .LPM_DREPRESENTATION("UNSIGNED"),
+        .LPM_PIPELINE       (DIV_PIPELINE_STAGES),
+        .LPM_TYPE           ("LPM_DIVIDE")
+    ) u_step_div_y (
+        .clock    (clk),
+        .clken    (1'b1),
+        .aclr     (1'b0),
+        .numer    (div_num_y_q),
+        .denom    (div_den_y_q),
+        .quotient (div_quot_y),
+        .remain   (div_rem_y)
+    );
+
+    // The lpm_divide remainder outputs aren't consumed; pin them
+    // into an unused-suppress so synthesis doesn't warn.
+    wire _unused_div_rem = |{div_rem_x, div_rem_y};
 
     // One-pixel src cache. In upscale (the typical case) consecutive
     // dst pixels often map to the same src column — caching the
@@ -464,6 +531,15 @@ module blit_engine (
             src_y_acc_q       <= '0;
             src_x_init_q      <= '0;
             src_y_init_q      <= '0;
+            div_num_x_q       <= '0;
+            div_den_x_q       <= '0;
+            div_num_y_q       <= '0;
+            div_den_y_q       <= '0;
+            div_den_x_zero_q  <= 1'b0;
+            div_den_y_zero_q  <= 1'b0;
+            sox_q             <= '0;
+            soy_q             <= '0;
+            div_wait_cnt_q    <= '0;
             cached_src_pixel_q <= '0;
             last_src_col_q    <= '0;
             cache_valid_q     <= 1'b0;
@@ -566,10 +642,10 @@ module blit_engine (
                     // Scale-mode locals — declared at the top so the
                     // nested if/else doesn't need its own
                     // declarations (Quartus 17 rejects automatic in
-                    // nested blocks).
+                    // nested blocks). step_x/step_y values come
+                    // from the pipelined lpm_divide and land in
+                    // S_DIV_WAIT.
                     automatic logic        do_scale;
-                    automatic logic [31:0] step_x;
-                    automatic logic [31:0] step_y;
 
                     fbw = target_width_i;
                     fbh = target_height_i;
@@ -628,40 +704,30 @@ module blit_engine (
                     // --- Scale-mode setup --------------------------
                     // Active only on COPY when src and dst dimensions
                     // differ. Step = (src_dim / dst_dim) in Q16.16.
-                    // Initial src accumulators include sox·step /
-                    // soy·step so left/top clipping advances the src
-                    // tap by the scaled amount, not a 1:1 amount.
-                    // (Guard against dst==0 — degenerate fully-
-                    // clipped — S_ROW_INIT short-circuits anyway.)
-                    // `do_scale` is reused from the src_x/y_q
-                    // selection above.
-                    step_x = (dst_w_i == 16'd0)
-                             ? 32'h0001_0000
-                             : ({16'd0, src_w_i} <<< 16) / {16'd0, dst_w_i};
-                    step_y = (dst_h_i == 16'd0)
-                             ? 32'h0001_0000
-                             : ({16'd0, src_h_i} <<< 16) / {16'd0, dst_h_i};
+                    // The actual division is pipelined (8 stages,
+                    // see lpm_divide instances at module-top); on
+                    // entry to S_DIV_WAIT we latch the numerator /
+                    // denominator inputs, the FSM idles for 8 cycles
+                    // for the result, then S_DIV_WAIT's exit cycle
+                    // computes src_x_init/acc from sox·step + step/2
+                    // (bias for center-of-pixel sampling per
+                    // PROTOCOL.md §7.4:
+                    //   src_x = sx + floor((i + 0.5) * sw / dw)).
+                    // The 8-cycle latency is negligible vs the
+                    // thousands of cycles per scaled blit; non-
+                    // scaled blits skip the wait entirely.
                     if (do_scale) begin
-                        scale_mode_q <= 1'b1;
-                        src_step_x_q <= step_x;
-                        src_step_y_q <= step_y;
-                        // sox/soy in dst-pixel units, multiplied by
-                        // the Q16.16 step to convert to src-space.
-                        // Plus a +step/2 bias so the per-pixel
-                        // accumulator samples at the *center* of each
-                        // dst pixel rather than its top-left corner
-                        // — matches PROTOCOL.md §7.4:
-                        //
-                        //   src_x = sx + floor((i + 0.5) * sw / dw)
-                        //
-                        // Without the bias, scaling shifts the
-                        // output up-and-left by half a destination
-                        // pixel; visible at large scale factors and
-                        // when a tween straddles integer src pixels.
-                        src_x_init_q <= ({16'd0, sox} * step_x) + (step_x >> 1);
-                        src_y_init_q <= ({16'd0, soy} * step_y) + (step_y >> 1);
-                        src_x_acc_q  <= ({16'd0, sox} * step_x) + (step_x >> 1);
-                        src_y_acc_q  <= ({16'd0, soy} * step_y) + (step_y >> 1);
+                        scale_mode_q     <= 1'b1;
+                        div_num_x_q      <= {src_w_i, 16'd0};
+                        div_den_x_q      <= dst_w_i;
+                        div_num_y_q      <= {src_h_i, 16'd0};
+                        div_den_y_q      <= dst_h_i;
+                        div_den_x_zero_q <= (dst_w_i == 16'd0);
+                        div_den_y_zero_q <= (dst_h_i == 16'd0);
+                        sox_q            <= sox;
+                        soy_q            <= soy;
+                        div_wait_cnt_q   <= 4'd0;
+                        state            <= S_DIV_WAIT;
                     end else begin
                         scale_mode_q <= 1'b0;
                         src_step_x_q <= 32'h0001_0000;
@@ -670,12 +736,38 @@ module blit_engine (
                         src_y_init_q <= 32'd0;
                         src_x_acc_q  <= 32'd0;
                         src_y_acc_q  <= 32'd0;
+                        // If the rect is fully clipped (eff_w == 0
+                        // or eff_h == 0), S_ROW_INIT immediately
+                        // finds cur_y_off == dst_h_q == 0 and falls
+                        // to S_DONE.
+                        state        <= S_ROW_INIT;
                     end
+                end
 
-                    // If the rect is fully clipped (eff_w == 0 or
-                    // eff_h == 0), S_ROW_INIT immediately finds
-                    // cur_y_off == dst_h_q == 0 and falls to S_DONE.
-                    state        <= S_ROW_INIT;
+                S_DIV_WAIT: begin
+                    // 8-cycle latency hold for the pipelined lpm_divide.
+                    // On the last wait cycle, the quotient is valid
+                    // and we latch step + initial-accumulator state.
+                    // dst==0 corner cases (degenerate fully-clipped
+                    // rects) reuse the 1:1 step of 1.0 since the
+                    // divider's quotient is undefined for that case
+                    // and S_ROW_INIT will short-circuit to S_DONE
+                    // anyway via cur_y_off == 0 == dst_h_q.
+                    if (div_wait_cnt_q == 4'(DIV_PIPELINE_STAGES)) begin
+                        automatic logic [31:0] step_x_eff;
+                        automatic logic [31:0] step_y_eff;
+                        step_x_eff = div_den_x_zero_q ? 32'h0001_0000 : div_quot_x;
+                        step_y_eff = div_den_y_zero_q ? 32'h0001_0000 : div_quot_y;
+                        src_step_x_q <= step_x_eff;
+                        src_step_y_q <= step_y_eff;
+                        src_x_init_q <= ({16'd0, sox_q} * step_x_eff) + (step_x_eff >> 1);
+                        src_y_init_q <= ({16'd0, soy_q} * step_y_eff) + (step_y_eff >> 1);
+                        src_x_acc_q  <= ({16'd0, sox_q} * step_x_eff) + (step_x_eff >> 1);
+                        src_y_acc_q  <= ({16'd0, soy_q} * step_y_eff) + (step_y_eff >> 1);
+                        state        <= S_ROW_INIT;
+                    end else begin
+                        div_wait_cnt_q <= div_wait_cnt_q + 4'd1;
+                    end
                 end
 
                 S_ROW_INIT: begin
