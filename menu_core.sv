@@ -174,13 +174,14 @@ assign USER_OUT = '1;
 assign {UART_RTS, UART_TXD, UART_DTR} = 0;
 assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
 
-// DDRAM2 idle until blit_engine_1 is instantiated (Step 2).
-assign DDRAM2_ADDR     = 29'd0;
-assign DDRAM2_BURSTCNT = 8'd0;
-assign DDRAM2_RD       = 1'b0;
-assign DDRAM2_DIN      = 64'd0;
-assign DDRAM2_BE       = 8'd0;
-assign DDRAM2_WE       = 1'b0;
+// DDRAM2 driven directly by blit_engine_1 (instantiated below as
+// u_blit_engine_1). No arbiter — engine1 is the sole consumer.
+assign DDRAM2_ADDR     = blit1_addr;
+assign DDRAM2_BURSTCNT = blit1_burstcnt;
+assign DDRAM2_RD       = blit1_rd;
+assign DDRAM2_DIN      = blit1_din;
+assign DDRAM2_BE       = blit1_be;
+assign DDRAM2_WE       = blit1_we;
 assign {SDRAM_DQ, SDRAM_A, SDRAM_BA, SDRAM_CLK, SDRAM_CKE, SDRAM_DQML, SDRAM_DQMH, SDRAM_nWE, SDRAM_nCAS, SDRAM_nRAS, SDRAM_nCS} = 'Z;
 // DDRAM_* is driven by the M2b ring fetcher (see instantiation below).
 assign DDRAM_CLK = clk_sys;
@@ -695,6 +696,78 @@ blit_engine u_blit_engine (
 );
 
 ////////////////////////////////////////////////////////////////////////////
+// Second blit engine — drives DDRAM2 (ram2, dedicated port, no arbiter).
+//
+// Shares all parameter inputs with u_blit_engine — the ring_fetcher
+// drives the same parameter bus, and a future step will route
+// blit_start_o to engine0 or engine1 based on an active_engine
+// toggle that flips on each PRESENT.
+//
+// Step 2: start_i tied to 0 (engine permanently idle). Just verifies
+// that the second engine synthesizes + fits without affecting
+// existing single-blit behavior.
+////////////////////////////////////////////////////////////////////////////
+
+wire [28:0] blit1_addr;
+wire [7:0]  blit1_burstcnt;
+wire [7:0]  blit1_be;
+wire [63:0] blit1_din;
+wire        blit1_we;
+wire        blit1_rd;
+wire        blit1_busy;
+wire        blit1_done;
+
+blit_engine u_blit_engine_1 (
+    .clk        (clk_sys),
+    .rst_n      (fetcher_rst_n),
+
+    .start_i    (1'b0),                  // Step 2: idle. Step 3: gated by active_engine.
+    .mode_i     (blit_mode),
+    .blend_i    (blit_blend),
+    .dst_x_i    (blit_dst_x),
+    .dst_y_i    (blit_dst_y),
+    .dst_w_i    (blit_dst_w),
+    .dst_h_i    (blit_dst_h),
+    .color_i    (blit_color),
+    .src_x_i    (blit_src_x),
+    .src_y_i    (blit_src_y),
+    .src_w_i    (blit_src_w),
+    .src_h_i    (blit_src_h),
+    .src_addr_i (blit_src_addr),
+    .src_pitch_i(blit_src_pitch),
+    .format_i      (blit_format),
+    .tint_en_i     (blit_tint_en),
+    .tint_color_i  (blit_tint_color),
+
+    .target_width_i  (target_width),
+    .target_height_i (target_height),
+    .clip_en_i     (blit_clip_en),
+    .clip_x_i      (blit_clip_x),
+    .clip_y_i      (blit_clip_y),
+    .clip_w_i      (blit_clip_w),
+    .clip_h_i      (blit_clip_h),
+    .ignore_clip_i (blit_ignore_clip),
+
+    .target_base_i  (target_base),
+    .target_pitch_i (target_pitch),
+
+    .busy_o     (blit1_busy),
+    .done_o     (blit1_done),
+
+    // Dedicated DDR3 port (ram2). No arbiter — engine1 is the sole
+    // consumer of DDRAM2.
+    .ddram_addr_o       (blit1_addr),
+    .ddram_burstcnt_o   (blit1_burstcnt),
+    .ddram_be_o         (blit1_be),
+    .ddram_din_o        (blit1_din),
+    .ddram_we_o         (blit1_we),
+    .ddram_rd_o         (blit1_rd),
+    .ddram_busy_i       (DDRAM2_BUSY),
+    .ddram_dout_i       (DDRAM2_DOUT),
+    .ddram_dout_valid_i (DDRAM2_DOUT_READY)
+);
+
+////////////////////////////////////////////////////////////////////////////
 // Layer-cache + DMA (Phase 2a step 2/3).
 //
 // On every vsync rising edge, layer_dma fetches `layer_count`
@@ -1011,6 +1084,10 @@ wire _unused_kick = reg_ring_kick;
 // HBlank budget being wide enough to guarantee completion by the
 // start of active scanout). Wire-suppress.
 wire _unused_layer = &{1'b0, layer_dma_done, tex_unit_done, 1'b0};
+
+// blit_engine_1 outputs unused in Step 2 (start_i tied to 0, so
+// busy/done never assert). Step 3 connects done_o to the ring fetcher.
+wire _unused_blit1 = &{1'b0, blit1_busy, blit1_done, 1'b0};
 
 ////////////////////////////////////////////////////////////////////////////
 // MISTER_FB configuration. FB_FORMAT selects BGR 32bpp so the framework
