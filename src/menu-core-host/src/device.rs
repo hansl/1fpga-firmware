@@ -748,7 +748,15 @@ impl Device {
     pub fn wait_fence(&self, target: u32, timeout: Duration) -> Result<(), DeviceError> {
         let start = Instant::now();
         loop {
-            if self.regs.read32(registers::FENCE_VALUE) == target {
+            // FENCE_VALUE holds the MOST RECENTLY RETIRED fence value.
+            // With pipelined submit, by the time we poll the FPGA may
+            // have retired our target AND several after it — the
+            // value has moved past `target`. Check "at or past" via
+            // a signed difference so wrap-around is handled correctly
+            // (works as long as we never have more than 2^31 fences
+            // in flight, which we never will).
+            let current = self.regs.read32(registers::FENCE_VALUE);
+            if (current.wrapping_sub(target) as i32) >= 0 {
                 return Ok(());
             }
             if let Some(err) = self.last_error() {
