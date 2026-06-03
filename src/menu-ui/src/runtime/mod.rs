@@ -497,15 +497,6 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     let mut scene_hash_per_fb: [Option<u64>; 3] = [None, None, None];
     let mut scene_per_fb: [Option<damage::PaintedScene>; 3] =
         [None, None, None];
-    // History index for damage diffs. Tracks "the slot WE are about
-    // to write to" — advances on each submit. With dual blit engines
-    // and pipelining, we no longer block on the fence after PRESENT,
-    // so reading FB_STATE.render would race with FPGA-side PRESENT
-    // processing. Instead we maintain our own counter — the damage
-    // diff is against the scene we submitted N iterations ago, which
-    // is the same as the FPGA's triple-buffer rotation in steady
-    // state.
-    let mut history_idx: usize = 0;
     // In-flight fence values from submitted-but-not-yet-retired
     // frames. The triple-buffer fb_swapper has 3 FB slots: at most
     // one displayed + one ready + one rendering. To match that,
@@ -516,7 +507,16 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     // N+2 is queued in the ring.
     let mut pending_fences: std::collections::VecDeque<u32> =
         std::collections::VecDeque::with_capacity(3);
-    const MAX_INFLIGHT_FRAMES: usize = 2;
+    // Bounded to 1 so the host always waits for the previous frame's
+    // PRESENT to retire before reading FB_STATE.render. Without this,
+    // every other iteration would read a stale render_idx (FPGA still
+    // processing the previous PRESENT), causing damage-tracking
+    // misalignment and ghosting. The dual blit engines still help
+    // because: (a) PRESENT alternates them so consecutive frames don't
+    // hit the same engine back-to-back; (b) the wait happens AFTER
+    // scene compute, so the FPGA's blit work overlaps with the host's
+    // CPU work for the next frame.
+    const MAX_INFLIGHT_FRAMES: usize = 1;
 
     // Damage-paint threshold: if the union of damage rects covers
     // more than this fraction of the FB, fall back to a single
@@ -676,20 +676,35 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         //    the scene is cheap (just a tree walk + small Vec) and
         //    gives us both the fast skip-hash and the structure
         //    damage needs to diff against the prior state.
-        // Use the host-tracked history index instead of reading
-        // FB_STATE.render — with pipelined submit (no fence wait),
-        // FB_STATE.render lags behind our submitted-but-not-yet-
-        // processed PRESENTs. The damage diff is against the scene
-        // we painted into THIS history slot last time around, which
-        // is equivalent to the FPGA's per-FB-slot rotation in steady
-        // state.
-        let render_idx = history_idx;
+        //
+        // Compute scene FIRST — this work doesn't depend on render_idx
+        // and overlaps with the FPGA's previous-frame blit work. The
+        // wait_fence below blocks only if we're outrunning the FPGA.
         let opacities = ui_state.with_tree(|tree| crate::style::resolve_opacity(tree, root));
         let transforms = ui_state.with_tree(|tree| crate::style::resolve_transforms(tree, root));
         let current_scene = ui_state.with_tree(|tree| {
             damage::compute_scene(tree, root, &layouts, &text_styles, &opacities, &transforms)
         });
         let current_hash = current_scene.hash();
+
+        // NOW wait for the previous frame's fence (= sync barrier for
+        // reading FB_STATE.render). Wait happens AFTER scene compute
+        // so the FPGA's blit work overlaps with the host's CPU work.
+        // The MAX_INFLIGHT_FRAMES=2 bound is here so the host can be
+        // up to 1 frame ahead of the FPGA's PRESENT processing.
+        let fence_wait_start = Instant::now();
+        if pending_fences.len() >= MAX_INFLIGHT_FRAMES {
+            let oldest = pending_fences.pop_front().unwrap();
+            device.wait_fence(oldest, timeout)?;
+        }
+        let fence_dt = fence_wait_start.elapsed();
+
+        // render_idx is fresh now: the wait above ensures the FPGA
+        // has processed our most-recently-committed PRESENT and
+        // fb_swapper has rotated. Damage diff is against the scene
+        // we last painted INTO THIS SAME PHYSICAL SLOT, which is the
+        // current content.
+        let render_idx = (device.fb_state().render as usize).min(2);
         if scene_hash_per_fb[render_idx] == Some(current_hash) {
             // This FB slot already has the desired content. Sleep
             // ~one vsync to bound the loop and continue.
@@ -711,22 +726,6 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         //    frame; the copy alone cost ~14 ms of DDR3 bandwidth and
         //    added nothing once the FBs were correctly per-slot
         //    tracked, so it was removed.
-        // Flow control: bound the in-flight frame count to the
-        // triple-buffer's safe depth. If we're already at the limit,
-        // wait for the oldest fence to retire — this is our backpressure
-        // and matches the natural pipeline depth of fb_swapper (one
-        // displayed + one ready/rendering). This wait happens BEFORE
-        // begin_frame so it doesn't hold a mutable Frame borrow on
-        // device. In steady state, the host's per-frame CPU work
-        // (~19ms) overlaps with the FPGA's blit work, so the wait
-        // here is short or zero.
-        let fence_wait_start = Instant::now();
-        if pending_fences.len() >= MAX_INFLIGHT_FRAMES {
-            let oldest = pending_fences.pop_front().unwrap();
-            device.wait_fence(oldest, timeout)?;
-        }
-        let fence_dt = fence_wait_start.elapsed();
-
         let frame = device.begin_frame();
         let frame = crate::paint::render_pending_text(frame, &pendings, &fonts)?;
         let frame = frame.set_target_framebuffer()?;
@@ -810,7 +809,6 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         let new_token = frame.present()?.submit()?;
         pending_fences.push_back(new_token.fence_value());
         let scanout_dt = Duration::ZERO;
-        history_idx = (history_idx + 1) % 3;
 
         scene_hash_per_fb[render_idx] = Some(current_hash);
         scene_per_fb[render_idx] = Some(current_scene);
