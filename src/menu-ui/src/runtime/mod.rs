@@ -497,6 +497,26 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     let mut scene_hash_per_fb: [Option<u64>; 3] = [None, None, None];
     let mut scene_per_fb: [Option<damage::PaintedScene>; 3] =
         [None, None, None];
+    // History index for damage diffs. Tracks "the slot WE are about
+    // to write to" — advances on each submit. With dual blit engines
+    // and pipelining, we no longer block on the fence after PRESENT,
+    // so reading FB_STATE.render would race with FPGA-side PRESENT
+    // processing. Instead we maintain our own counter — the damage
+    // diff is against the scene we submitted N iterations ago, which
+    // is the same as the FPGA's triple-buffer rotation in steady
+    // state.
+    let mut history_idx: usize = 0;
+    // In-flight fence values from submitted-but-not-yet-retired
+    // frames. The triple-buffer fb_swapper has 3 FB slots: at most
+    // one displayed + one ready + one rendering. To match that,
+    // bound the host's lead to 2 in-flight frames — if we have 2
+    // pending, wait for the oldest fence to retire before submitting
+    // the next frame. This is "1-2 frames ahead" pipelining: the
+    // FPGA is processing frame N while the host prepares N+1 and
+    // N+2 is queued in the ring.
+    let mut pending_fences: std::collections::VecDeque<u32> =
+        std::collections::VecDeque::with_capacity(3);
+    const MAX_INFLIGHT_FRAMES: usize = 2;
 
     // Damage-paint threshold: if the union of damage rects covers
     // more than this fraction of the FB, fall back to a single
@@ -656,7 +676,14 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         //    the scene is cheap (just a tree walk + small Vec) and
         //    gives us both the fast skip-hash and the structure
         //    damage needs to diff against the prior state.
-        let render_idx = (device.fb_state().render as usize).min(2);
+        // Use the host-tracked history index instead of reading
+        // FB_STATE.render — with pipelined submit (no fence wait),
+        // FB_STATE.render lags behind our submitted-but-not-yet-
+        // processed PRESENTs. The damage diff is against the scene
+        // we painted into THIS history slot last time around, which
+        // is equivalent to the FPGA's per-FB-slot rotation in steady
+        // state.
+        let render_idx = history_idx;
         let opacities = ui_state.with_tree(|tree| crate::style::resolve_opacity(tree, root));
         let transforms = ui_state.with_tree(|tree| crate::style::resolve_transforms(tree, root));
         let current_scene = ui_state.with_tree(|tree| {
@@ -684,6 +711,22 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         //    frame; the copy alone cost ~14 ms of DDR3 bandwidth and
         //    added nothing once the FBs were correctly per-slot
         //    tracked, so it was removed.
+        // Flow control: bound the in-flight frame count to the
+        // triple-buffer's safe depth. If we're already at the limit,
+        // wait for the oldest fence to retire — this is our backpressure
+        // and matches the natural pipeline depth of fb_swapper (one
+        // displayed + one ready/rendering). This wait happens BEFORE
+        // begin_frame so it doesn't hold a mutable Frame borrow on
+        // device. In steady state, the host's per-frame CPU work
+        // (~19ms) overlaps with the FPGA's blit work, so the wait
+        // here is short or zero.
+        let fence_wait_start = Instant::now();
+        if pending_fences.len() >= MAX_INFLIGHT_FRAMES {
+            let oldest = pending_fences.pop_front().unwrap();
+            device.wait_fence(oldest, timeout)?;
+        }
+        let fence_dt = fence_wait_start.elapsed();
+
         let frame = device.begin_frame();
         let frame = crate::paint::render_pending_text(frame, &pendings, &fonts)?;
         let frame = frame.set_target_framebuffer()?;
@@ -764,8 +807,10 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
 
         let t7 = Instant::now();
 
-        let (_count, fence_dt, scanout_dt) =
-            frame.present()?.submit()?.wait_presented_timed(timeout)?;
+        let new_token = frame.present()?.submit()?;
+        pending_fences.push_back(new_token.fence_value());
+        let scanout_dt = Duration::ZERO;
+        history_idx = (history_idx + 1) % 3;
 
         scene_hash_per_fb[render_idx] = Some(current_hash);
         scene_per_fb[render_idx] = Some(current_scene);
@@ -784,7 +829,10 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         t_images += t4 - t3;
         t_text_pop += t5 - t4;
         t_layout += t6 - t5;
-        t_paint += t7 - t6;
+        // t7 - t6 spans damage compute + fence wait + paint + submit.
+        // Subtract the explicit fence_dt so paint shows actual work
+        // (the wait is reported separately as `fence`).
+        t_paint += (t7 - t6).saturating_sub(fence_dt);
         t_fence += fence_dt;
         t_scanout += scanout_dt;
 
