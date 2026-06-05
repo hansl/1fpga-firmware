@@ -24,24 +24,12 @@ set_clock_groups -asynchronous \
     -group [get_clocks {pll_audio|*|divclk}] \
     -group [get_clocks {*|h2f_user0_clk}]
 
-# CDC synchronisers between clk_sys (50 MHz) and clk_video (100 MHz).
-# The first stage of each chain accepts metastability; the second
-# stage produces a stable, late-arriving value. Marking the first
-# stage as false-path-to keeps Quartus from trying to close timing on
-# the inter-domain leg.
-set_false_path -to [get_registers {emu:emu|comp_vs_sync_0}]
-set_false_path -to [get_registers {emu:emu|layer_count_sync_0[*]}]
+# CDC synchroniser between clk_sys (50 MHz) and clk_video (100 MHz).
+# The first stage accepts metastability; the second produces a stable,
+# late-arriving value. Marking the first stage as false-path-to keeps
+# Quartus from trying to close timing on the inter-domain leg.
+# (The compositor-v2 layer/texture CDC chains were removed.)
 set_false_path -to [get_registers {emu:emu|comp_rst_n_sync_0}]
-# Phase 2b step 2: texture_unit kick + multi-bit params (clk_video → clk_sys).
-set_false_path -to [get_registers {emu:emu|tex_kick_sync_0}]
-set_false_path -to [get_registers {emu:emu|tex_id_sync_0[*]}]
-set_false_path -to [get_registers {emu:emu|tex_src_x_sync_0[*]}]
-set_false_path -to [get_registers {emu:emu|tex_ty_sync_0[*]}]
-set_false_path -to [get_registers {emu:emu|tex_dst_w_sync_0[*]}]
-set_false_path -to [get_registers {emu:emu|tex_tint_sync_0[*]}]
-set_false_path -to [get_registers {emu:emu|tex_bufsel_sync_0[*]}]
-# Reverse-direction: texture_unit busy (clk_sys) -> compositor (clk_video).
-set_false_path -to [get_registers {emu:emu|tex_busy_sync_0}]
 
 # f2sdram ram2 boundary: ram2 was re-clocked from pll_audio to clk_sys
 # for blit_engine_1. The f2sdram_safe_terminator in sysmem.sv handles

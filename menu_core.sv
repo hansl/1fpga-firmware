@@ -229,16 +229,16 @@ assign BUTTONS   = 2'b00;
 // Cyclone V's clock-select blocks in sys_top require a PLL output on
 // inclk[3] (synthesis error 15836 if driven by a raw input pin). Two
 // outputs from the core PLL:
-//   clk_sys (50 MHz)   — blit engine, ring fetcher, regs, layer_dma
-//   clk_video (100 MHz) — compositor + scanline_filter, also exposed
+//   clk_sys (50 MHz)   — blit engines, ring fetcher, regs, arbiter
+//   clk_video (100 MHz) — compositor (VGA timing only), also exposed
 //                          to the framework as CLK_VIDEO so ASCAL
 //                          captures at the native-1080p pixel rate.
-// The two are related clocks (same PLL); CDC paths are confined to
-// the synchronisers below, which menu_core.sdc marks as false_paths.
+// The two are related clocks (same PLL); the one remaining CDC path
+// (compositor reset sync) is marked false_path in menu_core.sdc.
 ////////////////////////////////////////////////////////////////////////////
 
-wire clk_sys;     // 50 MHz: blit engine, ring fetcher, regs, layer_dma
-wire clk_video;   // 100 MHz: compositor + scanline_filter
+wire clk_sys;     // 50 MHz: blit engines, ring fetcher, regs, arbiter
+wire clk_video;   // 100 MHz: compositor (VGA timing)
 wire pll_locked;
 
 pll pll_inst (
@@ -306,20 +306,6 @@ always_ff @(posedge clk_video or negedge pll_locked) begin
 end
 wire comp_rst_n = comp_rst_n_sync_1;
 
-// CDC: clk_sys-owned `reg_layer_count` (9 bits) into the clk_video
-// domain. layer_count only changes on `LAYER_COMMIT` writes, which
-// are bursty (once per frame, separated by millions of clk_video
-// cycles), so the two-flop synchronisers see a stable value with
-// vanishing probability of mid-transition bit-mixing. Marked false-
-// path in menu_core.sdc so Quartus doesn't try to time the
-// inter-domain leg.
-(* preserve *) logic [8:0] layer_count_sync_0;
-(* preserve *) logic [8:0] layer_count_sync_1;
-always_ff @(posedge clk_video) begin
-    layer_count_sync_0 <= reg_layer_count;
-    layer_count_sync_1 <= layer_count_sync_0;
-end
-
 compositor u_compositor (
 	.clk             (clk_video),
 	.rst_n           (comp_rst_n),
@@ -333,7 +319,7 @@ compositor u_compositor (
 	.vblank          (comp_vb),
 	.cache_slot_o    (comp_cache_slot),
 	.cache_data_i    (comp_cache_data),
-	.layer_count_i   (layer_count_sync_1),
+	.layer_count_i   (9'd0),
 	.tex_kick_o          (comp_tex_kick),
 	.tex_id_o            (comp_tex_id),
 	.tex_src_x_o         (comp_tex_src_x),
@@ -489,7 +475,7 @@ menu_core_regs u_menu_core_regs (
     .layer_active_o     (reg_layer_active),
     .layer_count_o      (reg_layer_count),
 
-    .layer_descriptors_i (layer_dma_descriptors),
+    .layer_descriptors_i (32'd0),
 
     .ring_head_i    (fetcher_ring_head),
     .fence_value_i  (fetcher_fence_value),
@@ -772,242 +758,49 @@ blit_engine u_blit_engine_1 (
 );
 
 ////////////////////////////////////////////////////////////////////////////
-// Layer-cache + DMA (Phase 2a step 2/3).
+// Compositor inputs tied off (compositor-v2 removed).
 //
-// On every vsync rising edge, layer_dma fetches `layer_count`
-// descriptors starting at the active half of `layer_table_base`
-// (PROTOCOL.md §11.2) and writes them into layer_cache. The
-// compositor reads the cache through its `cache_slot_o` /
-// `cache_data_i` port during each HBlank to build a per-scanline
-// active list (see scanline_filter.sv).
+// The compositor is retained only as the VGA-timing source; MISTER_FB
+// drives the actual HDMI scanout from DDR (ASCAL ignores the VGA stream
+// while FB_EN=1). Its abandoned compositor-v2 feeders — layer_cache,
+// layer_dma, texture_unit and the 4 line buffers, plus all their CDC
+// synchronisers — are removed. Feeding the compositor zero layers and
+// zero texel data makes it emit a black frame with valid sync.
 ////////////////////////////////////////////////////////////////////////////
+assign comp_cache_data = 256'd0;
+assign comp_line_buf_data[0] = 64'd0;
+assign comp_line_buf_data[1] = 64'd0;
+assign comp_line_buf_data[2] = 64'd0;
+assign comp_line_buf_data[3] = 64'd0;
+assign tex_unit_busy_sync_video = 1'b0;
 
-// CDC: clk_video-owned `comp_vs` sampled into clk_sys for layer_dma's
-// start_i pulse. Two-flop synchroniser + a third register to detect
-// the rising edge in the destination domain. comp_vs holds high for
-// V_SYNC × H_TOTAL clk_video cycles (= ~4400 cycles for 1080p
-// timing = ~2200 clk_sys cycles), so the slower clock catches every
-// rising edge with comfortable margin.
-(* preserve *) logic comp_vs_sync_0;
-(* preserve *) logic comp_vs_sync_1;
-logic comp_vs_sync_2;
-always_ff @(posedge clk_sys) begin
-    comp_vs_sync_0 <= comp_vs;
-    comp_vs_sync_1 <= comp_vs_sync_0;
-    comp_vs_sync_2 <= comp_vs_sync_1;
-end
-wire vsync_rising = comp_vs_sync_1 & ~comp_vs_sync_2;
+// Compositor texture/cache outputs now have no consumers.
+wire _unused_comp = &{1'b0, comp_cache_slot, comp_tex_kick, comp_tex_id,
+                      comp_tex_src_x, comp_tex_ty, comp_tex_dst_w,
+                      comp_tex_tint, comp_tex_buffer_sel,
+                      comp_line_buf_addr[0], comp_line_buf_addr[1],
+                      comp_line_buf_addr[2], comp_line_buf_addr[3], 1'b0};
 
-// Active-table base = layer_table_base + (active ? 0x2000 : 0x0).
-// 0x2000 = LAYER_TABLE_SIZE = 256 * 32 bytes. All clk_sys-domain
-// signals — no CDC needed.
-wire [31:0] active_layer_base = reg_layer_table_base
-                              + (reg_layer_active ? 32'h0000_2000 : 32'd0);
+// Layer registers no longer have consumers (reg_tex_table_addr is still
+// used by the ring fetcher for COPY_RECT descriptors, so not listed).
+wire _unused_layer_regs = &{1'b0, reg_layer_count, reg_layer_table_base,
+                            reg_layer_active, 1'b0};
 
-// layer_dma (clk_sys) → layer_cache write port (clk_sys).
-// Compositor (clk_video) → layer_cache read port (clk_video).
-// The BRAM straddles both domains; see layer_cache.sv for the
-// independent-clock dual-port arrangement.
-wire [7:0]   cache_wr_slot;
-wire [255:0] cache_wr_data;
-wire         cache_wr_en;
-
-layer_cache u_layer_cache (
-    .wr_clk     (clk_sys),
-    .wr_slot_i  (cache_wr_slot),
-    .wr_data_i  (cache_wr_data),
-    .wr_en_i    (cache_wr_en),
-    .rd_clk     (clk_video),
-    .rd_slot_i  (comp_cache_slot),
-    .rd_data_o  (comp_cache_data)
-);
-
-////////////////////////////////////////////////////////////////////////////
-// Texture unit + line buffer (Phase 2b step 2).
-//
-// The compositor (clk_video) identifies the topmost textured layer in
-// the active list after the scanline_filter completes, and pulses
-// `comp_tex_kick` with the descriptor params held stable for ~60
-// clk_video cycles. The texture_unit on clk_sys samples this via a
-// 2-flop synchroniser, edge-detects the rising edge, and runs its
-// own state machine: fetch the texture descriptor, then burst a row
-// of pixels into the line_buffer. The painter then reads the line
-// buffer during active scanout.
-////////////////////////////////////////////////////////////////////////////
-
-// CDC: kick pulse from clk_video to clk_sys.
-(* preserve *) logic tex_kick_sync_0;
-(* preserve *) logic tex_kick_sync_1;
-logic tex_kick_sync_2;
-always_ff @(posedge clk_sys) begin
-    tex_kick_sync_0 <= comp_tex_kick;
-    tex_kick_sync_1 <= tex_kick_sync_0;
-    tex_kick_sync_2 <= tex_kick_sync_1;
-end
-wire tex_kick_rising = tex_kick_sync_1 & ~tex_kick_sync_2;
-
-// CDC: multi-bit params (stable while comp_tex_kick is high, which
-// is at least 60 clk_video cycles = 30 clk_sys cycles).
-(* preserve *) logic [15:0] tex_id_sync_0,     tex_id_sync_1;
-(* preserve *) logic [15:0] tex_src_x_sync_0,  tex_src_x_sync_1;
-(* preserve *) logic [15:0] tex_ty_sync_0,     tex_ty_sync_1;
-(* preserve *) logic [11:0] tex_dst_w_sync_0,  tex_dst_w_sync_1;
-(* preserve *) logic [31:0] tex_tint_sync_0,   tex_tint_sync_1;
-(* preserve *) logic [1:0]  tex_bufsel_sync_0, tex_bufsel_sync_1;
-always_ff @(posedge clk_sys) begin
-    tex_id_sync_0     <= comp_tex_id;         tex_id_sync_1     <= tex_id_sync_0;
-    tex_src_x_sync_0  <= comp_tex_src_x;      tex_src_x_sync_1  <= tex_src_x_sync_0;
-    tex_ty_sync_0     <= comp_tex_ty;         tex_ty_sync_1     <= tex_ty_sync_0;
-    tex_dst_w_sync_0  <= comp_tex_dst_w;      tex_dst_w_sync_1  <= tex_dst_w_sync_0;
-    tex_tint_sync_0   <= comp_tex_tint;       tex_tint_sync_1   <= tex_tint_sync_0;
-    tex_bufsel_sync_0 <= comp_tex_buffer_sel; tex_bufsel_sync_1 <= tex_bufsel_sync_0;
-end
-
-// Reverse-direction sync: texture_unit's busy_o (clk_sys) into the
-// compositor's clk_video domain for the dispatcher's kick handshake.
-(* preserve *) logic tex_busy_sync_0;
-(* preserve *) logic tex_busy_sync_1;
-always_ff @(posedge clk_video) begin
-    tex_busy_sync_0 <= tex_unit_busy;
-    tex_busy_sync_1 <= tex_busy_sync_0;
-end
-assign tex_unit_busy_sync_video = tex_busy_sync_1;
-
-// 4 line buffers, one per textured slot. wr_clk = clk_sys (filled by
-// texture_unit), rd_clk = clk_video (read by painter). 64 bits wide
-// (2 pixels per entry). The texture_unit emits a single set of
-// write signals plus `buffer_sel_o` telling us which BRAM to route
-// them to — demux below. MAX_TEXTURED = 4.
-wire [9:0]  line_buf_wr_addr;
-wire [63:0] line_buf_wr_data;
-wire        line_buf_we_shared;
-wire [1:0]  tex_unit_buffer_sel;
-wire [3:0]  line_buf_we;
-assign line_buf_we[0] = line_buf_we_shared && (tex_unit_buffer_sel == 2'd0);
-assign line_buf_we[1] = line_buf_we_shared && (tex_unit_buffer_sel == 2'd1);
-assign line_buf_we[2] = line_buf_we_shared && (tex_unit_buffer_sel == 2'd2);
-assign line_buf_we[3] = line_buf_we_shared && (tex_unit_buffer_sel == 2'd3);
-
-line_buffer u_line_buffer_0 (
-    .wr_clk    (clk_sys),
-    .wr_addr_i (line_buf_wr_addr),
-    .wr_data_i (line_buf_wr_data),
-    .wr_en_i   (line_buf_we[0]),
-    .rd_clk    (clk_video),
-    .rd_addr_i (comp_line_buf_addr[0]),
-    .rd_data_o (comp_line_buf_data[0])
-);
-line_buffer u_line_buffer_1 (
-    .wr_clk    (clk_sys),
-    .wr_addr_i (line_buf_wr_addr),
-    .wr_data_i (line_buf_wr_data),
-    .wr_en_i   (line_buf_we[1]),
-    .rd_clk    (clk_video),
-    .rd_addr_i (comp_line_buf_addr[1]),
-    .rd_data_o (comp_line_buf_data[1])
-);
-line_buffer u_line_buffer_2 (
-    .wr_clk    (clk_sys),
-    .wr_addr_i (line_buf_wr_addr),
-    .wr_data_i (line_buf_wr_data),
-    .wr_en_i   (line_buf_we[2]),
-    .rd_clk    (clk_video),
-    .rd_addr_i (comp_line_buf_addr[2]),
-    .rd_data_o (comp_line_buf_data[2])
-);
-line_buffer u_line_buffer_3 (
-    .wr_clk    (clk_sys),
-    .wr_addr_i (line_buf_wr_addr),
-    .wr_data_i (line_buf_wr_data),
-    .wr_en_i   (line_buf_we[3]),
-    .rd_clk    (clk_video),
-    .rd_addr_i (comp_line_buf_addr[3]),
-    .rd_data_o (comp_line_buf_data[3])
-);
-
-// Texture unit: shares the DDR3 bus through the 4-way arbiter below.
-wire [28:0] tex_unit_addr;
-wire [7:0]  tex_unit_burstcnt;
-wire [7:0]  tex_unit_be;
-wire        tex_unit_rd;
-wire        tex_unit_busy;
-wire        tex_unit_done;
-
-texture_unit u_texture_unit (
-    .clk              (clk_sys),
-    .rst_n            (fetcher_rst_n),
-    .kick_i           (tex_kick_rising),
-    .tex_id_i         (tex_id_sync_1),
-    .ty_i             (tex_ty_sync_1),
-    .src_x_i          (tex_src_x_sync_1),
-    .dst_w_i          (tex_dst_w_sync_1),
-    .tint_color_i     (tex_tint_sync_1),
-    .buffer_sel_i     (tex_bufsel_sync_1),
-    .tex_table_addr_i (reg_tex_table_addr),
-    .buffer_sel_o     (tex_unit_buffer_sel),
-    .line_buf_addr_o  (line_buf_wr_addr),
-    .line_buf_data_o  (line_buf_wr_data),
-    .line_buf_we_o    (line_buf_we_shared),
-    .ddram_addr_o     (tex_unit_addr),
-    .ddram_burstcnt_o (tex_unit_burstcnt),
-    .ddram_be_o       (tex_unit_be),
-    .ddram_rd_o       (tex_unit_rd),
-    .ddram_busy_i     (DDRAM_BUSY),
-    .ddram_dout_i     (DDRAM_DOUT),
-    .ddram_dout_valid_i (tex_unit_dout_valid),
-    .busy_o           (tex_unit_busy),
-    .done_pulse_o     (tex_unit_done)
-);
-
-// layer_dma → DDRAM master signals.
-wire [28:0] layer_dma_addr;
-wire [7:0]  layer_dma_burstcnt;
-wire [7:0]  layer_dma_be;
-wire        layer_dma_rd;
-wire        layer_dma_busy;
-wire        layer_dma_done;
-wire [31:0] layer_dma_descriptors;
-
-layer_dma u_layer_dma (
-    .clk          (clk_sys),
-    .rst_n        (fetcher_rst_n),
-    .start_i      (vsync_rising),
-    .base_i       (active_layer_base),
-    .count_i      (reg_layer_count),
-    .cache_slot_o (cache_wr_slot),
-    .cache_data_o (cache_wr_data),
-    .cache_we_o   (cache_wr_en),
-    .ddram_addr_o       (layer_dma_addr),
-    .ddram_burstcnt_o   (layer_dma_burstcnt),
-    .ddram_be_o         (layer_dma_be),
-    .ddram_rd_o         (layer_dma_rd),
-    .ddram_busy_i       (DDRAM_BUSY),
-    .ddram_dout_i       (DDRAM_DOUT),
-    .ddram_dout_valid_i (layer_dma_dout_valid),
-    .busy_o             (layer_dma_busy),
-    .done_pulse_o       (layer_dma_done),
-    .descriptors_o      (layer_dma_descriptors)
-);
-
-// DDRAM_* arbiter. Four masters share one read response bus
-// (DDRAM_DOUT/DDRAM_DOUT_READY) but the HPS-to-FPGA bridge does not tag
-// responses with the requester. The earlier "samples-only-while-owner"
-// scheme broke whenever ownership transferred while reads were still
-// draining — the new owner captured the previous owner's beats,
-// causing fetcher BadOpcode halts and compositor visual glitches
-// (blinking layers, 1-pixel vertical bars from misrouted texel beats).
+// DDRAM_* arbiter. Two masters (blit engine 0 + ring fetcher) share one
+// read response bus (DDRAM_DOUT/DDRAM_DOUT_READY); the HPS-to-FPGA bridge
+// doesn't tag responses with the requester. The earlier "samples-only-
+// while-owner" scheme broke whenever ownership transferred while reads
+// were still draining — the new owner captured the previous owner's
+// beats, causing fetcher BadOpcode halts.
 //
 // Fix: serialise. owner_q latches at the cycle a new read is accepted
-// while the response pipe is idle. outstanding_beats_q tracks
-// in-flight beats (incr on accept by burstcnt, decr on each
-// DDRAM_DOUT_READY). New owners can't be granted while beats are
-// draining for the previous owner. Per-consumer dout_valid is masked
-// by owner_q so cross-talk is impossible. Priority among waiting
-// requesters: blit > layer_dma > tex_unit > fetcher (unchanged).
+// while the response pipe is idle. outstanding_beats_q tracks in-flight
+// beats (incr on accept by burstcnt, decr on each DDRAM_DOUT_READY). New
+// owners can't be granted while beats are draining for the previous
+// owner. Per-consumer dout_valid is masked by owner_q so cross-talk is
+// impossible. Priority: blit > fetcher.
 localparam logic [1:0] TAG_FETCH = 2'd0;
 localparam logic [1:0] TAG_BLIT  = 2'd1;
-localparam logic [1:0] TAG_LDMA  = 2'd2;
-localparam logic [1:0] TAG_TEX   = 2'd3;
 
 logic [1:0]  owner_q;
 logic [15:0] outstanding_beats_q;
@@ -1015,23 +808,15 @@ wire         pipe_idle     = (outstanding_beats_q == 16'd0);
 wire         read_accepted = DDRAM_RD & ~DDRAM_BUSY;
 wire         beat_arrived  = DDRAM_DOUT_READY;
 
-logic [1:0] next_owner;
-always_comb begin
-    if (blit_busy)            next_owner = TAG_BLIT;
-    else if (layer_dma_busy)  next_owner = TAG_LDMA;
-    else if (tex_unit_busy)   next_owner = TAG_TEX;
-    else                      next_owner = TAG_FETCH;
-end
+wire [1:0] next_owner = blit_busy ? TAG_BLIT : TAG_FETCH;
 
 // Grant the bus only when the pipe is idle (any requester wins) OR the
 // requester matches the current owner (drains its own burst). This is
 // what serialises across ownership transfers.
 wire owner_grant_ok = pipe_idle | (next_owner == owner_q);
 
-wire blit_owns_bus      = blit_busy      & owner_grant_ok;
-wire layer_dma_owns_bus = layer_dma_busy & ~blit_busy & owner_grant_ok;
-wire tex_unit_owns_bus  = tex_unit_busy  & ~blit_busy & ~layer_dma_busy & owner_grant_ok;
-wire fetch_owns_bus     = ~blit_busy & ~layer_dma_busy & ~tex_unit_busy & owner_grant_ok;
+wire blit_owns_bus  = blit_busy  & owner_grant_ok;
+wire fetch_owns_bus = ~blit_busy & owner_grant_ok;
 
 always_ff @(posedge clk_sys or negedge fetcher_rst_n) begin
     if (!fetcher_rst_n) begin
@@ -1049,33 +834,23 @@ always_ff @(posedge clk_sys or negedge fetcher_rst_n) begin
 end
 
 // Per-consumer dout_valid: a beat is delivered only to the current
-// owner. All other consumers see a constant 0, so they cannot capture
-// foreign data even if their own FSMs happen to be in a wait state.
-wire fetch_dout_valid     = DDRAM_DOUT_READY & (owner_q == TAG_FETCH);
-wire blit_dout_valid      = DDRAM_DOUT_READY & (owner_q == TAG_BLIT);
-wire layer_dma_dout_valid = DDRAM_DOUT_READY & (owner_q == TAG_LDMA);
-wire tex_unit_dout_valid  = DDRAM_DOUT_READY & (owner_q == TAG_TEX);
+// owner. The other consumer sees a constant 0, so it cannot capture
+// foreign data even if its own FSM happens to be in a wait state.
+wire fetch_dout_valid = DDRAM_DOUT_READY & (owner_q == TAG_FETCH);
+wire blit_dout_valid  = DDRAM_DOUT_READY & (owner_q == TAG_BLIT);
 
-assign DDRAM_ADDR     = blit_owns_bus      ? blit_addr
-                      : layer_dma_owns_bus ? layer_dma_addr
-                      : tex_unit_owns_bus  ? tex_unit_addr
-                      : fetch_owns_bus     ? fetch_addr
+assign DDRAM_ADDR     = blit_owns_bus  ? blit_addr
+                      : fetch_owns_bus ? fetch_addr
                       : 29'd0;
-assign DDRAM_BURSTCNT = blit_owns_bus      ? blit_burstcnt
-                      : layer_dma_owns_bus ? layer_dma_burstcnt
-                      : tex_unit_owns_bus  ? tex_unit_burstcnt
-                      : fetch_owns_bus     ? fetch_burstcnt
+assign DDRAM_BURSTCNT = blit_owns_bus  ? blit_burstcnt
+                      : fetch_owns_bus ? fetch_burstcnt
                       : 8'd0;
-assign DDRAM_BE       = blit_owns_bus      ? blit_be
-                      : layer_dma_owns_bus ? layer_dma_be
-                      : tex_unit_owns_bus  ? tex_unit_be
-                      : fetch_owns_bus     ? fetch_be
+assign DDRAM_BE       = blit_owns_bus  ? blit_be
+                      : fetch_owns_bus ? fetch_be
                       : 8'd0;
 assign DDRAM_DIN      = blit_owns_bus ? blit_din : 64'd0;
-assign DDRAM_RD       = blit_owns_bus      ? blit_rd
-                      : layer_dma_owns_bus ? layer_dma_rd
-                      : tex_unit_owns_bus  ? tex_unit_rd
-                      : fetch_owns_bus     ? fetch_rd
+assign DDRAM_RD       = blit_owns_bus  ? blit_rd
+                      : fetch_owns_bus ? fetch_rd
                       : 1'b0;
 assign DDRAM_WE       = blit_owns_bus ? blit_we : 1'b0;
 
@@ -1083,11 +858,6 @@ assign DDRAM_WE       = blit_owns_bus ? blit_we : 1'b0;
 // every cycle anyway. Wire-suppress to avoid unused warnings until
 // M2c+ lets it gate a low-power idle.
 wire _unused_kick = reg_ring_kick;
-
-// layer_dma_done and tex_unit_done aren't consumed (we rely on the
-// HBlank budget being wide enough to guarantee completion by the
-// start of active scanout). Wire-suppress.
-wire _unused_layer = &{1'b0, layer_dma_done, tex_unit_done, 1'b0};
 
 // blit_engine_1's busy_o still unused — only done_o is consumed by
 // the ring fetcher (via active_engine_q muxing in S_BLIT_WAIT).
