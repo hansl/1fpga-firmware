@@ -694,9 +694,13 @@ wire         bob_deint;
 		.DOWNSCALE_NN("true"),
 	`endif
 		.FRAC(8),
-`ifdef MENU_CORE
+		// Deepen ASCAL's vbuf scanout read-ahead from the 256-byte
+		// default to 2048 (~1024 px buffered). This is the menu-core
+		// fork; the original `ifdef MENU_CORE` guard never had the macro
+		// defined, so the bump was inert. The deeper buffer gives the
+		// line-end reads enough lead time to ride out HPS DDR3
+		// contention — the cause of the right-edge scanout jitter.
 		.N_BURST(2048),
-`endif
 		.N_DW(128),
 		.N_AW(28)
 	)
