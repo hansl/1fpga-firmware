@@ -243,10 +243,20 @@ fn prepare_images(
             return;
         };
         if let NodeKind::Img { src } = &node.kind
-            && images.get(src).is_none()
             && !src.is_empty()
         {
+            // Intrinsic texture: feeds the layout measure function and
+            // the paint fallback. Idempotent.
             let _ = images.get_or_load(device, src);
+            // If the node has an explicit pixel size, pre-build a
+            // texture resized to it so the blit is 1:1 (crisp Lanczos)
+            // instead of nearest-neighbour FPGA scaling. Auto/flex-sized
+            // images keep using the intrinsic texture.
+            if let (Some(w), Some(h)) = (node.style.width, node.style.height) {
+                let tw = (w.round() as i32).clamp(1, u16::MAX as i32) as u16;
+                let th = (h.round() as i32).clamp(1, u16::MAX as i32) as u16;
+                images.ensure_sized(device, src, tw, th);
+            }
         }
         for &child in &node.children {
             walk(tree, child, images, device);
@@ -343,28 +353,14 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         ..DeviceConfig::default()
     })?;
     let info = device.video_info();
-    // FB resolution: explicit override > capped default. The framework
-    // reads pixels from the FB and feeds ASCAL, which upscales to the
-    // active HDMI mode — so render < HDMI is "free" beyond the loss
-    // of visual crispness on text/icons.
-    //
-    // Default caps the FB at 900 lines. A full native 1920×1080×4B FB
-    // demands ~498 MB/s of vbuf scanout bandwidth with essentially no
-    // arbitration slack at the HPS DDR3 controller; under HPS CPU
-    // traffic that starves ASCAL's vbuf reads and corrupts the right
-    // edge of each scanline (visible as vertical wallpaper jitter).
-    // 1600×900 (~346 MB/s, −30%) keeps enough slack while staying
-    // sharp. Aspect-preserving; a no-op when the HDMI mode is already
-    // ≤ 900 lines. Override with `--render-res` (incl. native).
-    const MAX_LINES: u32 = 900;
-    let (render_w, render_h) = cfg.render_res.unwrap_or_else(|| {
-        if (info.height as u32) <= MAX_LINES {
-            (info.width, info.height)
-        } else {
-            let w = (info.width as u32 * MAX_LINES / info.height as u32) as u16;
-            (w, MAX_LINES as u16)
-        }
-    });
+    // FB resolution: default to native HDMI. A full 1920×1080×4B FB once
+    // jittered — its ~498 MB/s of vbuf scanout bandwidth starved ASCAL's
+    // reads under HPS DDR3 contention, corrupting the right edge of each
+    // scanline. That's now fixed in the core by deepening ASCAL's
+    // read-ahead (N_BURST 256→2048, ~1024 px buffered), so native runs
+    // clean — and native renders text/icons at full resolution with no
+    // upscale. `--render-res` still forces a smaller FB if ever needed.
+    let (render_w, render_h) = cfg.render_res.unwrap_or((info.width, info.height));
     let fb = FramebufferConfig {
         width: render_w,
         height: render_h,

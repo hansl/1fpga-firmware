@@ -251,7 +251,18 @@ fn paint_img<'a>(
     xf: Transform,
     frame: Frame<'a>,
 ) -> Result<Frame<'a>, DeviceError> {
-    let (texture, src_w, src_h, fully_opaque) = match images.get(src) {
+    // Prefer a texture pre-resized to this node's base layout box
+    // (built in prepare_images for explicitly-sized imgs): when the
+    // node isn't transformed, dst == that box, so the blit is 1:1 and
+    // skips the FPGA's nearest-neighbour scale path. Fall back to the
+    // intrinsic texture for auto-sized imgs (and the variant won't help
+    // mid-transform anyway, where dst differs from the base box).
+    let base_w = clamp_u16(lay.w);
+    let base_h = clamp_u16(lay.h);
+    let cached = images
+        .get_sized(src, base_w, base_h)
+        .or_else(|| images.get(src));
+    let (texture, src_w, src_h, fully_opaque) = match cached {
         Some(CachedImage::Loaded { texture, width, height, fully_opaque }) => {
             (*texture, *width, *height, *fully_opaque)
         }

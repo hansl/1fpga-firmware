@@ -74,6 +74,11 @@ pub enum CachedImage {
 #[derive(Debug, Default)]
 pub struct ImageRegistry {
     entries: HashMap<String, CachedImage>,
+    /// Display-sized variants keyed by `(src, w, h)`. A node drawn at an
+    /// explicit pixel size gets a texture pre-resized to it (crisp
+    /// Lanczos at load) so the blit is 1:1, dodging the FPGA's slow
+    /// nearest-neighbour COPY_RECT scale path.
+    sized: HashMap<(String, u16, u16), CachedImage>,
     max_dims: Option<(u16, u16)>,
 }
 
@@ -120,13 +125,53 @@ impl ImageRegistry {
     pub fn get(&self, src: &str) -> Option<&CachedImage> {
         self.entries.get(src)
     }
+
+    /// Ensure a variant of `src` resized to exactly `w`×`h` exists,
+    /// decoding + Lanczos-resizing + uploading on first request.
+    /// Idempotent (cached per `(src, w, h)`, failures included). When
+    /// the intrinsic already matches `w`×`h`, its texture is reused.
+    pub fn ensure_sized(&mut self, device: &mut Device, src: &str, w: u16, h: u16) {
+        if w == 0 || h == 0 || src.is_empty() {
+            return;
+        }
+        let key = (src.to_string(), w, h);
+        if self.sized.contains_key(&key) {
+            return;
+        }
+        // Load the intrinsic first (also feeds measure + the paint
+        // fallback). If it already matches, reuse its texture.
+        let intrinsic = self.get_or_load(device, src);
+        let entry = match intrinsic {
+            CachedImage::Loaded { width, height, .. } if width == w && height == h => intrinsic,
+            CachedImage::Loaded { .. } => match decode_and_upload_to(device, src, w, h) {
+                Ok((texture, fully_opaque)) => CachedImage::Loaded {
+                    texture,
+                    width: w,
+                    height: h,
+                    fully_opaque,
+                },
+                Err(e) => {
+                    tracing::warn!("image '{src}' resize to {w}x{h} failed: {e}");
+                    CachedImage::Failed {
+                        reason: format!("{e}"),
+                    }
+                }
+            },
+            failed => failed,
+        };
+        self.sized.insert(key, entry);
+    }
+
+    /// Read-only lookup for a display-sized variant. `None` if no
+    /// variant at `(src, w, h)` was built; callers fall back to `get`.
+    pub fn get_sized(&self, src: &str, w: u16, h: u16) -> Option<&CachedImage> {
+        self.sized.get(&(src.to_string(), w, h))
+    }
 }
 
-fn decode_and_upload(
-    device: &mut Device,
-    src: &str,
-    max_dims: Option<(u16, u16)>,
-) -> Result<(TextureHandle, u16, u16, bool), ImageError> {
+/// Decode a PNG at `src` to in-memory BGRA8888 plus intrinsic
+/// dimensions and an opacity flag. No resize, no upload.
+fn decode_image(src: &str) -> Result<(Vec<u8>, u16, u16, bool), ImageError> {
     let file = std::fs::File::open(Path::new(src)).map_err(|e| ImageError::Io {
         path: src.to_string(),
         source: e,
@@ -172,13 +217,41 @@ fn decode_and_upload(
         }
         png::ColorType::Indexed => false,
     };
+    Ok((pixels, width, height, src_opaque))
+}
 
-    // Aspect-fit downscale if the source exceeds the render target.
-    // The FPGA's COPY_RECT scale path reads per-pixel (no burst) and
-    // is much slower than the 1:1 burst path; resizing once at load
-    // means every subsequent frame's wallpaper paint runs the fast
-    // path. Small images (icons, glyphs) are below max_dims in both
-    // axes and pass through unchanged.
+/// Upload a packed BGRA8888 buffer of `w`×`h` as an RGBA8888 texture.
+fn upload(
+    device: &mut Device,
+    src: &str,
+    w: u16,
+    h: u16,
+    pixels: &[u8],
+) -> Result<TextureHandle, ImageError> {
+    device
+        .upload_texture(&TextureSpec {
+            format: TextureFormat::Rgba8888,
+            width: w,
+            height: h,
+            stride: (w as u32) * 4,
+            data: pixels,
+        })
+        .map_err(|e| ImageError::Device {
+            path: src.to_string(),
+            source: e,
+        })
+}
+
+fn decode_and_upload(
+    device: &mut Device,
+    src: &str,
+    max_dims: Option<(u16, u16)>,
+) -> Result<(TextureHandle, u16, u16, bool), ImageError> {
+    let (pixels, width, height, src_opaque) = decode_image(src)?;
+
+    // Aspect-fit downscale if the source exceeds the render target, so
+    // oversized assets don't pay per-pixel FPGA scaling. (Exact display
+    // sizing is handled separately by `ensure_sized`.)
     let (final_w, final_h, final_pixels) = match max_dims {
         Some((mw, mh)) if width > mw || height > mh => {
             let (rw, rh) = aspect_fit(width, height, mw, mh);
@@ -189,18 +262,7 @@ fn decode_and_upload(
         _ => (width, height, pixels),
     };
 
-    let texture = device
-        .upload_texture(&TextureSpec {
-            format: TextureFormat::Rgba8888,
-            width: final_w,
-            height: final_h,
-            stride: (final_w as u32) * 4,
-            data: &final_pixels,
-        })
-        .map_err(|e| ImageError::Device {
-            path: src.to_string(),
-            source: e,
-        })?;
+    let texture = upload(device, src, final_w, final_h, &final_pixels)?;
     tracing::info!(
         "image '{}' loaded: {}x{}, tex_id={}, opaque={}",
         src,
@@ -210,6 +272,26 @@ fn decode_and_upload(
         src_opaque,
     );
     Ok((texture, final_w, final_h, src_opaque))
+}
+
+/// Decode `src` and upload it resized to exactly `tw`×`th` (Lanczos3).
+/// Used to pre-build a texture at a node's on-screen size so the blit
+/// is 1:1 instead of nearest-neighbour FPGA scaling.
+fn decode_and_upload_to(
+    device: &mut Device,
+    src: &str,
+    tw: u16,
+    th: u16,
+) -> Result<(TextureHandle, bool), ImageError> {
+    let (pixels, width, height, src_opaque) = decode_image(src)?;
+    let resized = if (width, height) != (tw, th) {
+        resize_bgra(&pixels, width, height, tw, th)
+    } else {
+        pixels
+    };
+    let texture = upload(device, src, tw, th, &resized)?;
+    tracing::info!("image '{src}' sized {width}x{height} → {tw}x{th}, tex_id={}", texture.id);
+    Ok((texture, src_opaque))
 }
 
 /// Largest (w, h) within `(max_w, max_h)` that preserves the source's
