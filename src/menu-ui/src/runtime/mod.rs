@@ -343,11 +343,28 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         ..DeviceConfig::default()
     })?;
     let info = device.video_info();
-    // FB resolution: explicit override > HDMI native. The framework
+    // FB resolution: explicit override > capped default. The framework
     // reads pixels from the FB and feeds ASCAL, which upscales to the
     // active HDMI mode — so render < HDMI is "free" beyond the loss
     // of visual crispness on text/icons.
-    let (render_w, render_h) = cfg.render_res.unwrap_or((info.width, info.height));
+    //
+    // Default caps the FB at 900 lines. A full native 1920×1080×4B FB
+    // demands ~498 MB/s of vbuf scanout bandwidth with essentially no
+    // arbitration slack at the HPS DDR3 controller; under HPS CPU
+    // traffic that starves ASCAL's vbuf reads and corrupts the right
+    // edge of each scanline (visible as vertical wallpaper jitter).
+    // 1600×900 (~346 MB/s, −30%) keeps enough slack while staying
+    // sharp. Aspect-preserving; a no-op when the HDMI mode is already
+    // ≤ 900 lines. Override with `--render-res` (incl. native).
+    const MAX_LINES: u32 = 900;
+    let (render_w, render_h) = cfg.render_res.unwrap_or_else(|| {
+        if (info.height as u32) <= MAX_LINES {
+            (info.width, info.height)
+        } else {
+            let w = (info.width as u32 * MAX_LINES / info.height as u32) as u16;
+            (w, MAX_LINES as u16)
+        }
+    });
     let fb = FramebufferConfig {
         width: render_w,
         height: render_h,
@@ -442,7 +459,11 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
             .map_err(|e| RuntimeError::Io(std::io::Error::other(e.to_string())))?;
     }
 
-    let timeout = Duration::from_millis(500);
+    // Fence-wait ceiling. Normal frames retire in ~15-25 ms; this only
+    // trips on a genuine stall. Kept at 2 s (not the old 500 ms) because
+    // this is a deliberately bandwidth-constrained config where an
+    // occasional slow frame under heavy DDR contention is legitimate.
+    let timeout = Duration::from_secs(2);
     let mut frame_idx: u32 = 0;
     let mut fonts = FontRegistry::new();
     let mut text_cache = TextCache::new();
