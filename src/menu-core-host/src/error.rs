@@ -96,6 +96,12 @@ pub enum DeviceError {
     #[error("base address {0:#X} is not 32-MB-aligned")]
     BadBaseAlignment(u32),
 
+    /// A `BLIT_AFFINE` source sub-rect exceeded the 128×128 on-chip
+    /// staging limit (PROTOCOL.md §5.7). Caught host-side before the
+    /// command is emitted.
+    #[error("affine blit source {width}×{height} exceeds the 128×128 limit")]
+    AffineSourceTooLarge { width: u16, height: u16 },
+
     /// `std::io` error from the bridge enable path.
     #[error("io error: {0}")]
     Io(#[from] io::Error),
@@ -130,6 +136,9 @@ pub enum HardwareErrorKind {
     ScanoutUnderrun,
     /// `0x08` — host advanced `RING_TAIL` backwards unexpectedly.
     RingOverrun,
+    /// `0x09` — `BLIT_AFFINE` source exceeded 128×128 (detail packs
+    /// `(sw << 12) | sh`, 12 bits each).
+    AffineTooLarge,
     /// Any unrecognized code (forward compatibility).
     Other(u8),
 }
@@ -158,6 +167,7 @@ impl HardwareError {
             0x06 => HardwareErrorKind::Axi,
             0x07 => HardwareErrorKind::ScanoutUnderrun,
             0x08 => HardwareErrorKind::RingOverrun,
+            0x09 => HardwareErrorKind::AffineTooLarge,
             other => HardwareErrorKind::Other(other),
         };
         Some(Self {
@@ -194,6 +204,7 @@ mod tests {
             (0x0000_0006, HardwareErrorKind::Axi),
             (0x0000_0007, HardwareErrorKind::ScanoutUnderrun),
             (0x0000_0008, HardwareErrorKind::RingOverrun),
+            (0x8004_0009, HardwareErrorKind::AffineTooLarge),
         ];
         for (info, expected_kind) in cases {
             let e = HardwareError::from_register(info).expect("should decode");

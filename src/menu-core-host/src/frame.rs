@@ -20,7 +20,7 @@ use crate::device::Device;
 use crate::devmem::volatile_copy_to_devmem;
 use crate::error::DeviceError;
 use crate::protocol::commands::TARGET_FRAMEBUFFER;
-use crate::protocol::{BlendMode, Command, Filter, Rect, Rgba, registers};
+use crate::protocol::{BlendMode, Command, Filter, Rect, Rgba, affine, registers};
 use crate::ring::RingError;
 use crate::texture::TextureHandle;
 
@@ -75,11 +75,11 @@ pub struct Frame<'a> {
     will_present: bool,
 }
 
-/// Encoded length of the largest single command (COPY_RECT with tint =
-/// 7 words = 28 bytes). The push scratch buffer is sized to this so any
-/// command — and any wrap-pad NOP, which is bounded by the same upper
-/// limit — fits without heap allocation.
-const MAX_CMD_BYTES: usize = 32;
+/// Encoded length of the largest single command (BLIT_AFFINE =
+/// 11 words + header = 48 bytes). The push scratch buffer is sized to
+/// this so any command — and any wrap-pad NOP, which is bounded by the
+/// same upper limit — fits without heap allocation.
+const MAX_CMD_BYTES: usize = 48;
 
 impl<'a> Frame<'a> {
     pub(crate) fn new(device: &'a mut Device) -> Self {
@@ -211,6 +211,57 @@ impl<'a> Frame<'a> {
             tint: opts.tint,
         })?;
         Ok(self)
+    }
+
+    /// Affine-transformed textured blit (rotate / scale / skew) with a
+    /// caller-supplied inverse matrix `m` (Q16.16, `[m00,m01,m10,m11,
+    /// tx,ty]`; see [`affine`](crate::protocol::affine)). `src` is the
+    /// source sub-rect (must be ≤ 128×128 — PROTOCOL.md §5.7) and `dst`
+    /// is the axis-aligned bounding box to fill. Sampling is bilinear.
+    ///
+    /// Returns [`DeviceError::AffineSourceTooLarge`] without emitting a
+    /// command if the source exceeds the staging limit.
+    pub fn blit_affine(
+        mut self,
+        tex: &TextureHandle,
+        src: Rect,
+        dst: Rect,
+        m: [i32; 6],
+        blend: BlendMode,
+    ) -> Result<Self, DeviceError> {
+        if !affine::src_within_limit(src) {
+            return Err(DeviceError::AffineSourceTooLarge {
+                width: src.w,
+                height: src.h,
+            });
+        }
+        self.push_cmd(&Command::BlitAffine {
+            tex_id: tex.id as u32,
+            src,
+            dst,
+            blend,
+            filter: Filter::Bilinear,
+            m,
+        })?;
+        Ok(self)
+    }
+
+    /// Convenience over [`blit_affine`](Self::blit_affine): rotate the
+    /// `src` sub-rect clockwise by `angle_deg` and scale it by `scale`,
+    /// centering the transformed image at framebuffer point `(cx, cy)`.
+    /// The destination AABB is computed automatically.
+    pub fn blit_affine_rotate(
+        self,
+        tex: &TextureHandle,
+        src: Rect,
+        angle_deg: f64,
+        scale: f64,
+        cx: i32,
+        cy: i32,
+        blend: BlendMode,
+    ) -> Result<Self, DeviceError> {
+        let built = affine::rotate_scale(src, angle_deg, scale, cx, cy);
+        self.blit_affine(tex, src, built.dst, built.m, blend)
     }
 
     /// Set the user clip rectangle.

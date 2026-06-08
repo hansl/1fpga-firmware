@@ -3,11 +3,13 @@
 //! The canonical source of truth is `cores/menu-core/PROTOCOL.md`. Any
 //! divergence between this module and that document is a bug.
 
+pub mod affine;
 pub mod commands;
 pub mod descriptors;
 pub mod layer;
 pub mod registers;
 
+pub use affine::{AffineBlit, aabb_size, inverse_matrix, rotate_scale};
 pub use commands::{BlendMode, Command, EncodeError, Filter, Rect, Rgba};
 pub use descriptors::{TextureDescriptor, TextureFormat};
 pub use layer::{LAYER_TEX_SOLID, LayerBlend, LayerDescriptor};
@@ -18,6 +20,9 @@ pub use layer::{LAYER_TEX_SOLID, LayerBlend, LayerDescriptor};
 pub const ID_MAGIC: u16 = 0x1FFA;
 
 /// Protocol version (low 16 bits of the `ID` register).
+///
+/// `BLIT_AFFINE` (opcode `0x12`) was added as a backward-compatible
+/// opcode (PROTOCOL.md §10), so it did NOT bump the version.
 pub const PROTOCOL_VERSION: u16 = 1;
 
 /// Combined `ID` register value: `(MAGIC << 16) | VERSION`.

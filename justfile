@@ -129,6 +129,22 @@ deploy-menu-demo mode="release-dev": (build-menu-demo mode) _kill-fpga-users
 demo-menu-core: _kill-fpga-users
     ssh -t root@{{mister_ip}} '/media/fat/menu_demo'
 
+# Cross-compile the BLIT_AFFINE rotate/scale demo (spinning textured icons)
+build-affine-demo mode="release-dev":
+    docker run --rm -t \
+        -e RUSTUP_AUTO_INSTALL=0 \
+        -v "{{justfile_directory()}}":/home/rust/src \
+        messense/rust-musl-cross:armv7-musleabihf \
+        cargo build --target armv7-unknown-linux-musleabihf --bin affine_demo --profile {{mode}} --no-default-features --features=platform_de10
+
+# Deploy the affine demo binary to the device
+deploy-affine-demo mode="release-dev": (build-affine-demo mode) _kill-fpga-users
+    scp target/armv7-unknown-linux-musleabihf/{{mode}}/affine_demo root@{{mister_ip}}:/media/fat/affine_demo
+
+# Run the affine demo on the device (needs a bitstream with BLIT_AFFINE; Ctrl+C to stop)
+demo-affine: _kill-fpga-users
+    ssh -t root@{{mister_ip}} '/media/fat/affine_demo'
+
 # Cross-compile the scanout jitter probe (static striped FB, PRESENT-only loop)
 build-jitter-probe mode="release-dev":
     docker run --rm -t \
@@ -153,7 +169,7 @@ build-menu-ui mode="release-dev":
 # auto-starts after a reboot, the previous menu_ui run may still be
 # attached, etc.). Best-effort.
 _kill-fpga-users:
-    -ssh root@{{mister_ip}} 'killall MiSTer 2>/dev/null; killall menu_ui 2>/dev/null; killall one_fpga_menu_core 2>/dev/null; killall menu_demo 2>/dev/null; true'
+    -ssh root@{{mister_ip}} 'killall MiSTer 2>/dev/null; killall menu_ui 2>/dev/null; killall one_fpga_menu_core 2>/dev/null; killall menu_demo 2>/dev/null; killall affine_demo 2>/dev/null; true'
 
 # Deploy the menu-ui binary to the device
 deploy-menu-ui mode="release-dev": (build-menu-ui mode) _kill-fpga-users

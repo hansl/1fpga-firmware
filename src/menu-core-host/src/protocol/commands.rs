@@ -61,12 +61,15 @@ pub enum BlendMode {
     Additive = 2,
 }
 
-/// Sampling filter for `COPY_RECT` scaling (PROTOCOL.md §7.4).
+/// Sampling filter for `COPY_RECT` scaling / `BLIT_AFFINE`
+/// (PROTOCOL.md §7.4, §5.3). `COPY_RECT` only implements `Nearest` in
+/// v2; `BLIT_AFFINE` always samples bilinear regardless of this field.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Filter {
     #[default]
     Nearest = 0,
+    Bilinear = 1,
 }
 
 // --- Opcodes (PROTOCOL.md §5.2) ----------------------------------------
@@ -79,6 +82,7 @@ pub const OP_CLEAR_CLIP: u8 = 0x04;
 pub const OP_SET_RENDER_TARGET: u8 = 0x05;
 pub const OP_FILL_RECT: u8 = 0x10;
 pub const OP_COPY_RECT: u8 = 0x11;
+pub const OP_BLIT_AFFINE: u8 = 0x12;
 pub const OP_EXTENDED: u8 = 0xFF;
 
 // --- Flag bits ---------------------------------------------------------
@@ -141,6 +145,25 @@ pub enum Command {
         filter: Filter,
         tint: Option<Rgba>,
     },
+
+    /// Affine-transformed textured rectangle (rotate / scale / skew).
+    /// `src` is the source sub-rect (≤ 128×128, RGBA8888); `dst` is the
+    /// axis-aligned bounding box to fill. `m` is the **inverse** 2×3
+    /// affine matrix in Q16.16 fixed point, in canonical order
+    /// `[m00, m01, m10, m11, tx, ty]`, mapping a destination offset
+    /// `(ox, oy)` to a source coordinate
+    /// `(m00·ox + m01·oy + tx, m10·ox + m11·oy + ty)`. The host folds
+    /// the source origin and half-pixel centering into `tx, ty`. See
+    /// PROTOCOL.md §5.3 BLIT_AFFINE and the [`affine`](crate::protocol::affine)
+    /// helper for building `m`. `length_w = 11`.
+    BlitAffine {
+        tex_id: u32,
+        src: Rect,
+        dst: Rect,
+        blend: BlendMode,
+        filter: Filter,
+        m: [i32; 6],
+    },
 }
 
 /// Error type for [`Command::encode`].
@@ -170,6 +193,7 @@ impl Command {
                     5
                 }
             }
+            Command::BlitAffine { .. } => 11,
         }
     }
 
@@ -241,6 +265,21 @@ impl Command {
                     write_u32_le(&mut args[20..24], t.to_u32());
                 }
             }
+            Command::BlitAffine { tex_id, src, dst, m, .. } => {
+                // Base words (0..4) share COPY_RECT's layout.
+                write_u32_le(&mut args[0..4], tex_id);
+                write_u32_le(&mut args[4..8], pack_xy(src.x, src.y));
+                write_u32_le(&mut args[8..12], pack_xy(src.w, src.h));
+                write_u32_le(&mut args[12..16], pack_xy(dst.x, dst.y));
+                write_u32_le(&mut args[16..20], pack_xy(dst.w, dst.h));
+                // Words 5..10: inverse affine matrix [m00,m01,m10,m11,tx,ty],
+                // Q16.16 signed, written as the i32 two's-complement bit
+                // pattern (little-endian).
+                for (i, coeff) in m.iter().enumerate() {
+                    let off = 20 + i * 4;
+                    write_u32_le(&mut args[off..off + 4], *coeff as u32);
+                }
+            }
         }
 
         Ok(need)
@@ -278,6 +317,12 @@ impl Command {
                     flags |= COPY_FLAG_TINT_EN;
                 }
                 (OP_COPY_RECT, length_w, flags)
+            }
+            Command::BlitAffine { blend, filter, .. } => {
+                // flags = { reserved[15:4], filter[3:2], blend[1:0] }.
+                // No tint bit in v2.
+                let flags: u16 = (blend as u16) | ((filter as u16) << 2);
+                (OP_BLIT_AFFINE, length_w, flags)
             }
         }
     }
@@ -556,6 +601,66 @@ mod tests {
             assert_eq!(bytes.len(), cmd.encoded_len(), "mismatch for {:?}", cmd);
             assert_eq!(bytes.len() % 4, 0, "not 4-byte aligned: {:?}", cmd);
         }
+    }
+
+    #[test]
+    fn blit_affine_encodes_11_words() {
+        // BLIT_AFFINE (0x12), length_w=11, flags = {blend=src_alpha=1,
+        // filter=bilinear=1<<2=4} = 0x0005. Header LE: [05, 00, 0B, 12].
+        let m: [i32; 6] = [0x0001_0000, 0, 0, 0x0001_0000, 0x0010_0000, 0x0020_0000];
+        let bytes = enc(&Command::BlitAffine {
+            tex_id: 0x0000_0042,
+            src: Rect::new(1, 2, 64, 48),
+            dst: Rect::new(100, 200, 90, 90),
+            blend: BlendMode::SrcAlpha,
+            filter: Filter::Bilinear,
+            m,
+        });
+        assert_eq!(bytes.len(), 4 + 11 * 4);
+        assert_eq!(&bytes[0..4], &[0x05, 0x00, 0x0B, 0x12]);
+        // tex_id
+        assert_eq!(&bytes[4..8], &[0x42, 0x00, 0x00, 0x00]);
+        // src.xy = (1,2) packed (x<<16)|y = 0x0001_0002 → LE [02,00,01,00]
+        assert_eq!(&bytes[8..12], &[0x02, 0x00, 0x01, 0x00]);
+        // src.wh = (64,48) = 0x0040_0030 → LE [30,00,40,00]
+        assert_eq!(&bytes[12..16], &[0x30, 0x00, 0x40, 0x00]);
+        // m00 = 0x0001_0000 (word 5) → bytes[24..28] → LE [00,00,01,00]
+        assert_eq!(&bytes[24..28], &[0x00, 0x00, 0x01, 0x00]);
+        // tx = 0x0010_0000 (word 9) → bytes[40..44]
+        assert_eq!(&bytes[40..44], &[0x00, 0x00, 0x10, 0x00]);
+        // ty = 0x0020_0000 (word 10) → bytes[44..48]
+        assert_eq!(&bytes[44..48], &[0x00, 0x00, 0x20, 0x00]);
+    }
+
+    #[test]
+    fn blit_affine_negative_coeff_is_twos_complement() {
+        // A 90° rotation has off-diagonal terms; one is negative.
+        // -1.0 in Q16.16 = 0xFFFF_0000.
+        let m: [i32; 6] = [0, -0x0001_0000, 0x0001_0000, 0, 0, 0];
+        let bytes = enc(&Command::BlitAffine {
+            tex_id: 0,
+            src: Rect::new(0, 0, 16, 16),
+            dst: Rect::new(0, 0, 16, 16),
+            blend: BlendMode::Opaque,
+            filter: Filter::Bilinear,
+            m,
+        });
+        // m01 is word 6 → bytes[28..32]; -1.0 Q16.16 = 0xFFFF_0000 LE
+        assert_eq!(&bytes[28..32], &[0x00, 0x00, 0xFF, 0xFF]);
+    }
+
+    #[test]
+    fn blit_affine_length_is_11() {
+        let cmd = Command::BlitAffine {
+            tex_id: 0,
+            src: Rect::default(),
+            dst: Rect::default(),
+            blend: BlendMode::Opaque,
+            filter: Filter::Bilinear,
+            m: [0; 6],
+        };
+        assert_eq!(cmd.length_words(), 11);
+        assert_eq!(cmd.encoded_len(), 4 + 11 * 4);
     }
 
     #[test]

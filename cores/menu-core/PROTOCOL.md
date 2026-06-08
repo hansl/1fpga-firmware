@@ -419,6 +419,7 @@ lets the FPGA route a command to the right execution unit with a single
 | `0x05` | SET_RENDER_TARGET | 1       | Redirect subsequent draws into a texture (§5.7)         |
 | `0x10` | FILL_RECT  | 3              | Solid color rectangle (auto-clamped to framebuffer)     |
 | `0x11` | COPY_RECT  | 5 or 6         | Textured rectangle (with optional scaling, tint, blend). `length_w = 6` iff `tint_en = 1` |
+| `0x12` | BLIT_AFFINE | 11            | Affine-transformed textured rectangle (rotate / scale / skew) of a small source, bilinear sampled. Source capped at 128×128 (§5.7). |
 | `0xFF` | EXTENDED   | —              | Reserved for future protocol extension (see §10); MUST raise `ERR_BAD_OPCODE` in v0 |
 
 Category ranges (upper nibble):
@@ -576,6 +577,54 @@ Other behavior:
 - `length_w` MUST equal `5 + Σ enabled_optional_lengths`; a mismatch
   produces `ERR_BAD_LENGTH` per §5.4.
 
+#### BLIT_AFFINE (`0x12`)
+
+Draws a source texture sub-rect into an axis-aligned destination
+rectangle under an arbitrary 2D affine transform (rotation, scale,
+skew, or any combination). Unlike `COPY_RECT`,
+the source is first staged into on-chip memory, so the **source
+sub-rect is capped at 128×128** (§5.7) and **must be RGBA8888**
+(A8 raises `ERR_BAD_FORMAT`). The destination rect is the
+axis-aligned bounding box (AABB) of the transformed source and MAY be
+larger than 128×128 (it is still clamped to framebuffer bounds, §5.5).
+
+```
+length_w = 11
+flags    = { reserved[15:4], filter[3:2], blend[1:0] }
+Word 0:  texture_id (32-bit)
+Word 1:  sx (high 16) | sy (low 16)      -- source sub-rect origin
+Word 2:  sw (high 16) | sh (low 16)      -- source sub-rect size (≤ 128×128)
+Word 3:  dx (high 16) | dy (low 16)      -- destination AABB origin
+Word 4:  dw (high 16) | dh (low 16)      -- destination AABB size
+Word 5:  m00 (32-bit, Q16.16 signed)     -- inverse affine matrix
+Word 6:  m01 (32-bit, Q16.16 signed)
+Word 7:  m10 (32-bit, Q16.16 signed)
+Word 8:  m11 (32-bit, Q16.16 signed)
+Word 9:  tx  (32-bit, Q16.16 signed)
+Word 10: ty  (32-bit, Q16.16 signed)
+```
+
+- `blend` — same as §7.2 (0 = opaque, 1 = src_alpha, 2 = additive).
+- `filter` — 0 = nearest, 1 = bilinear. `BLIT_AFFINE` uses **bilinear**
+  regardless in v2 (the field is carried for forward compatibility and
+  symmetry with `COPY_RECT`).
+- The matrix is the **inverse** map (destination → source), supplied by
+  the host so the FPGA needs no trig. For each destination pixel at
+  offset `(ox, oy)` from the AABB origin `(dx, dy)`, the source sample
+  coordinate (Q16.16) is:
+  ```
+  srcx = m00·ox + m01·oy + tx
+  srcy = m10·ox + m11·oy + ty
+  ```
+  The host folds the source origin `(sx, sy)` and the +0.5 pixel-center
+  bias into `tx, ty` so the FPGA's per-pixel evaluation is add-only.
+- Samples whose 2×2 bilinear footprint falls outside `[0, sw) × [0, sh)`
+  contribute transparent (RGBA `0x00000000`), so rotated corners fade to
+  the destination cleanly.
+- `length_w` MUST equal 11; a mismatch produces `ERR_BAD_LENGTH` (§8).
+- If `sw > 128` or `sh > 128`, the command produces `ERR_AFFINE_TOO_LARGE`
+  (§8.1). Hosts SHOULD enforce the cap before emission (§5.7).
+
 ### 5.4 Optional arguments and extensibility
 
 Some commands accept optional argument words that are present only
@@ -713,6 +762,24 @@ implementation-defined and SHOULD be avoided.
 `CONTROL.SE = 1` (soft reset) and `CONTROL.CE = 1` (clear error) both
 reset the active target to the framebuffer. `CONTROL.E = 1` (enable)
 leaves the active target untouched.
+
+### 5.7 Affine source size limit
+
+`BLIT_AFFINE` (§5.3) stages its source sub-rect into on-chip memory so
+that the per-pixel inverse-mapped (and therefore random-access) reads
+hit single-cycle BRAM instead of DDR3. That staging buffer is a fixed
+size: the source sub-rect MUST be **≤ 128×128 pixels** and RGBA8888.
+
+- The host SHOULD reject oversized affine blits before emitting the
+  command (a malformed command wastes ring bandwidth and stalls the
+  fetcher on the resulting error).
+- As a safety net, the FPGA MUST raise `ERR_AFFINE_TOO_LARGE` (§8.1) if
+  it decodes a `BLIT_AFFINE` whose `sw > 128` or `sh > 128`.
+- The destination AABB is not subject to this limit (only the staged
+  source is); it is clamped to framebuffer bounds per §5.5.
+
+Callers needing to transform a larger image should pre-scale it down to
+≤ 128×128 (or tile it) on the host before issuing `BLIT_AFFINE`.
 
 ---
 
@@ -900,6 +967,7 @@ Tinting is applied before blending.
 | `0x06` | `ERR_AXI`              | AXI response code (SLVERR=2, DECERR=3)             |
 | `0x07` | `ERR_SCANOUT_UNDERRUN` | Line number where underrun occurred                |
 | `0x08` | `ERR_RING_OVERRUN`     | FPGA saw TAIL move backwards unexpectedly          |
+| `0x09` | `ERR_AFFINE_TOO_LARGE` | `BLIT_AFFINE` source exceeded 128×128 (detail packs `sw<<12 \| sh`, 12 bits each) |
 
 ### 8.2 Error semantics
 
@@ -994,6 +1062,13 @@ Before unloading the menu core (to switch to an emulator core):
 
 The `ID` register's low 16 bits hold the protocol version. This document is
 version `0x0001` (1).
+
+`BLIT_AFFINE` (opcode `0x12`, §5.3) and `ERR_AFFINE_TOO_LARGE` (`0x09`, §8.1)
+were added as backward-compatible extensions (a new opcode from the reserved
+range, per the rules below), so they did NOT bump the version. A bitstream
+that predates affine returns `ERR_BAD_OPCODE` on a `0x12` command rather than
+mis-executing it. Feature detection, if needed, should use a capability
+mechanism, not the version number.
 
 Rules for backwards-compatible changes (no version bump):
 
