@@ -67,7 +67,7 @@ module ring_fetcher (
     output logic        blit1_start_o,      // engine 1 (ram2)
     input  logic        blit0_done_i,
     input  logic        blit1_done_i,
-    output logic        blit_mode_o,        // 0 = FILL, 1 = COPY
+    output logic [1:0]  blit_mode_o,        // 0 = FILL, 1 = COPY, 2 = AFFINE
     output logic [1:0]  blit_blend_o,       // header.flags[1:0]
     output logic [15:0] blit_dst_x_o,
     output logic [15:0] blit_dst_y_o,
@@ -83,6 +83,13 @@ module ring_fetcher (
     output logic        blit_format_o,      // 0 = RGBA8888, 1 = A8
     output logic        blit_tint_en_o,
     output logic [31:0] blit_tint_color_o,
+    // AFFINE inverse 2x3 matrix (Q16.16), valid when blit_mode_o == 2.
+    output logic [31:0] blit_aff_m00_o,
+    output logic [31:0] blit_aff_m01_o,
+    output logic [31:0] blit_aff_m10_o,
+    output logic [31:0] blit_aff_m11_o,
+    output logic [31:0] blit_aff_tx_o,
+    output logic [31:0] blit_aff_ty_o,
     output logic        blit_clip_en_o,
     output logic [15:0] blit_clip_x_o,
     output logic [15:0] blit_clip_y_o,
@@ -109,16 +116,21 @@ module ring_fetcher (
     localparam logic [7:0] OP_SET_TARGET = 8'h05;
     localparam logic [7:0] OP_FILL_RECT  = 8'h10;
     localparam logic [7:0] OP_COPY_RECT  = 8'h11;
+    localparam logic [7:0] OP_BLIT_AFFINE = 8'h12;
 
     // SET_RENDER_TARGET: tex_id == 0xFFFF means "framebuffer".
     localparam logic [15:0] TARGET_FB     = 16'hFFFF;
 
     // ---- Error codes (PROTOCOL.md §8.1) ------------------------------
-    localparam logic [7:0] ERR_UNKNOWN_OPCODE = 8'h01;
+    localparam logic [7:0] ERR_UNKNOWN_OPCODE   = 8'h01;
+    localparam logic [7:0] ERR_BAD_LENGTH       = 8'h02;
+    localparam logic [7:0] ERR_BAD_FORMAT       = 8'h04;
+    localparam logic [7:0] ERR_AFFINE_TOO_LARGE = 8'h09;
 
     // ---- Blit modes (matches blit_engine.sv) -------------------------
-    localparam logic MODE_FILL = 1'b0;
-    localparam logic MODE_COPY = 1'b1;
+    localparam logic [1:0] MODE_FILL   = 2'd0;
+    localparam logic [1:0] MODE_COPY   = 2'd1;
+    localparam logic [1:0] MODE_AFFINE = 2'd2;
 
     typedef enum logic [3:0] {
         S_IDLE,
@@ -139,10 +151,10 @@ module ring_fetcher (
     logic        active_engine_q;        // 0 = blit_engine_0 (ram1), 1 = blit_engine_1 (ram2)
     logic [31:0] head_q;
     logic [31:0] header_q;
-    logic [31:0] arg_q  [0:5];       // up to 6 arg words (COPY_RECT + tint)
+    logic [31:0] arg_q  [0:10];      // up to 11 arg words (BLIT_AFFINE)
     logic [31:0] desc_q [0:3];       // 4 descriptor words for COPY_RECT
-    logic [2:0]  arg_idx;
-    logic [2:0]  arg_total;
+    logic [3:0]  arg_idx;
+    logic [3:0]  arg_total;
     logic [1:0]  desc_idx;
     logic [31:0] fetch_addr;
     logic [31:0] retire_advance;
@@ -187,8 +199,12 @@ module ring_fetcher (
     //   COPY: arg[0]=tex_id, arg[1]=src.xy, arg[2]=src.wh,
     //         arg[3]=dst.xy, arg[4]=dst.wh
     wire is_copy = (pending_opcode == OP_COPY_RECT);
-    wire [31:0] dst_xy_word = is_copy ? arg_q[3] : arg_q[0];
-    wire [31:0] dst_wh_word = is_copy ? arg_q[4] : arg_q[1];
+    wire is_affine = (pending_opcode == OP_BLIT_AFFINE);
+    // COPY_RECT and BLIT_AFFINE share the base layout: dst.xy = arg[3],
+    // dst.wh = arg[4], src.xy = arg[1], src.wh = arg[2].
+    wire is_copy_or_aff = is_copy | is_affine;
+    wire [31:0] dst_xy_word = is_copy_or_aff ? arg_q[3] : arg_q[0];
+    wire [31:0] dst_wh_word = is_copy_or_aff ? arg_q[4] : arg_q[1];
 
     // Dual blit dispatch. The current frame's blits go to the engine
     // selected by active_engine_q. active_engine_q flips on PRESENT
@@ -196,7 +212,9 @@ module ring_fetcher (
     assign blit0_start_o     = (state == S_BLIT_DISPATCH) & ~active_engine_q;
     assign blit1_start_o     = (state == S_BLIT_DISPATCH) &  active_engine_q;
     wire   blit_done_mux     = active_engine_q ? blit1_done_i : blit0_done_i;
-    assign blit_mode_o       = is_copy ? MODE_COPY : MODE_FILL;
+    assign blit_mode_o       = is_affine ? MODE_AFFINE
+                             : is_copy   ? MODE_COPY
+                             :             MODE_FILL;
     // Blend mode lives in header.flags[1:0] for both FILL_RECT (§5.3
     // #FILL_RECT) and COPY_RECT (§5.3 #COPY_RECT).
     assign blit_blend_o      = header_q[1:0];
@@ -217,6 +235,13 @@ module ring_fetcher (
     // header.flags bit 4 = tint_en for COPY_RECT (PROTOCOL.md §5.3 #COPY_RECT).
     assign blit_tint_en_o    = is_copy & header_q[4];
     assign blit_tint_color_o = arg_q[5];      // optional 6th arg, valid only when tint_en
+    // AFFINE matrix words 5..10 (BLIT_AFFINE only).
+    assign blit_aff_m00_o    = arg_q[5];
+    assign blit_aff_m01_o    = arg_q[6];
+    assign blit_aff_m10_o    = arg_q[7];
+    assign blit_aff_m11_o    = arg_q[8];
+    assign blit_aff_tx_o     = arg_q[9];
+    assign blit_aff_ty_o     = arg_q[10];
     // Clip state forwarded to the blit engine. ignore_clip is a
     // per-FILL_RECT flag (header bit 2); COPY_RECT always honours
     // the user clip rect.
@@ -244,10 +269,10 @@ module ring_fetcher (
             active_engine_q <= 1'b0;
             head_q         <= 32'd0;
             header_q       <= 32'd0;
-            for (i = 0; i < 6; i = i + 1) arg_q[i]  <= 32'd0;
+            for (i = 0; i < 11; i = i + 1) arg_q[i]  <= 32'd0;
             for (i = 0; i < 4; i = i + 1) desc_q[i] <= 32'd0;
-            arg_idx        <= 3'd0;
-            arg_total      <= 3'd0;
+            arg_idx        <= 4'd0;
+            arg_total      <= 4'd0;
             desc_idx       <= 2'd0;
             fetch_addr     <= 32'd0;
             retire_advance <= 32'd0;
@@ -298,40 +323,54 @@ module ring_fetcher (
                     automatic logic [7:0] len_w  = header_q[23:16];
                     retire_advance <= 32'd4 + (32'(len_w) <<< 2);
                     pending_opcode <= opcode;
-                    arg_idx        <= 3'd0;
+                    arg_idx        <= 4'd0;
                     desc_idx       <= 2'd0;
 
                     unique case (opcode)
                         OP_NOP, OP_PRESENT, OP_CLEAR_CLIP: begin
-                            arg_total <= 3'd0;
+                            arg_total <= 4'd0;
                             state     <= S_RETIRE;
                         end
                         OP_FENCE: begin
-                            arg_total  <= 3'd1;
+                            arg_total  <= 4'd1;
                             fetch_addr <= fetch_addr + 32'd4;
                             state      <= S_FETCH_ARG;
                         end
                         OP_SET_CLIP: begin
-                            arg_total  <= 3'd2;
+                            arg_total  <= 4'd2;
                             fetch_addr <= fetch_addr + 32'd4;
                             state      <= S_FETCH_ARG;
                         end
                         OP_SET_TARGET: begin
-                            arg_total  <= 3'd1;
+                            arg_total  <= 4'd1;
                             fetch_addr <= fetch_addr + 32'd4;
                             state      <= S_FETCH_ARG;
                         end
                         OP_FILL_RECT: begin
-                            arg_total  <= 3'd3;
+                            arg_total  <= 4'd3;
                             fetch_addr <= fetch_addr + 32'd4;
                             state      <= S_FETCH_ARG;
                         end
                         OP_COPY_RECT: begin
                             // length_w distinguishes 5 (no tint) vs 6
                             // (tint_en) per PROTOCOL.md §5.3.
-                            arg_total  <= (header_q[23:16] == 8'd6) ? 3'd6 : 3'd5;
+                            arg_total  <= (header_q[23:16] == 8'd6) ? 4'd6 : 4'd5;
                             fetch_addr <= fetch_addr + 32'd4;
                             state      <= S_FETCH_ARG;
+                        end
+                        OP_BLIT_AFFINE: begin
+                            // Fixed 11-word layout (PROTOCOL.md §5.3).
+                            // Strictly validate length_w — this is the
+                            // first command with required length checking
+                            // (§5.4). Detail packs (expected<<8)|got.
+                            if (len_w != 8'd11) begin
+                                error_info_q <= {8'd0, 8'd11, len_w, ERR_BAD_LENGTH};
+                                state        <= S_HALT;
+                            end else begin
+                                arg_total  <= 4'd11;
+                                fetch_addr <= fetch_addr + 32'd4;
+                                state      <= S_FETCH_ARG;
+                            end
                         end
                         default: begin
                             error_info_q <= {24'd0, ERR_UNKNOWN_OPCODE};
@@ -352,15 +391,15 @@ module ring_fetcher (
                     automatic logic [31:0] arg_word;
                     arg_word = pick_word(ddram_dout_i, fetch_addr[2]);
                     arg_q[arg_idx] <= arg_word;
-                    if (arg_idx + 3'd1 == arg_total) begin
-                        // All args fetched. COPY_RECT and the
-                        // texture-id form of SET_RENDER_TARGET also
+                    if (arg_idx + 4'd1 == arg_total) begin
+                        // All args fetched. COPY_RECT, BLIT_AFFINE, and
+                        // the texture-id form of SET_RENDER_TARGET also
                         // need the descriptor; FB-sentinel
                         // SET_RENDER_TARGET, FILL_RECT, etc. dispatch
                         // straight to retire / blit.
                         unique case (pending_opcode)
                             OP_FILL_RECT: state <= S_BLIT_DISPATCH;
-                            OP_COPY_RECT: begin
+                            OP_COPY_RECT, OP_BLIT_AFFINE: begin
                                 // desc_base uses arg_q[0] = tex_id.
                                 state <= S_FETCH_DESC;
                             end
@@ -376,7 +415,7 @@ module ring_fetcher (
                             default: state <= S_RETIRE;
                         endcase
                     end else begin
-                        arg_idx    <= arg_idx + 3'd1;
+                        arg_idx    <= arg_idx + 4'd1;
                         fetch_addr <= fetch_addr + 32'd4;
                         state      <= S_FETCH_ARG;
                     end
@@ -394,14 +433,36 @@ module ring_fetcher (
                 end
 
                 S_WAIT_DESC: if (ddram_dout_valid_i) begin
-                    desc_q[desc_idx] <= pick_word(ddram_dout_i, fetch_addr[2]);
+                    // All automatics declared up front (Quartus 17).
+                    automatic logic [31:0] dword;
+                    automatic logic [15:0] sw_a;
+                    automatic logic [15:0] sh_a;
+                    dword = pick_word(ddram_dout_i, fetch_addr[2]);
+                    sw_a  = arg_q[2][31:16];
+                    sh_a  = arg_q[2][15:0];
+                    desc_q[desc_idx] <= dword;
                     if (desc_idx == 2'd3) begin
+                        // dword is descriptor word 3 (format in bit 0).
                         // COPY_RECT continues into the blit pipeline;
-                        // SET_RENDER_TARGET just retires (descriptor
-                        // is latched in S_RETIRE).
-                        state <= (pending_opcode == OP_SET_TARGET)
-                                 ? S_RETIRE
-                                 : S_BLIT_DISPATCH;
+                        // SET_RENDER_TARGET just retires (descriptor is
+                        // latched in S_RETIRE); BLIT_AFFINE is guarded
+                        // for source size (§5.7) and RGBA-only format.
+                        if (pending_opcode == OP_SET_TARGET) begin
+                            state <= S_RETIRE;
+                        end else if (is_affine) begin
+                            if (dword[0] != 1'b0) begin
+                                // A8 source unsupported for affine.
+                                error_info_q <= {16'd0, dword[7:0], ERR_BAD_FORMAT};
+                                state        <= S_HALT;
+                            end else if ((sw_a > 16'd128) || (sh_a > 16'd128)) begin
+                                error_info_q <= {sw_a[11:0], sh_a[11:0], ERR_AFFINE_TOO_LARGE};
+                                state        <= S_HALT;
+                            end else begin
+                                state <= S_BLIT_DISPATCH;
+                            end
+                        end else begin
+                            state <= S_BLIT_DISPATCH;
+                        end
                     end else begin
                         desc_idx <= desc_idx + 2'd1;
                         state    <= S_FETCH_DESC;

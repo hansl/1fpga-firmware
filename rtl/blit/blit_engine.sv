@@ -33,7 +33,7 @@ module blit_engine (
 
     // Command interface from ring_fetcher.
     input  logic        start_i,
-    input  logic        mode_i,           // 0 = FILL, 1 = COPY
+    input  logic [1:0]  mode_i,           // 0 = FILL, 1 = COPY, 2 = AFFINE
     input  logic [1:0]  blend_i,          // 0 = Opaque, 1 = SrcAlpha, 2 = Additive
     input  logic [15:0] dst_x_i,
     input  logic [15:0] dst_y_i,
@@ -56,6 +56,22 @@ module blit_engine (
     input  logic        format_i,         // 0 = RGBA8888, 1 = A8
     input  logic        tint_en_i,
     input  logic [31:0] tint_color_i,
+
+    // AFFINE-only inputs (MODE_AFFINE). Inverse 2x3 matrix in Q16.16
+    // signed, mapping a destination offset (ox,oy) from the dst rect
+    // origin to a *source-sub-rect-relative* coordinate:
+    //   srcx = m00*ox + m01*oy + tx
+    //   srcy = m10*ox + m11*oy + ty
+    // The host folds half-pixel centering into tx/ty; the source
+    // origin (src_x_i/src_y_i) is applied by the staging load, so the
+    // sampler indexes the staged sub-rect directly (0..sw-1, 0..sh-1).
+    // Source sub-rect is capped at 128x128 RGBA8888 (PROTOCOL.md §5.7).
+    input  logic [31:0] aff_m00_i,
+    input  logic [31:0] aff_m01_i,
+    input  logic [31:0] aff_m10_i,
+    input  logic [31:0] aff_m11_i,
+    input  logic [31:0] aff_tx_i,
+    input  logic [31:0] aff_ty_i,
 
     // Clipping (PROTOCOL.md §5.5). The blit engine intersects the
     // requested dst rect with `effective_clip`:
@@ -95,8 +111,9 @@ module blit_engine (
     input  logic        ddram_dout_valid_i
 );
 
-    localparam logic MODE_FILL = 1'b0;
-    localparam logic MODE_COPY = 1'b1;
+    localparam logic [1:0] MODE_FILL   = 2'd0;
+    localparam logic [1:0] MODE_COPY   = 2'd1;
+    localparam logic [1:0] MODE_AFFINE = 2'd2;
     localparam logic FMT_RGBA  = 1'b0;
     localparam logic FMT_A8    = 1'b1;
 
@@ -113,7 +130,7 @@ module blit_engine (
     //
     // BURST_BEATS_MAX = 8 (16 RGBA pixels per transaction). The slave's
     // burstcnt tolerates this — FILL_BURST already uses up to 255.
-    typedef enum logic [4:0] {
+    typedef enum logic [5:0] {
         S_IDLE,
         S_DIV_WAIT,        // wait for pipelined lpm_divide on scaled COPY_RECT
         S_ROW_INIT,
@@ -133,7 +150,24 @@ module blit_engine (
         S_ISSUE_PREFETCH,  // 1-cycle: drive RD=1 for next-burst src prefetch
         S_BLEND_BURST,     // sequential blend: 1 pixel/cycle, in-place into src_buf
         S_WRITE_BURST,     // burst dst write
-        S_DONE
+        S_DONE,
+        // ---- AFFINE path (MODE_AFFINE) ----------------------------
+        // Phase 1: stage the sw x sh source sub-rect into the on-chip
+        // even/odd-x banks (one DDR burst per row).
+        S_AFF_SETUP,       // latch coeffs, clip, seed accumulators
+        S_AFF_LOAD_ROW,    // per-row: compute row addr / burst length
+        S_AFF_LOAD_FETCH,  // issue the row's burst read
+        S_AFF_LOAD_WAIT,   // capture beats into the staging banks
+        // Phase 2: walk the dst AABB, bilinear-gather from BRAM, blend.
+        S_AFF_ROW,         // per-row: dst row addr, reset x accumulator
+        S_AFF_PIX_MAC,     // compute ix/iy/frac, bank read addresses
+        S_AFF_PIX_READ,    // BRAM read-latency bubble
+        S_AFF_PIX_FILTER,  // bilinear blend the 4 taps → src_pixel_q
+        S_AFF_FETCH_DST,   // RMW dst read (SrcAlpha/Additive)
+        S_AFF_WAIT_DST,
+        S_AFF_BLEND,       // dst blend (own cycle for timing)
+        S_AFF_WRITE,       // single-pixel dst write
+        S_AFF_NEXT         // advance accumulators / pixel & row cursors
     } state_e;
 
     // Burst sizing.
@@ -141,7 +175,7 @@ module blit_engine (
     localparam int BURST_PIXELS_MAX = BURST_BEATS_MAX * 2;
 
     state_e      state;
-    logic        mode_q;
+    logic [1:0]  mode_q;
     logic [1:0]  blend_q;
     logic        format_q;
     logic        tint_en_q;
@@ -304,6 +338,102 @@ module blit_engine (
     // (row transition, alignment changes) that would invalidate it.
     logic [31:0] prefetch_src_addr_q;
 
+    // ================= AFFINE path state =============================
+    //
+    // Staging banks: the source sub-rect (≤128×128 RGBA) is split by
+    // sub-rect-column parity into an even-x bank and an odd-x bank, each
+    // mirrored into two physical copies (a/b) so a bilinear 2×2 quad —
+    // which always straddles one even and one odd column across two
+    // rows — reads all four taps in a single cycle (even/odd give the
+    // two columns, a/b give rows iy and iy+1). 128 rows × 64 (x/2) cols
+    // × 32-bit = 8192 entries each. Address = {row[6:0], (col>>1)[5:0]}.
+    localparam int AFF_MAX_DIM = 128;
+    localparam int AFF_DEPTH   = AFF_MAX_DIM * (AFF_MAX_DIM/2);  // 8192
+    (* ramstyle = "M10K" *) logic [31:0] stg_even_a [0:AFF_DEPTH-1];
+    (* ramstyle = "M10K" *) logic [31:0] stg_even_b [0:AFF_DEPTH-1];
+    (* ramstyle = "M10K" *) logic [31:0] stg_odd_a  [0:AFF_DEPTH-1];
+    (* ramstyle = "M10K" *) logic [31:0] stg_odd_b  [0:AFF_DEPTH-1];
+
+    // Latched inverse-affine coefficients (Q16.16 signed).
+    logic signed [31:0] aff_m00_q, aff_m01_q, aff_m10_q, aff_m11_q;
+    logic signed [31:0] aff_tx_q,  aff_ty_q;
+
+    // Per-pixel / per-row source-coordinate accumulators (Q16.16 signed,
+    // sub-rect-relative). DDA: +m00/+m10 per pixel, +m01/+m11 per row.
+    logic signed [31:0] aff_srcx_q,     aff_srcy_q;
+    logic signed [31:0] aff_srcx_row_q, aff_srcy_row_q;
+
+    // Load-phase cursors.
+    logic [7:0]         aff_load_row_q;   // 0..sh
+    logic signed [16:0] aff_load_col_q;   // sub-rect col of the low pixel
+                                          // of the current beat (signed:
+                                          // starts at -1 on odd lead).
+    logic [7:0]         aff_load_beats_q; // beats captured this row
+    logic [7:0]         aff_row_beats_q;  // beats expected this row
+    logic [31:0]        aff_row_byte_q;   // DDR byte addr of this row's
+                                          // first wanted source pixel
+
+    // Sample-phase pipeline registers (set in S_AFF_PIX_MAC, consumed
+    // in S_AFF_PIX_FILTER after the BRAM read-latency bubble).
+    logic signed [15:0] aff_ix_q, aff_iy_q;
+    logic [7:0]         aff_fx8_q, aff_fy8_q;
+    logic               aff_t00v_q, aff_t01v_q, aff_t10v_q, aff_t11v_q;
+
+    // Registered BRAM read outputs (one per physical copy).
+    logic [31:0] ea_q, eb_q, oa_q, ob_q;
+
+    // ---- Combinational sample-phase read addresses -----------------
+    // Derived from the registered integer source coords (aff_ix_q /
+    // aff_iy_q). Out-of-range taps still produce an in-range index
+    // (low bits) — the tap is masked to transparent in S_AFF_PIX_FILTER.
+    wire [5:0]  aff_odd_col  = aff_ix_q[6:1];                 // ix>>1
+    wire [6:0]  aff_even_col = {1'b0, aff_ix_q[6:1]} + {6'd0, aff_ix_q[0]};
+    wire [6:0]  aff_iy0      = aff_iy_q[6:0];
+    wire [6:0]  aff_iy1      = aff_iy_q[6:0] + 7'd1;
+    wire [12:0] ea_addr = {aff_iy0, aff_even_col[5:0]};
+    wire [12:0] eb_addr = {aff_iy1, aff_even_col[5:0]};
+    wire [12:0] oa_addr = {aff_iy0, aff_odd_col};
+    wire [12:0] ob_addr = {aff_iy1, aff_odd_col};
+
+    // ---- Combinational load-phase bank write decode ----------------
+    // One arriving 64-bit beat carries two consecutive sub-rect columns
+    // (low 32 = lower x). One is even, one is odd → one write to each
+    // bank, with per-bank write-enable masking off out-of-range columns
+    // (the odd-lead first beat, and the odd-width tail).
+    wire        aff_beat_valid = (state == S_AFF_LOAD_WAIT) & ddram_dout_valid_i;
+    wire [31:0] aff_lo_pix = ddram_dout_i[31:0];
+    wire [31:0] aff_hi_pix = ddram_dout_i[63:32];
+    wire signed [16:0] aff_col_lo = aff_load_col_q;          // low pixel col
+    wire signed [16:0] aff_col_hi = aff_load_col_q + 17'sd1; // high pixel col
+    wire        aff_lo_in = (aff_col_lo >= 0) && (aff_col_lo < $signed({1'b0, src_w_q}));
+    wire        aff_hi_in = (aff_col_hi >= 0) && (aff_col_hi < $signed({1'b0, src_w_q}));
+    wire        aff_lo_is_even = (aff_col_lo[0] == 1'b0);
+    // Route low/high pixel to even/odd bank by parity of the low col.
+    wire [31:0] aff_even_pix = aff_lo_is_even ? aff_lo_pix : aff_hi_pix;
+    wire [31:0] aff_odd_pix  = aff_lo_is_even ? aff_hi_pix : aff_lo_pix;
+    wire signed [16:0] aff_even_colw = aff_lo_is_even ? aff_col_lo : aff_col_hi;
+    wire signed [16:0] aff_odd_colw  = aff_lo_is_even ? aff_col_hi : aff_col_lo;
+    wire        aff_even_we = aff_beat_valid & (aff_lo_is_even ? aff_lo_in : aff_hi_in);
+    wire        aff_odd_we  = aff_beat_valid & (aff_lo_is_even ? aff_hi_in : aff_lo_in);
+    wire [12:0] aff_even_waddr = {aff_load_row_q[6:0], aff_even_colw[6:1]};
+    wire [12:0] aff_odd_waddr  = {aff_load_row_q[6:0], aff_odd_colw[6:1]};
+
+    // ---- Staging BRAM: mirrored writes (load) + registered reads ----
+    always_ff @(posedge clk) begin
+        if (aff_even_we) begin
+            stg_even_a[aff_even_waddr] <= aff_even_pix;
+            stg_even_b[aff_even_waddr] <= aff_even_pix;
+        end
+        if (aff_odd_we) begin
+            stg_odd_a[aff_odd_waddr] <= aff_odd_pix;
+            stg_odd_b[aff_odd_waddr] <= aff_odd_pix;
+        end
+        ea_q <= stg_even_a[ea_addr];
+        eb_q <= stg_even_b[eb_addr];
+        oa_q <= stg_odd_a[oa_addr];
+        ob_q <= stg_odd_b[ob_addr];
+    end
+
     assign busy_o = (state != S_IDLE) & (state != S_DONE);
 
     // Per-pixel byte addresses.
@@ -386,6 +516,55 @@ module blit_engine (
     function automatic logic [7:0] ch_r(input logic [31:0] p); return p[23:16]; endfunction
     function automatic logic [7:0] ch_a(input logic [31:0] p); return p[31:24]; endfunction
 
+    // 8-bit linear interpolation a + (b-a)*t/256, with t a /256
+    // fraction. Crucially EXACT at t == 0 (returns a) so integer-aligned
+    // samples — e.g. the entire identity transform — are bit-exact; the
+    // `a*(255-t)+b*t` form would dim full-intensity channels by 1 LSB.
+    // Round-to-nearest (+128) and saturate to [0,255].
+    function automatic logic [7:0] lerp8(
+        input logic [7:0] a,
+        input logic [7:0] b,
+        input logic [7:0] t
+    );
+        logic signed [9:0]  diff;
+        logic signed [18:0] prod;
+        logic signed [18:0] res;
+        diff = $signed({2'b00, b}) - $signed({2'b00, a});
+        prod = (diff * $signed({1'b0, t})) + 19'sd128;
+        res  = $signed({11'd0, a}) + (prod >>> 8);
+        if (res < 0)         return 8'h00;
+        else if (res > 255)  return 8'hFF;
+        else                 return res[7:0];
+    endfunction
+
+    // Separable bilinear of a 2x2 texel quad (premultiplied-alpha safe).
+    //   t00=(ix,iy) t01=(ix+1,iy) t10=(ix,iy+1) t11=(ix+1,iy+1)
+    // fx/fy are the 8-bit fractional sub-texel positions.
+    function automatic logic [31:0] bilinear(
+        input logic [31:0] t00,
+        input logic [31:0] t01,
+        input logic [31:0] t10,
+        input logic [31:0] t11,
+        input logic [7:0]  fx,
+        input logic [7:0]  fy
+    );
+        logic [7:0] r0, r1, g0, g1, b0, b1, a0, a1;
+        r0 = lerp8(ch_r(t00), ch_r(t01), fx);
+        r1 = lerp8(ch_r(t10), ch_r(t11), fx);
+        g0 = lerp8(ch_g(t00), ch_g(t01), fx);
+        g1 = lerp8(ch_g(t10), ch_g(t11), fx);
+        b0 = lerp8(ch_b(t00), ch_b(t01), fx);
+        b1 = lerp8(ch_b(t10), ch_b(t11), fx);
+        a0 = lerp8(ch_a(t00), ch_a(t01), fx);
+        a1 = lerp8(ch_a(t10), ch_a(t11), fx);
+        bilinear = pack_pixel(
+            lerp8(r0, r1, fy),
+            lerp8(g0, g1, fy),
+            lerp8(b0, b1, fy),
+            lerp8(a0, a1, fy)
+        );
+    endfunction
+
     // ---- Output multiplexing ---------------------------------------
     always_comb begin
         ddram_addr_o     = 29'd0;
@@ -467,6 +646,29 @@ module blit_engine (
                 ddram_burstcnt_o = burst_len_q;
                 ddram_be_o       = 8'hFF;
                 ddram_din_o      = {color_q, color_q};
+                ddram_we_o       = 1'b1;
+            end
+            // ---- AFFINE: staging load (burst read one source row) ----
+            S_AFF_LOAD_FETCH: begin
+                ddram_addr_o     = aff_row_byte_q[31:3];
+                ddram_burstcnt_o = aff_row_beats_q;
+                ddram_be_o       = 8'hFF;
+                ddram_rd_o       = 1'b1;
+            end
+            // ---- AFFINE: per-pixel dst RMW read / write --------------
+            S_AFF_FETCH_DST: begin
+                ddram_addr_o     = dst_pixel_byte_addr[31:3];
+                ddram_burstcnt_o = 8'd1;
+                ddram_be_o       = be_for_word(dst_pixel_byte_addr[2]);
+                ddram_rd_o       = 1'b1;
+            end
+            S_AFF_WRITE: begin
+                ddram_addr_o     = dst_pixel_byte_addr[31:3];
+                ddram_burstcnt_o = 8'd1;
+                ddram_be_o       = be_for_word(dst_pixel_byte_addr[2]);
+                ddram_din_o      = dst_pixel_byte_addr[2]
+                                       ? {pixel_data, 32'd0}
+                                       : {32'd0, pixel_data};
                 ddram_we_o       = 1'b1;
             end
             default: ;
@@ -568,6 +770,29 @@ module blit_engine (
             prefetch_ready_q     <= 1'b0;
             prefetch_beat_idx_q  <= 4'd0;
             prefetch_src_addr_q  <= 32'd0;
+            aff_m00_q            <= 32'sd0;
+            aff_m01_q            <= 32'sd0;
+            aff_m10_q            <= 32'sd0;
+            aff_m11_q            <= 32'sd0;
+            aff_tx_q             <= 32'sd0;
+            aff_ty_q             <= 32'sd0;
+            aff_srcx_q           <= 32'sd0;
+            aff_srcy_q           <= 32'sd0;
+            aff_srcx_row_q       <= 32'sd0;
+            aff_srcy_row_q       <= 32'sd0;
+            aff_load_row_q       <= 8'd0;
+            aff_load_col_q       <= 17'sd0;
+            aff_load_beats_q     <= 8'd0;
+            aff_row_beats_q      <= 8'd0;
+            aff_row_byte_q       <= 32'd0;
+            aff_ix_q             <= 16'sd0;
+            aff_iy_q             <= 16'sd0;
+            aff_fx8_q            <= 8'd0;
+            aff_fy8_q            <= 8'd0;
+            aff_t00v_q           <= 1'b0;
+            aff_t01v_q           <= 1'b0;
+            aff_t10v_q           <= 1'b0;
+            aff_t11v_q           <= 1'b0;
             done_o               <= 1'b0;
         end else begin
             done_o <= 1'b0;
@@ -646,6 +871,7 @@ module blit_engine (
                     // from the pipelined lpm_divide and land in
                     // S_DIV_WAIT.
                     automatic logic        do_scale;
+                    automatic logic        is_aff;
 
                     fbw = target_width_i;
                     fbh = target_height_i;
@@ -693,8 +919,13 @@ module blit_engine (
                     // accumulators handle the scaled left/top offset.
                     do_scale = (mode_i == MODE_COPY) &&
                                ((src_w_i != dst_w_i) || (src_h_i != dst_h_i));
-                    src_x_q      <= src_x_i + (do_scale ? 16'd0 : sox);
-                    src_y_q      <= src_y_i + (do_scale ? 16'd0 : soy);
+                    is_aff   = (mode_i == MODE_AFFINE);
+                    // AFFINE keeps src_x/y_q at the sub-rect origin
+                    // (sx,sy) — the load reads from there and the
+                    // left/top clip offset (sox/soy) is folded into the
+                    // accumulator seed in S_AFF_SETUP, like scale mode.
+                    src_x_q      <= src_x_i + ((do_scale || is_aff) ? 16'd0 : sox);
+                    src_y_q      <= src_y_i + ((do_scale || is_aff) ? 16'd0 : soy);
                     src_w_q      <= src_w_i;
                     src_h_q      <= src_h_i;
                     src_addr_q   <= src_addr_i;
@@ -716,7 +947,21 @@ module blit_engine (
                     // The 8-cycle latency is negligible vs the
                     // thousands of cycles per scaled blit; non-
                     // scaled blits skip the wait entirely.
-                    if (do_scale) begin
+                    if (is_aff) begin
+                        // Latch the inverse matrix; carry the clip
+                        // offset into S_AFF_SETUP (reusing sox_q/soy_q)
+                        // where it seeds the source accumulators.
+                        scale_mode_q <= 1'b0;
+                        aff_m00_q    <= $signed(aff_m00_i);
+                        aff_m01_q    <= $signed(aff_m01_i);
+                        aff_m10_q    <= $signed(aff_m10_i);
+                        aff_m11_q    <= $signed(aff_m11_i);
+                        aff_tx_q     <= $signed(aff_tx_i);
+                        aff_ty_q     <= $signed(aff_ty_i);
+                        sox_q        <= sox;
+                        soy_q        <= soy;
+                        state        <= S_AFF_SETUP;
+                    end else if (do_scale) begin
                         scale_mode_q     <= 1'b1;
                         div_num_x_q      <= {src_w_i, 16'd0};
                         div_den_x_q      <= dst_w_i;
@@ -1302,6 +1547,196 @@ module blit_engine (
                     end else begin
                         copy_beat_idx_q <= copy_beat_idx_q + 4'd1;
                     end
+                end
+
+                // ================= AFFINE path ====================
+
+                S_AFF_SETUP: begin
+                    // Safety net for the on-chip staging cap and for
+                    // fully-clipped rects (the fetcher already rejects
+                    // oversize sources, but never write past the banks).
+                    if ((src_w_q > 16'd128) || (src_h_q > 16'd128)
+                        || (dst_w_q == 16'd0) || (dst_h_q == 16'd0)) begin
+                        state <= S_DONE;
+                    end else begin
+                        // Seed the source accumulators at the clipped
+                        // top-left (ox=sox, oy=soy). The products fold
+                        // the left/top clip offset into tx/ty; with no
+                        // clip (sox=soy=0) the seed is just tx/ty.
+                        automatic logic signed [16:0] soxs;
+                        automatic logic signed [16:0] soys;
+                        soxs = $signed({1'b0, sox_q});
+                        soys = $signed({1'b0, soy_q});
+                        aff_srcx_row_q <= aff_tx_q
+                                        + 32'($signed(aff_m00_q) * soxs)
+                                        + 32'($signed(aff_m01_q) * soys);
+                        aff_srcy_row_q <= aff_ty_q
+                                        + 32'($signed(aff_m10_q) * soxs)
+                                        + 32'($signed(aff_m11_q) * soys);
+                        aff_load_row_q <= 8'd0;
+                        state          <= S_AFF_LOAD_ROW;
+                    end
+                end
+
+                S_AFF_LOAD_ROW: begin
+                    if (aff_load_row_q == src_h_q[7:0]) begin
+                        // All source rows staged → start the draw walk.
+                        state <= S_AFF_ROW;
+                    end else begin
+                        automatic logic [31:0] rb;
+                        automatic logic        lead;
+                        automatic logic [8:0]  pix;
+                        rb = src_addr_q
+                           + (({8'd0, src_y_q} + {16'd0, aff_load_row_q}) * src_pitch_q)
+                           + ({16'd0, src_x_q} <<< 2);
+                        lead = rb[2];
+                        pix  = {8'd0, lead} + {1'b0, src_w_q[7:0]};
+                        aff_row_byte_q   <= rb;
+                        aff_row_beats_q  <= (pix + 9'd1) >> 1;  // ceil(pix/2)
+                        aff_load_beats_q <= 8'd0;
+                        // Low pixel of beat 0 is col 0 (aligned) or col
+                        // -1 (the discarded pixel before, when the first
+                        // wanted pixel is the high half of the beat).
+                        aff_load_col_q   <= lead ? -17'sd1 : 17'sd0;
+                        state            <= S_AFF_LOAD_FETCH;
+                    end
+                end
+
+                S_AFF_LOAD_FETCH: if (~ddram_busy_i) begin
+                    state <= S_AFF_LOAD_WAIT;
+                end
+
+                S_AFF_LOAD_WAIT: if (ddram_dout_valid_i & ~prefetch_active_q) begin
+                    // The staging-bank writes for this beat happen in the
+                    // dedicated RAM always_ff (using aff_load_col_q). Here
+                    // we just advance the cursors.
+                    aff_load_col_q <= aff_load_col_q + 17'sd2;
+                    if (aff_load_beats_q + 8'd1 == aff_row_beats_q) begin
+                        aff_load_beats_q <= 8'd0;
+                        aff_load_row_q   <= aff_load_row_q + 8'd1;
+                        state            <= S_AFF_LOAD_ROW;
+                    end else begin
+                        aff_load_beats_q <= aff_load_beats_q + 8'd1;
+                    end
+                end
+
+                S_AFF_ROW: begin
+                    if (cur_y_off == dst_h_q) begin
+                        state <= S_DONE;
+                    end else begin
+                        dst_row_byte_addr <= target_base_i
+                            + ({16'd0, (dst_y_q + cur_y_off)} * target_pitch_i)
+                            + ({16'd0, dst_x_q} <<< 2);
+                        cur_x      <= '0;
+                        aff_srcx_q <= aff_srcx_row_q;
+                        aff_srcy_q <= aff_srcy_row_q;
+                        state      <= S_AFF_PIX_MAC;
+                    end
+                end
+
+                S_AFF_PIX_MAC: begin
+                    if (cur_x == dst_w_q) begin
+                        // End of row: step the per-row accumulators by
+                        // one dst-y (add the m01/m11 column of the
+                        // inverse matrix) and move to the next row.
+                        cur_y_off      <= cur_y_off + 16'd1;
+                        aff_srcx_row_q <= aff_srcx_row_q + aff_m01_q;
+                        aff_srcy_row_q <= aff_srcy_row_q + aff_m11_q;
+                        state          <= S_AFF_ROW;
+                    end else begin
+                        // Register integer/frac parts and tap-valid
+                        // flags. Bank read addresses (ea_addr…) are
+                        // combinational from aff_ix_q/aff_iy_q, so they
+                        // present to the BRAM during S_AFF_PIX_READ.
+                        automatic logic signed [15:0] ixv;
+                        automatic logic signed [15:0] iyv;
+                        automatic logic signed [16:0] sww;
+                        automatic logic signed [16:0] shh;
+                        automatic logic               x0in, x1in, y0in, y1in;
+                        ixv = aff_srcx_q[31:16];
+                        iyv = aff_srcy_q[31:16];
+                        // 17-bit positive signed bounds (sw/sh ≤ 128).
+                        sww = $signed({1'b0, src_w_q});
+                        shh = $signed({1'b0, src_h_q});
+                        // Signed compares: ixv/iyv are signed [15:0],
+                        // sww/shh signed [16:0], so each comparison
+                        // sign-extends ixv/iyv to 17 bits.
+                        x0in = (ixv >= 0)       && (ixv           < sww);
+                        x1in = (ixv >= -16'sd1) && ((ixv + 16'sd1) < sww);
+                        y0in = (iyv >= 0)       && (iyv           < shh);
+                        y1in = (iyv >= -16'sd1) && ((iyv + 16'sd1) < shh);
+                        aff_ix_q   <= ixv;
+                        aff_iy_q   <= iyv;
+                        aff_fx8_q  <= aff_srcx_q[15:8];
+                        aff_fy8_q  <= aff_srcy_q[15:8];
+                        aff_t00v_q <= x0in & y0in;
+                        aff_t01v_q <= x1in & y0in;
+                        aff_t10v_q <= x0in & y1in;
+                        aff_t11v_q <= x1in & y1in;
+                        state      <= S_AFF_PIX_READ;
+                    end
+                end
+
+                S_AFF_PIX_READ: begin
+                    // 1-cycle BRAM read-latency bubble; ea_q/eb_q/oa_q/
+                    // ob_q latch at the edge into S_AFF_PIX_FILTER.
+                    state <= S_AFF_PIX_FILTER;
+                end
+
+                S_AFF_PIX_FILTER: begin
+                    automatic logic [31:0] t00, t01, t10, t11, srcpix;
+                    automatic logic [7:0]  sa;
+                    // Parity mux: aff_ix_q[0] picks which bank is the
+                    // left column of the quad (even-x bank vs odd-x).
+                    t00 = aff_ix_q[0] ? oa_q : ea_q;
+                    t01 = aff_ix_q[0] ? ea_q : oa_q;
+                    t10 = aff_ix_q[0] ? ob_q : eb_q;
+                    t11 = aff_ix_q[0] ? eb_q : ob_q;
+                    if (!aff_t00v_q) t00 = 32'd0;
+                    if (!aff_t01v_q) t01 = 32'd0;
+                    if (!aff_t10v_q) t10 = 32'd0;
+                    if (!aff_t11v_q) t11 = 32'd0;
+                    srcpix = bilinear(t00, t01, t10, t11, aff_fx8_q, aff_fy8_q);
+                    sa = ch_a(srcpix);
+                    // Source is premultiplied; same blend fast paths as
+                    // the COPY path.
+                    if (blend_q == BLEND_OPAQUE) begin
+                        pixel_data <= srcpix;
+                        state      <= S_AFF_WRITE;
+                    end else if ((blend_q == BLEND_SRCALPHA) && (sa == 8'hFF)) begin
+                        pixel_data <= srcpix;
+                        state      <= S_AFF_WRITE;
+                    end else if ((blend_q == BLEND_SRCALPHA) && (sa == 8'h00)) begin
+                        state <= S_AFF_NEXT;   // fully transparent → skip
+                    end else begin
+                        src_pixel_q <= srcpix;
+                        state       <= S_AFF_FETCH_DST;
+                    end
+                end
+
+                S_AFF_FETCH_DST: if (~ddram_busy_i) begin
+                    state <= S_AFF_WAIT_DST;
+                end
+
+                S_AFF_WAIT_DST: if (ddram_dout_valid_i & ~prefetch_active_q) begin
+                    dst_pixel_q <= pick_word(ddram_dout_i, dst_pixel_byte_addr[2]);
+                    state       <= S_AFF_BLEND;
+                end
+
+                S_AFF_BLEND: begin
+                    pixel_data <= blend_pixel(src_pixel_q, dst_pixel_q, blend_q);
+                    state      <= S_AFF_WRITE;
+                end
+
+                S_AFF_WRITE: if (~ddram_busy_i) begin
+                    state <= S_AFF_NEXT;
+                end
+
+                S_AFF_NEXT: begin
+                    cur_x      <= cur_x + 16'd1;
+                    aff_srcx_q <= aff_srcx_q + aff_m00_q;
+                    aff_srcy_q <= aff_srcy_q + aff_m10_q;
+                    state      <= S_AFF_PIX_MAC;
                 end
 
                 S_DONE: begin

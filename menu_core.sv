@@ -509,7 +509,7 @@ wire        blit_busy;
 // start signals on its active_engine toggle.
 wire        blit0_start;
 wire        blit1_start;
-wire        blit_mode;
+wire [1:0]  blit_mode;
 wire [1:0]  blit_blend;
 wire [15:0] blit_dst_x, blit_dst_y, blit_dst_w, blit_dst_h;
 wire [15:0] blit_src_x, blit_src_y, blit_src_w, blit_src_h;
@@ -518,6 +518,8 @@ wire [31:0] blit_color;
 wire        blit_format;
 wire        blit_tint_en;
 wire [31:0] blit_tint_color;
+wire [31:0] blit_aff_m00, blit_aff_m01, blit_aff_m10, blit_aff_m11;
+wire [31:0] blit_aff_tx,  blit_aff_ty;
 wire        blit_clip_en;
 wire [15:0] blit_clip_x, blit_clip_y, blit_clip_w, blit_clip_h;
 wire        blit_ignore_clip;
@@ -578,6 +580,12 @@ ring_fetcher u_ring_fetcher (
     .blit_format_o     (blit_format),
     .blit_tint_en_o    (blit_tint_en),
     .blit_tint_color_o (blit_tint_color),
+    .blit_aff_m00_o (blit_aff_m00),
+    .blit_aff_m01_o (blit_aff_m01),
+    .blit_aff_m10_o (blit_aff_m10),
+    .blit_aff_m11_o (blit_aff_m11),
+    .blit_aff_tx_o  (blit_aff_tx),
+    .blit_aff_ty_o  (blit_aff_ty),
     .blit_clip_en_o    (blit_clip_en),
     .blit_clip_x_o     (blit_clip_x),
     .blit_clip_y_o     (blit_clip_y),
@@ -658,6 +666,12 @@ blit_engine u_blit_engine (
     .format_i      (blit_format),
     .tint_en_i     (blit_tint_en),
     .tint_color_i  (blit_tint_color),
+    .aff_m00_i  (blit_aff_m00),
+    .aff_m01_i  (blit_aff_m01),
+    .aff_m10_i  (blit_aff_m10),
+    .aff_m11_i  (blit_aff_m11),
+    .aff_tx_i   (blit_aff_tx),
+    .aff_ty_i   (blit_aff_ty),
 
     .target_width_i  (target_width),
     .target_height_i (target_height),
@@ -728,6 +742,12 @@ blit_engine u_blit_engine_1 (
     .format_i      (blit_format),
     .tint_en_i     (blit_tint_en),
     .tint_color_i  (blit_tint_color),
+    .aff_m00_i  (blit_aff_m00),
+    .aff_m01_i  (blit_aff_m01),
+    .aff_m10_i  (blit_aff_m10),
+    .aff_m11_i  (blit_aff_m11),
+    .aff_tx_i   (blit_aff_tx),
+    .aff_ty_i   (blit_aff_ty),
 
     .target_width_i  (target_width),
     .target_height_i (target_height),
