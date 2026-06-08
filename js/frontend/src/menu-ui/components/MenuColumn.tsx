@@ -120,8 +120,15 @@ export function MenuColumn({
 }) {
   return (
     <div style={rootStyle}>
+      {/* Key by position, not item name: switching categories swaps the
+          whole `items` array, and positional keys let React reuse the
+          existing row fibers (update content) instead of unmounting the
+          old column and mounting the new one — turning dozens of
+          createInstance/removeChild Boa crossings into cheap updates.
+          Rows never reorder within a category, so index keys are safe
+          here. */}
       {items.map((it, i) => (
-        <Row key={it.name} item={it} selected={i === selected} />
+        <Row key={i} item={it} selected={i === selected} />
       ))}
     </div>
   );

@@ -24,6 +24,29 @@ type NoTimeout = -1;
 
 const NO_TIMEOUT: NoTimeout = -1;
 
+/**
+ * Value-equality for the host props that `gui.commitUpdate` actually
+ * consumes — `src` and `style` (compared one level deep). `children`
+ * is deliberately ignored: child mutations are committed separately via
+ * appendChild / removeChild / insertBefore, so a new children ref alone
+ * must not force a (no-op) style re-commit. Lets `commitUpdate` skip the
+ * Boa→Rust round-trip when a re-render produced a value-identical
+ * style/src.
+ */
+function propsEqual(a: Props, b: Props): boolean {
+  if (a.src !== b.src) return false;
+  const sa = a.style as Record<string, unknown> | undefined;
+  const sb = b.style as Record<string, unknown> | undefined;
+  if (sa === sb) return true; // same ref, or both undefined
+  if (!sa || !sb) return false;
+  const ska = Object.keys(sa);
+  if (ska.length !== Object.keys(sb).length) return false;
+  for (const k of ska) {
+    if (sa[k] !== sb[k]) return false;
+  }
+  return true;
+}
+
 const reconciler = ReactReconciler<
   Type,
   Props,
@@ -82,7 +105,15 @@ const reconciler = ReactReconciler<
   removeChildFromContainer(container, child) {
     gui.removeChild(container, child);
   },
-  commitUpdate(instance, _type, _prevProps, nextProps) {
+  commitUpdate(instance, _type, prevProps, nextProps) {
+    // React fires commitUpdate whenever a host element re-renders,
+    // because inline `{...style}` spreads produce a fresh object ref
+    // every render even when the values are identical. The host's
+    // commitUpdate REPLACES the node style (a full re-parse on the
+    // Boa→Rust boundary), so skipping value-equal commits avoids that
+    // cost — and stops the per-commit style clobber from fighting
+    // in-flight host-side tweens.
+    if (propsEqual(prevProps, nextProps)) return;
     gui.commitUpdate(instance, nextProps);
   },
   commitTextUpdate(textInstance, _oldText, newText) {
