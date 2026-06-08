@@ -76,12 +76,20 @@ const CategoryIcon = memo(function CategoryIcon({
   category: MenuCategory;
   selected: boolean;
 }) {
-  // Selected → 1.08× scale, full opacity. Unselected → 1.0×, dimmed.
-  // No colour tint change — XMB convention is brightness + scale.
+  // Selected → 1.08× scale, full opacity, tilted to 45°. Unselected →
+  // 1.0×, dimmed, upright. No colour tint change — XMB convention is
+  // brightness + scale, plus the tilt as a selection accent. The tilt
+  // animates in/out as selection moves horizontally (the tween glides
+  // from the in-progress angle on every selection change). `rotate`
+  // renders via the FPGA affine blit; see paint_img.
   const ref = useRef<gui.NodeId | null>(null);
   useTween(
     ref,
-    { scale: selected ? 1.08 : 1.0, opacity: selected ? 1.0 : 0.5 },
+    {
+      scale: selected ? 1.08 : 1.0,
+      opacity: selected ? 1.0 : 0.5,
+      rotate: selected ? 45 : 0,
+    },
     { duration: 220, easing: 'easeOut' },
   );
   return (

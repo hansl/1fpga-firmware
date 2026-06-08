@@ -220,6 +220,9 @@ fn walk(
     // single-bit float noise.
     let sx_q = (xf.scale_x.clamp(0.0, 64.0) * 1024.0).round() as i32;
     let sy_q = (xf.scale_y.clamp(0.0, 64.0) * 1024.0).round() as i32;
+    // Quantise rotation (degrees) so a rotation-only tween still
+    // invalidates the img's content hash and triggers a repaint.
+    let rot_q = (xf.rotation * 64.0).round() as i32;
     let _ = scaled; // currently only the bbox + hash uses xf
     // Fully-transparent nodes don't paint and therefore don't
     // contribute to the scene; treat them as if they weren't there.
@@ -301,6 +304,7 @@ fn walk(
                     opacity_u8.hash(&mut h);
                     sx_q.hash(&mut h);
                     sy_q.hash(&mut h);
+                    rot_q.hash(&mut h);
                     out.push(PaintedItem {
                         node_id: id,
                         bbox,
@@ -327,7 +331,11 @@ fn layout_to_bbox(lay: &ComputedLayout) -> PixelRect {
 /// damage walker so each item's bbox matches the area `paint::paint`
 /// actually writes after applying the same transform.
 fn transformed_bbox(lay: &ComputedLayout, xf: Transform) -> PixelRect {
-    let (tx, ty, tw, th) = xf.apply_to_rect(lay.x, lay.y, lay.w, lay.h);
+    // Use the rotated AABB so a rotated image's damage rect covers its
+    // full footprint (it extends beyond the scale box). Collapses to
+    // the scale box when there's no rotation, preserving prior
+    // behaviour for every existing node.
+    let (tx, ty, tw, th) = xf.apply_to_aabb(lay.x, lay.y, lay.w, lay.h);
     let to_u16 = |v: f32| v.max(0.0).min(u16::MAX as f32) as u16;
     PixelRect {
         x: to_u16(tx),

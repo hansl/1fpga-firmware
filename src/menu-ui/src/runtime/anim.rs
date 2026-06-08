@@ -34,6 +34,7 @@ pub enum TweenProp {
     Opacity,
     ScaleX,
     ScaleY,
+    Rotate,
     Top,
     Right,
     Bottom,
@@ -46,6 +47,7 @@ impl TweenProp {
             "opacity" => Some(Self::Opacity),
             "scaleX" => Some(Self::ScaleX),
             "scaleY" => Some(Self::ScaleY),
+            "rotate" => Some(Self::Rotate),
             "top" => Some(Self::Top),
             "right" => Some(Self::Right),
             "bottom" => Some(Self::Bottom),
@@ -62,6 +64,7 @@ impl TweenProp {
             Self::Opacity => style.opacity.unwrap_or(1.0),
             Self::ScaleX => style.scale_x.unwrap_or(1.0),
             Self::ScaleY => style.scale_y.unwrap_or(1.0),
+            Self::Rotate => style.rotate.unwrap_or(0.0),
             // Position offsets: 0 is a sensible "no offset" default
             // for the from-value when the style hasn't committed yet.
             Self::Top => style.top.unwrap_or(0.0),
@@ -82,6 +85,8 @@ impl TweenProp {
             // nor the layout system handles today.
             Self::ScaleX => patch.scale_x = Some(value.max(0.0)),
             Self::ScaleY => patch.scale_y = Some(value.max(0.0)),
+            // Rotation in degrees; any value is legal (it wraps).
+            Self::Rotate => patch.rotate = Some(value),
             // Position offsets: pass through unchanged. Negative
             // values are CSS-legal (drag an element off-screen).
             Self::Top => patch.top = Some(value),

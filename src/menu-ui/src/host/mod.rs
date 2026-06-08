@@ -394,6 +394,7 @@ fn start_tween(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
         "opacity",
         "scaleX",
         "scaleY",
+        "rotate",
         "top",
         "right",
         "bottom",
@@ -791,6 +792,7 @@ fn parse_style_value(value: &JsValue, context: &mut Context) -> JsResult<Style> 
             out.scale_y = Some(s);
         }
     }
+    out.rotate = read_f32(&o, "rotate", context)?;
 
     let ff = o.get(js_string!("fontFamily"), context)?;
     if !ff.is_undefined() {

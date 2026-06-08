@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use menu_core_host::device::FramebufferConfig;
 use menu_core_host::error::DeviceError;
 use menu_core_host::frame::{CopyOpts, Frame};
-use menu_core_host::protocol::{BlendMode, Filter, Rect, Rgba};
+use menu_core_host::protocol::{BlendMode, Filter, Rect, Rgba, affine::MAX_SRC_DIM};
 
 use crate::font::FontRegistry;
 use crate::image::{CachedImage, ImageRegistry};
@@ -212,7 +212,10 @@ fn paint_subtree<'a>(
             }
         }
         NodeKind::Img { src } => {
-            if rect_intersects_clip(dx, dy, dw, dh, clip) {
+            // Cull against the rotated AABB (collapses to the scale box
+            // when unrotated) so a rotated icon's corners aren't culled.
+            let (ax, ay, aw, ah) = xf.apply_to_aabb(lay.x, lay.y, lay.w, lay.h);
+            if rect_intersects_clip(clamp_u16(ax), clamp_u16(ay), clamp_u16(aw), clamp_u16(ah), clip) {
                 frame = paint_img(src, lay, images, opacity_u8, xf, frame)?;
             }
         }
@@ -272,6 +275,32 @@ fn paint_img<'a>(
         return Ok(frame);
     }
     let (tx, ty, tw, th) = xf.apply_to_rect(lay.x, lay.y, lay.w, lay.h);
+
+    // Rotated images render through the affine blit (rotation + scale,
+    // bilinear). The staged source is capped at 128×128 (§5.7); larger
+    // sources fall through to the unrotated nearest path below so the
+    // UI degrades gracefully instead of erroring.
+    if xf.has_rotation() && src_w <= MAX_SRC_DIM && src_h <= MAX_SRC_DIM {
+        let cx = (tx + tw * 0.5).round() as i32;
+        let cy = (ty + th * 0.5).round() as i32;
+        // Uniform scale from the source to the (already scale-
+        // transformed) display box. Menu icons are square; width drives
+        // both axes.
+        let scale = (tw / src_w as f32).max(0.0) as f64;
+        // Affine v1 has no tint (RGBA-only), so opacity can't be applied
+        // here. Use SrcAlpha so the rotated-out corners stay transparent
+        // and the bilinear edges composite cleanly over the wallpaper.
+        return frame.blit_affine_rotate(
+            &texture,
+            Rect::new(0, 0, src_w, src_h),
+            xf.rotation as f64,
+            scale,
+            cx,
+            cy,
+            BlendMode::SrcAlpha,
+        );
+    }
+
     let dst = Rect::new(
         clamp_u16(tx),
         clamp_u16(ty),

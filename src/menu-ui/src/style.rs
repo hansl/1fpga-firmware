@@ -128,6 +128,12 @@ pub struct Style {
     pub scale_x: Option<f32>,
     pub scale_y: Option<f32>,
 
+    // Rotation in degrees (clockwise), about the element's centre.
+    // Applied only to <img> nodes today (rendered via the affine blit);
+    // ignored for div/text, which paint axis-aligned. Inherited
+    // additively by descendants, like scale is multiplicatively.
+    pub rotate: Option<f32>,
+
     // ---- Text --------------------------------------------------------
     pub color: Option<Rgba>,
     /// Font family — looked up in `FontRegistry`. `None` means use
@@ -177,6 +183,7 @@ impl Style {
         if patch.overflow.is_some()        { self.overflow = patch.overflow; }
         if patch.scale_x.is_some()         { self.scale_x = patch.scale_x; }
         if patch.scale_y.is_some()         { self.scale_y = patch.scale_y; }
+        if patch.rotate.is_some()          { self.rotate = patch.rotate; }
         if patch.color.is_some()           { self.color = patch.color; }
         if patch.font_family.is_some()     { self.font_family = patch.font_family.clone(); }
         if patch.font_size.is_some()       { self.font_size = patch.font_size; }
@@ -234,16 +241,28 @@ fn walk_opacity(
 pub struct Transform {
     pub scale_x: f32,
     pub scale_y: f32,
+    /// Accumulated rotation in degrees (clockwise), about the rect
+    /// centre. Only <img> nodes act on it (via the affine blit).
+    pub rotation: f32,
 }
 
 impl Transform {
-    pub const IDENTITY: Self = Self { scale_x: 1.0, scale_y: 1.0 };
+    pub const IDENTITY: Self = Self { scale_x: 1.0, scale_y: 1.0, rotation: 0.0 };
 
     #[inline]
     pub fn is_identity(self) -> bool {
         // Use a small tolerance — scale values come from f32 tweens
-        // and may end at 1.0 + epsilon after interpolation.
+        // and may end at 1.0 + epsilon after interpolation. Rotation is
+        // intentionally excluded: it doesn't change the axis-aligned
+        // scale box (it's handled separately by the img paint path), so
+        // a pure rotation must not flip div/text onto the scaled path.
         (self.scale_x - 1.0).abs() < 1e-4 && (self.scale_y - 1.0).abs() < 1e-4
+    }
+
+    /// True when this transform has a non-trivial rotation.
+    #[inline]
+    pub fn has_rotation(self) -> bool {
+        self.rotation.abs() > 1e-3
     }
 
     /// Apply this transform to a layout rect, scaling around its
@@ -262,6 +281,28 @@ impl Transform {
         let new_x = cx - new_w * 0.5;
         let new_y = cy - new_h * 0.5;
         (new_x, new_y, new_w, new_h)
+    }
+
+    /// Like [`apply_to_rect`](Self::apply_to_rect) but returns the
+    /// axis-aligned bounding box of the scaled-then-rotated rect (about
+    /// its centre). Used by damage tracking and the paint cull so a
+    /// rotated image's full footprint — which extends beyond the scale
+    /// box (up to ~1.41× at 45°) — is covered. Collapses to
+    /// `apply_to_rect` when there is no rotation.
+    #[inline]
+    pub fn apply_to_aabb(self, x: f32, y: f32, w: f32, h: f32) -> (f32, f32, f32, f32) {
+        let (sx, sy, sw, sh) = self.apply_to_rect(x, y, w, h);
+        if !self.has_rotation() {
+            return (sx, sy, sw, sh);
+        }
+        let rad = self.rotation.to_radians();
+        let c = rad.cos().abs();
+        let s = rad.sin().abs();
+        let aw = sw * c + sh * s;
+        let ah = sw * s + sh * c;
+        let cx = sx + sw * 0.5;
+        let cy = sy + sh * 0.5;
+        (cx - aw * 0.5, cy - ah * 0.5, aw, ah)
     }
 }
 
@@ -292,6 +333,7 @@ fn walk_transform(
     let here = Transform {
         scale_x: parent.scale_x * sx,
         scale_y: parent.scale_y * sy,
+        rotation: parent.rotation + node.style.rotate.unwrap_or(0.0),
     };
     out.insert(id, here);
     for &child in &node.children {

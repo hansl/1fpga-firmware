@@ -66,6 +66,10 @@ declare module '1fpga:gui' {
     scale?: number;
     scaleX?: number;
     scaleY?: number;
+    // Rotation in degrees (clockwise), about the element centre. Only
+    // <img> elements act on it (rendered via the FPGA affine blit, whose
+    // source is capped at 128×128); ignored for other elements.
+    rotate?: number;
 
     // ---- Text --------------------------------------------------------
     color?: string;
