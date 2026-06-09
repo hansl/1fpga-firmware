@@ -37,7 +37,7 @@ Monorepo with a Rust workspace (13 crates) and NPM workspaces (5 packages).
 ## Build
 
 ### Prerequisites
-- Rust 1.88 stable (via `rust-toolchain.toml`)
+- Rust 1.95.0 — pinned (not floating `stable`) via `rust-toolchain.toml`; bump in lockstep with `docker/armv7/*.Dockerfile`
 - Node.js + npm
 - Docker (for ARM cross-compilation)
 

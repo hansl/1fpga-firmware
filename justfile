@@ -64,6 +64,16 @@ menu-core-image:
 _ensure-menu-core-image:
     @docker image inspect one-fpga-quartus:17.0.2 > /dev/null 2>&1 || just menu-core-image
 
+# Build the musl cross-compile image for host/demo binaries. Bakes the
+# exact toolchain pinned in rust-toolchain.toml (see the Dockerfile) so host
+# builds match the firmware and never float with `stable`.
+menu-host-image:
+    docker build -f docker/armv7/menu-host-musl.Dockerfile -t one-fpga-musl:1.95.0 docker/armv7
+
+# Build the musl image only if it isn't already present.
+_ensure-menu-host-image:
+    @docker image inspect one-fpga-musl:1.95.0 > /dev/null 2>&1 || just menu-host-image
+
 # Compile the menu-core FPGA bitstream (requires cores/menu-core-fpga submodule)
 build-menu-core: _ensure-menu-core-image
     @test -f cores/menu-core-fpga/menu_core.qpf || \
@@ -103,11 +113,11 @@ deploy-menu-core: build-menu-core
 # Cross-compile the menu-core host probe binary for armv7 (musl, static)
 # Uses a separate community image because the device's glibc is older
 # than what the main firmware's bookworm-based image links against.
-build-menu-core-host mode="release-dev":
+build-menu-core-host mode="release-dev": _ensure-menu-host-image
     docker run --rm -t \
         -e RUSTUP_AUTO_INSTALL=0 \
         -v "{{justfile_directory()}}":/home/rust/src \
-        messense/rust-musl-cross:armv7-musleabihf \
+        one-fpga-musl:1.95.0 \
         cargo build --target armv7-unknown-linux-musleabihf --bin one_fpga_menu_core --profile {{mode}} --no-default-features --features=platform_de10
 
 # Deploy the host probe binary to the device
@@ -115,10 +125,11 @@ deploy-menu-core-host mode="release-dev": (build-menu-core-host mode) _kill-fpga
     scp target/armv7-unknown-linux-musleabihf/{{mode}}/one_fpga_menu_core root@{{mister_ip}}:/media/fat/one_fpga_menu_core
 
 # Cross-compile the menu-core demo binary (bouncing-rect animation)
-build-menu-demo mode="release-dev":
+build-menu-demo mode="release-dev": _ensure-menu-host-image
     docker run --rm -t \
+        -e RUSTUP_AUTO_INSTALL=0 \
         -v "{{justfile_directory()}}":/home/rust/src \
-        messense/rust-musl-cross:armv7-musleabihf \
+        one-fpga-musl:1.95.0 \
         cargo build --target armv7-unknown-linux-musleabihf --bin menu_demo --profile {{mode}} --no-default-features --features=platform_de10
 
 # Deploy the menu-core demo binary to the device
@@ -130,11 +141,11 @@ demo-menu-core: _kill-fpga-users
     ssh -t root@{{mister_ip}} '/media/fat/menu_demo'
 
 # Cross-compile the BLIT_AFFINE rotate/scale demo (spinning textured icons)
-build-affine-demo mode="release-dev":
+build-affine-demo mode="release-dev": _ensure-menu-host-image
     docker run --rm -t \
         -e RUSTUP_AUTO_INSTALL=0 \
         -v "{{justfile_directory()}}":/home/rust/src \
-        messense/rust-musl-cross:armv7-musleabihf \
+        one-fpga-musl:1.95.0 \
         cargo build --target armv7-unknown-linux-musleabihf --bin affine_demo --profile {{mode}} --no-default-features --features=platform_de10
 
 # Deploy the affine demo binary to the device
@@ -146,11 +157,11 @@ demo-affine: _kill-fpga-users
     ssh -t root@{{mister_ip}} '/media/fat/affine_demo'
 
 # Cross-compile the scanout jitter probe (static striped FB, PRESENT-only loop)
-build-jitter-probe mode="release-dev":
+build-jitter-probe mode="release-dev": _ensure-menu-host-image
     docker run --rm -t \
         -e RUSTUP_AUTO_INSTALL=0 \
         -v "{{justfile_directory()}}":/home/rust/src \
-        messense/rust-musl-cross:armv7-musleabihf \
+        one-fpga-musl:1.95.0 \
         cargo build --target armv7-unknown-linux-musleabihf --bin jitter_probe --profile {{mode}} --no-default-features --features=platform_de10
 
 # Deploy the jitter probe binary to the device
@@ -158,11 +169,11 @@ deploy-jitter-probe mode="release-dev": (build-jitter-probe mode) _kill-fpga-use
     scp target/armv7-unknown-linux-musleabihf/{{mode}}/jitter_probe root@{{mister_ip}}:/media/fat/jitter_probe
 
 # Cross-compile the menu-ui launcher (React-on-Boa UI framework)
-build-menu-ui mode="release-dev":
+build-menu-ui mode="release-dev": _ensure-menu-host-image
     docker run --rm -t \
         -e RUSTUP_AUTO_INSTALL=0 \
         -v "{{justfile_directory()}}":/home/rust/src \
-        messense/rust-musl-cross:armv7-musleabihf \
+        one-fpga-musl:1.95.0 \
         cargo build --target armv7-unknown-linux-musleabihf --bin menu_ui --profile {{mode}} --no-default-features --features=platform_de10
 
 # Kill anything that might be holding the FPGA registers (MiSTer

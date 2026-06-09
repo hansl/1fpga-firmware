@@ -1,5 +1,10 @@
 [toolchain]
-channel = "stable"
+# Pinned (NOT "stable") so every build — the de10 firmware image and the
+# musl host-binary image — uses the identical rustc. A floating "stable"
+# silently diverged the two images and broke host builds when stable rolled
+# to 1.96 while the images stayed on 1.95. Bump in lockstep with the docker
+# images (docker/armv7/*.Dockerfile) and CLAUDE.md.
+channel = "1.95.0"
 #channel = "nightly"
 components = ["rustfmt", "rustc", "rust-std", "clippy"]
 targets = ["armv7-unknown-linux-gnueabihf"]
