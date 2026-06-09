@@ -43,6 +43,11 @@ pub const LAYER_COMMIT: usize = 0x6C;
 /// should advance by `count` every frame once the compositor is live.
 /// Pure observability; the renderer does not depend on it.
 pub const LAYER_DEBUG: usize = 0x70;
+/// Base address of the opaque wallpaper layer (scanout compositor,
+/// Phase B). The compositor blends the content framebuffer over this
+/// layer when `CONTROL_COMPOSITE` is set. Full-screen BGRA8888, same
+/// stride as the content FB (`FB_STRIDE`).
+pub const WALLPAPER_ADDR: usize = 0x74;
 pub const PERF_CYCLES_BUSY: usize = 0x80;
 pub const PERF_CMDS_EXEC: usize = 0x84;
 pub const PERF_BYTES_READ: usize = 0x88;
@@ -60,6 +65,10 @@ pub const STATUS_VSYNC: u32 = 1 << 3;
 pub const CONTROL_ENABLE: u32 = 1 << 0;
 pub const CONTROL_SOFT_RESET: u32 = 1 << 1;
 pub const CONTROL_CLEAR_ERROR: u32 = 1 << 2;
+/// Enable the scanout compositor's content-over-wallpaper blend
+/// (Phase B). When clear, the compositor scans out the content FB
+/// directly (no wallpaper read/blend). Latched into `CONTROL[8]`.
+pub const CONTROL_COMPOSITE: u32 = 1 << 8;
 
 // --- FB_STATE field extraction (§3.2) ----------------------------------
 
@@ -177,5 +186,7 @@ mod tests {
         assert_eq!(LAYER_TABLE_BASE, 0x68);
         assert_eq!(LAYER_COMMIT, 0x6C);
         assert_eq!(LAYER_DEBUG, 0x70);
+        assert_eq!(WALLPAPER_ADDR, 0x74);
+        assert_eq!(CONTROL_COMPOSITE, 1 << 8);
     }
 }

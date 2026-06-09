@@ -57,6 +57,13 @@ struct Flags {
     /// (only Ctrl+C terminates).
     #[clap(long, default_value_t = 0)]
     max_seconds: u32,
+
+    /// Phase B blend test: upload a gradient wallpaper, enable the
+    /// scanout compositor blend, and clear the content framebuffer to
+    /// TRANSPARENT instead of opaque — the bouncing (opaque) squares
+    /// then appear over the wallpaper wherever content alpha is zero.
+    #[clap(long, default_value_t = false)]
+    composite: bool,
 }
 
 fn parse_u32_hex_or_dec(s: &str) -> Result<u32, std::num::ParseIntError> {
@@ -165,12 +172,40 @@ fn run(flags: Flags) -> Result<(), DeviceError> {
     device.configure_framebuffer(fb)?;
     device.start()?;
 
+    // Phase B: optionally upload a gradient wallpaper layer and enable the
+    // scanout compositor blend. With compositing on, the content clear is
+    // transparent so the wallpaper shows through behind the squares.
+    if flags.composite {
+        let w = info.width as usize;
+        let h = info.height as usize;
+        let stride = fb.stride as usize;
+        let mut wp = vec![0u8; stride * h];
+        for y in 0..h {
+            let row = &mut wp[y * stride..y * stride + w * 4];
+            for x in 0..w {
+                let px = &mut row[x * 4..x * 4 + 4];
+                // BGRA8888, little-endian: [B, G, R, A].
+                px[0] = ((y * 255) / h.max(1)) as u8;   // B ramps top→bottom
+                px[1] = 0x30;                            // G constant
+                px[2] = ((x * 255) / w.max(1)) as u8;   // R ramps left→right
+                px[3] = 0xFF;                            // opaque
+            }
+        }
+        device.upload_wallpaper(&wp, fb.stride, info.height)?;
+        device.set_composite(true);
+        info!("menu_demo: compositing ON — gradient wallpaper behind transparent content");
+    }
+
     info!(
         "menu_demo: {}×{} fb, {} particles, {} px squares",
         info.width, info.height, flags.particles, flags.size
     );
 
-    let bg = Rgba::new(0x10, 0x10, 0x18, 0xFF);
+    let bg = if flags.composite {
+        Rgba::new(0, 0, 0, 0) // transparent → wallpaper shows through
+    } else {
+        Rgba::new(0x10, 0x10, 0x18, 0xFF)
+    };
     let fb_w = info.width as f32;
     let fb_h = info.height as f32;
     let size_f = flags.size as f32;

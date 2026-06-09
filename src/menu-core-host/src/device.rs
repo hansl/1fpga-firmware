@@ -365,6 +365,69 @@ impl Device {
         })
     }
 
+    /// Upload a wallpaper image into DDR and point the scanout
+    /// compositor's opaque wallpaper layer at it (Phase B). `pixels` is
+    /// BGRA8888 packed at `stride` bytes/row for `height` rows; `stride`
+    /// MUST equal the content framebuffer's `FB_STRIDE` (the compositor
+    /// shares a single stride across both layers). The buffer is
+    /// allocated once from the texture pool and persists for the
+    /// device's lifetime. Returns its physical address. Pair with
+    /// [`Self::set_composite`] to turn the blend on.
+    pub fn upload_wallpaper(
+        &mut self,
+        pixels: &[u8],
+        stride: u32,
+        height: u16,
+    ) -> Result<u32, DeviceError> {
+        let needed = (stride as usize) * (height as usize);
+        if pixels.len() < needed {
+            return Err(DeviceError::TextureDataTruncated {
+                expected: needed,
+                got: pixels.len(),
+            });
+        }
+        if self.tex_pool_map.is_none() {
+            self.init_texture_storage()?;
+        }
+        let phys = self
+            .tex_alloc
+            .alloc(needed as u32, TEX_BURST_ALIGN)
+            .map_err(|e| match e {
+                AllocError::OutOfMemory {
+                    requested,
+                    remaining,
+                } => DeviceError::TexturePoolExhausted {
+                    needed: requested,
+                    free: remaining,
+                },
+                AllocError::BadAlignment(_) => unreachable!("64 is power of two"),
+            })?;
+        let pool_base_phys = self.cfg.base_phys_addr + mem::TEX_POOL_OFFSET as u32;
+        let offset_in_pool = (phys - pool_base_phys) as usize;
+        let pool_map = self.tex_pool_map.as_mut().expect("init checked above");
+        // SAFETY: bump allocator keeps `phys + needed <= pool end`, so the
+        // dst window is in bounds; volatile byte copy into /dev/mem.
+        unsafe {
+            let dst = pool_map.as_mut_ptr().add(offset_in_pool);
+            volatile_copy_to_devmem(dst, &pixels[..needed]);
+        }
+        self.regs.write32(registers::WALLPAPER_ADDR, phys);
+        Ok(phys)
+    }
+
+    /// Enable or disable the scanout compositor's content-over-wallpaper
+    /// blend (`CONTROL[8]`, Phase B). Read-modify-write so `CONTROL.ENABLE`
+    /// is preserved — call after [`Self::start`].
+    pub fn set_composite(&mut self, on: bool) {
+        let cur = self.regs.read32(registers::CONTROL);
+        let next = if on {
+            cur | registers::CONTROL_COMPOSITE
+        } else {
+            cur & !registers::CONTROL_COMPOSITE
+        };
+        self.regs.write32(registers::CONTROL, next);
+    }
+
     fn init_texture_storage(&mut self) -> Result<(), DeviceError> {
         let pool_phys = self.cfg.base_phys_addr + mem::TEX_POOL_OFFSET as u32;
         let table_phys = self.cfg.base_phys_addr + mem::TEX_TABLE_OFFSET as u32;
