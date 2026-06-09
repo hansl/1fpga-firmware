@@ -672,126 +672,60 @@ wire         bob_deint;
 `ifndef MISTER_DEBUG_NOHDMI
 	wire clk_hdmi  = hdmi_clk_out;
 
-	ascal 
-	#(
-		.RAMBASE(32'h20000000),
-	`ifdef MISTER_SMALL_VBUF
-		.RAMSIZE(32'h00200000),
-	`else
-		.RAMSIZE(32'h00800000),
-	`endif
-	`ifndef MISTER_FB
-		.PALETTE2("false"),
-	`else
-		`ifndef MISTER_FB_PALETTE
-			.PALETTE2("false"),
-		`endif
-	`endif
-	`ifdef MISTER_DISABLE_ADAPTIVE
-		.ADAPTIVE("false"),
-	`endif
-	`ifdef MISTER_DOWNSCALE_NN
-		.DOWNSCALE_NN("true"),
-	`endif
-		.FRAC(8),
-		// Deepen ASCAL's vbuf scanout read-ahead from the 256-byte
-		// default to 2048 (~1024 px buffered). This is the menu-core
-		// fork; the original `ifdef MENU_CORE` guard never had the macro
-		// defined, so the bump was inert. The deeper buffer gives the
-		// line-end reads enough lead time to ride out HPS DDR3
-		// contention — the cause of the right-edge scanout jitter.
-		.N_BURST(2048),
-		.N_DW(128),
-		.N_AW(28)
-	)
-	ascal
+	// ---- Scanout compositor (replaces ASCAL) -------------------------
+	// The self-contained menu core renders native 1080p with no scaling,
+	// so the ASCAL scaler is removed. The compositor reads the BGRA8888
+	// framebuffer from DDR over the vbuf 128-bit port and drives the HDMI
+	// pixel stream (hdmi_data / hs / vs / de / vbl) directly at clk_hdmi,
+	// feeding the existing shadowmask → OSD → HDMI_TX tail unchanged.
+	// FB base/stride come from the core's MISTER_FB regs (FB_BASE/STRIDE).
+
+	// FB geometry (clk_sys regs) → clk_100m read domain. Stable except a
+	// once-per-frame change at PRESENT/vblank; latched at frame start.
+	reg [31:0] comp_fb_base_s0,  comp_fb_base_s1;
+	reg [13:0] comp_fb_stride_s0, comp_fb_stride_s1;
+	always @(posedge clk_100m) begin
+		comp_fb_base_s0   <= FB_BASE;   comp_fb_base_s1   <= comp_fb_base_s0;
+		comp_fb_stride_s0 <= FB_STRIDE; comp_fb_stride_s1 <= comp_fb_stride_s0;
+	end
+
+	// Reset synchronisers: assert async on reset_req, deassert in-domain.
+	(* preserve *) reg [1:0] comp_h_rst;
+	always @(posedge clk_hdmi or posedge reset_req) begin
+		if (reset_req) comp_h_rst <= 2'b00;
+		else           comp_h_rst <= {comp_h_rst[0], 1'b1};
+	end
+	(* preserve *) reg [1:0] comp_a_rst;
+	always @(posedge clk_100m or posedge reset_req) begin
+		if (reset_req) comp_a_rst <= 2'b00;
+		else           comp_a_rst <= {comp_a_rst[0], 1'b1};
+	end
+
+	compositor u_compositor
 	(
-		.reset_na   (~reset_req),
-		.run        (1),
-		.freeze     (freeze),
-		.bob_deint  (bob_deint),
+		.hdmi_clk   (clk_hdmi),
+		.hdmi_rst_n (comp_h_rst[1]),
+		.hdmi_d     (hdmi_data),
+		.hdmi_hs    (hdmi_hs),
+		.hdmi_vs    (hdmi_vs),
+		.hdmi_de    (hdmi_de),
+		.hdmi_vbl   (hdmi_vbl),
+		.hdmi_brd   (hdmi_brd),
 
-		.i_clk    (clk_ihdmi),
-		.i_ce     (ce_hpix),
-		.i_r      (hr_out),
-		.i_g      (hg_out),
-		.i_b      (hb_out),
-		.i_hs     (hhs_fix),
-		.i_vs     (hvs_fix),
-		.i_fl     (f1),
-		.i_de     (hde_emu),
-		.iauto    (1),
-		.himin    (0),
-		.himax    (0),
-		.vimin    (0),
-		.vimax    (0),
+		.avl_clk           (clk_100m),
+		.avl_rst_n         (comp_a_rst[1]),
+		.avl_address       (vbuf_address),
+		.avl_burstcount    (vbuf_burstcount),
+		.avl_read          (vbuf_read),
+		.avl_waitrequest   (vbuf_waitrequest),
+		.avl_readdata      (vbuf_readdata),
+		.avl_readdatavalid (vbuf_readdatavalid),
+		.avl_write         (vbuf_write),
+		.avl_writedata     (vbuf_writedata),
+		.avl_byteenable    (vbuf_byteenable),
 
-		.o_clk    (clk_hdmi),
-		.o_ce     (scaler_out),
-		.o_r      (hdmi_data[23:16]),
-		.o_g      (hdmi_data[15:8]),
-		.o_b      (hdmi_data[7:0]),
-		.o_hs     (hdmi_hs),
-		.o_vs     (hdmi_vs),
-		.o_de     (hdmi_de),
-		.o_vbl    (hdmi_vbl),
-		.o_brd    (hdmi_brd),
-		.o_lltune (lltune),
-		.htotal   (WIDTH + HFP + HBP + HS[11:0]),
-		.hsstart  (WIDTH + HFP),
-		.hsend    (WIDTH + HFP + HS[11:0]),
-		.hdisp    (WIDTH),
-		.hmin     (hmin),
-		.hmax     (hmax),
-		.vtotal   (HEIGHT + VFP + VBP + VS[11:0]),
-		.vsstart  (HEIGHT + VFP),
-		.vsend    (HEIGHT + VFP + VS[11:0]),
-		.vdisp    (HEIGHT),
-		.vmin     (vmin),
-		.vmax     (vmax),
-		.vrr      (vrr_mode),
-		.vrrmax   (HEIGHT + VBP + VS[11:0] + 12'd1),
-		.swblack  (hdmi_blackout),
-
-		.mode     ({~lowlat,LFB_EN ? LFB_FLT : |scaler_flt,2'b00}),
-		.poly_clk (clk_sys),
-		.poly_a   (coef_addr),
-		.poly_dw  (coef_data),
-		.poly_wr  (coef_wr),
-
-		.pal1_clk (clk_pal),
-		.pal1_dw  (pal_d),
-		.pal1_a   (pal_a),
-		.pal1_wr  (pal_wr),
-
-	`ifdef MISTER_FB
-		`ifdef MISTER_FB_PALETTE
-			.pal2_clk (fb_pal_clk),
-			.pal2_dw  (fb_pal_d),
-			.pal2_dr  (fb_pal_q),
-			.pal2_a   (fb_pal_a),
-			.pal2_wr  (fb_pal_wr),
-			.pal_n    (fb_en),
-		`endif
-	`endif
-
-		.o_fb_ena         (FB_EN),
-		.o_fb_hsize       (FB_WIDTH),
-		.o_fb_vsize       (FB_HEIGHT),
-		.o_fb_format      (FB_FMT),
-		.o_fb_base        (FB_BASE),
-		.o_fb_stride      (FB_STRIDE),
-
-		.avl_clk          (clk_100m),
-		.avl_waitrequest  (vbuf_waitrequest),
-		.avl_readdata     (vbuf_readdata),
-		.avl_readdatavalid(vbuf_readdatavalid),
-		.avl_burstcount   (vbuf_burstcount),
-		.avl_writedata    (vbuf_writedata),
-		.avl_address      (vbuf_address),
-		.avl_write        (vbuf_write),
-		.avl_read         (vbuf_read),
-		.avl_byteenable   (vbuf_byteenable)
+		.fb_base    (comp_fb_base_s1),
+		.fb_stride  (comp_fb_stride_s1)
 	);
 `endif
 
@@ -960,7 +894,10 @@ always @(posedge clk_vid) begin
 end
 
 `ifndef MISTER_DEBUG_NOHDMI
-	wire [15:0] lltune;
+	// ASCAL removed (compositor drives HDMI). lltune (its frame-rate match
+	// feedback) is gone → tie 0 so pll_hdmi_adj makes no adjustment and the
+	// HDMI PLL free-runs at its nominal 1080p60 148.5 MHz.
+	wire [15:0] lltune = 16'd0;
 	pll_hdmi_adj pll_hdmi_adj
 	(
 		.clk(FPGA_CLK1_50),

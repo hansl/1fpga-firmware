@@ -252,95 +252,27 @@ pll pll_inst (
 assign CLK_VIDEO = clk_video;
 
 ////////////////////////////////////////////////////////////////////////////
-// Compositor scanout → VGA_* → ASCAL → HDMI.
+// Scanout compositor.
 //
-// Runs on clk_video (100 MHz) for native-1080p output. Walks the
-// on-chip layer cache (filled by layer_dma on clk_sys each frame)
-// and paints solid-colour layers over a black background, one
-// pixel per clk_video cycle. The cache read port is owned by the
-// compositor; during each HBlank it builds the active list for the
-// next scanline (see compositor.sv + scanline_filter.sv), and during
-// the active region a parallel comparator picks the topmost match.
+// The compositor now lives in the framework half (sys/sys_top.v), where it
+// replaces ASCAL: it reads the framebuffer from DDR over the vbuf 128-bit
+// port and drives the HDMI pixel stream directly at clk_hdmi (148.5 MHz).
+// This core half no longer drives any analog/VGA video path — the
+// DE10-Nano has no VGA output, and the HDMI tail (shadowmask → OSD →
+// HDMI_TX) is fed by the sys_top compositor. VGA_* are tied benign.
 //
-// We deliberately bypass the framework's video_mixer (its always-
-// synthesised scandoubler + 4×-pixel CLK_VIDEO rule made timing
-// closure impossible at the rates we want for native 1080p).
+// Framebuffer geometry still reaches the compositor through the MISTER_FB
+// ports (FB_BASE / FB_STRIDE / FB_WIDTH / FB_HEIGHT) driven below; sys_top
+// synchronises them into the compositor's clk_100m read domain.
 ////////////////////////////////////////////////////////////////////////////
 
-wire [7:0] comp_r, comp_g, comp_b;
-wire       comp_hs, comp_vs, comp_hb, comp_vb;
-wire       comp_ce_pix;
-wire [7:0]   comp_cache_slot;
-wire [255:0] comp_cache_data;
-// Texture sampler interface (Phase 2b step 2). Compositor (clk_video)
-// produces these; texture_unit (clk_sys) consumes them via the CDC
-// synchronisers below.
-wire         comp_tex_kick;
-wire [15:0]  comp_tex_id;
-wire [15:0]  comp_tex_src_x;
-wire [15:0]  comp_tex_ty;
-wire [11:0]  comp_tex_dst_w;
-wire [31:0]  comp_tex_tint;
-wire [1:0]   comp_tex_buffer_sel;
-// busy-sync from texture_unit (clk_sys → clk_video) for the
-// dispatcher's handshake.
-wire         tex_unit_busy_sync_video;
-// Line buffer read ports (clk_video). 4 parallel reads, one per
-// line buffer. MAX_TEXTURED = 4.
-wire [9:0]   comp_line_buf_addr [3:0];
-wire [63:0]  comp_line_buf_data [3:0];
-
-// Reset bridge: pll_locked is asynchronous to clk_video, so feeding
-// it raw as rst_n would risk recovery/removal violations at the
-// faster clock. Standard pattern: assert async (low), deassert sync.
-(* preserve *) logic comp_rst_n_sync_0;
-(* preserve *) logic comp_rst_n_sync_1;
-always_ff @(posedge clk_video or negedge pll_locked) begin
-    if (!pll_locked) begin
-        comp_rst_n_sync_0 <= 1'b0;
-        comp_rst_n_sync_1 <= 1'b0;
-    end else begin
-        comp_rst_n_sync_0 <= 1'b1;
-        comp_rst_n_sync_1 <= comp_rst_n_sync_0;
-    end
-end
-wire comp_rst_n = comp_rst_n_sync_1;
-
-compositor u_compositor (
-	.clk             (clk_video),
-	.rst_n           (comp_rst_n),
-	.ce_pix          (comp_ce_pix),
-	.r               (comp_r),
-	.g               (comp_g),
-	.b               (comp_b),
-	.hsync           (comp_hs),
-	.vsync           (comp_vs),
-	.hblank          (comp_hb),
-	.vblank          (comp_vb),
-	.cache_slot_o    (comp_cache_slot),
-	.cache_data_i    (comp_cache_data),
-	.layer_count_i   (9'd0),
-	.tex_kick_o          (comp_tex_kick),
-	.tex_id_o            (comp_tex_id),
-	.tex_src_x_o         (comp_tex_src_x),
-	.tex_ty_o            (comp_tex_ty),
-	.tex_dst_w_o         (comp_tex_dst_w),
-	.tex_tint_color_o    (comp_tex_tint),
-	.tex_buffer_sel_o    (comp_tex_buffer_sel),
-	.tex_unit_busy_sync_i(tex_unit_busy_sync_video),
-	.line_buf_addr_o     (comp_line_buf_addr),
-	.line_buf_data_i     (comp_line_buf_data)
-);
-
-// Compositor drives VGA_* directly. CE_PIXEL is held high because
-// CLK_VIDEO == pixel rate; ASCAL captures every clock.
-assign VGA_R   = comp_r;
-assign VGA_G   = comp_g;
-assign VGA_B   = comp_b;
-assign VGA_HS  = comp_hs;
-assign VGA_VS  = comp_vs;
-assign VGA_DE  = ~(comp_hb | comp_vb);
-assign CE_PIXEL = comp_ce_pix; // currently always 1; kept symbolic
+assign VGA_R    = 8'd0;
+assign VGA_G    = 8'd0;
+assign VGA_B    = 8'd0;
+assign VGA_HS   = 1'b0;
+assign VGA_VS   = 1'b0;
+assign VGA_DE   = 1'b0;
+assign CE_PIXEL = 1'b1;  // CLK_VIDEO == pixel rate for the framework
 
 ////////////////////////////////////////////////////////////////////////////
 // HPS I/O.
@@ -777,32 +709,10 @@ blit_engine u_blit_engine_1 (
     .ddram_dout_valid_i (DDRAM2_DOUT_READY)
 );
 
-////////////////////////////////////////////////////////////////////////////
-// Compositor inputs tied off (compositor-v2 removed).
-//
-// The compositor is retained only as the VGA-timing source; MISTER_FB
-// drives the actual HDMI scanout from DDR (ASCAL ignores the VGA stream
-// while FB_EN=1). Its abandoned compositor-v2 feeders — layer_cache,
-// layer_dma, texture_unit and the 4 line buffers, plus all their CDC
-// synchronisers — are removed. Feeding the compositor zero layers and
-// zero texel data makes it emit a black frame with valid sync.
-////////////////////////////////////////////////////////////////////////////
-assign comp_cache_data = 256'd0;
-assign comp_line_buf_data[0] = 64'd0;
-assign comp_line_buf_data[1] = 64'd0;
-assign comp_line_buf_data[2] = 64'd0;
-assign comp_line_buf_data[3] = 64'd0;
-assign tex_unit_busy_sync_video = 1'b0;
-
-// Compositor texture/cache outputs now have no consumers.
-wire _unused_comp = &{1'b0, comp_cache_slot, comp_tex_kick, comp_tex_id,
-                      comp_tex_src_x, comp_tex_ty, comp_tex_dst_w,
-                      comp_tex_tint, comp_tex_buffer_sel,
-                      comp_line_buf_addr[0], comp_line_buf_addr[1],
-                      comp_line_buf_addr[2], comp_line_buf_addr[3], 1'b0};
-
-// Layer registers no longer have consumers (reg_tex_table_addr is still
-// used by the ring fetcher for COPY_RECT descriptors, so not listed).
+// Layer registers are not consumed in this core half yet — the multi-layer
+// compositor reads the LAYER_TABLE path directly in sys_top in a later
+// phase. reg_tex_table_addr IS used by the ring fetcher for COPY_RECT
+// descriptors, so it is not listed here.
 wire _unused_layer_regs = &{1'b0, reg_layer_count, reg_layer_table_base,
                             reg_layer_active, 1'b0};
 
@@ -899,12 +809,13 @@ wire _unused_blit1 = &{1'b0, blit1_busy, 1'b0};
 // the fb_swapper says is currently the display.
 //
 // FB_FORMAT = 5'b10110 = BGR, 32bpp (matches our BGRA8888 buffers).
-// Values cribbed from the pre-compositor menu_core.sv at 1118af0.
 //
-// The compositor still drives VGA_* but the framework's
-// LFB_EN-priority logic makes MISTER_FB win at the HDMI mux when
-// FB_EN=1, so VGA_* output is harmless overhead.
-assign FB_EN          = 1'b1;
+// FB_EN=0: the framework's MISTER_FB hardware scanout is disabled — our
+// own compositor in sys_top owns the vbuf port and drives HDMI. We still
+// publish the framebuffer geometry (BASE/WIDTH/HEIGHT/STRIDE) because the
+// sys_top compositor reads FB_BASE/FB_STRIDE for its scanout, and the
+// framework latches them into its FB_* regs regardless of FB_EN.
+assign FB_EN          = 1'b0;
 assign FB_FORMAT      = 5'b10110;
 assign FB_WIDTH       = reg_fb_width;
 assign FB_HEIGHT      = reg_fb_height;

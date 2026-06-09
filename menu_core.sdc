@@ -24,12 +24,21 @@ set_clock_groups -asynchronous \
     -group [get_clocks {pll_audio|*|divclk}] \
     -group [get_clocks {*|h2f_user0_clk}]
 
-# CDC synchroniser between clk_sys (50 MHz) and clk_video (100 MHz).
-# The first stage accepts metastability; the second produces a stable,
-# late-arriving value. Marking the first stage as false-path-to keeps
-# Quartus from trying to close timing on the inter-domain leg.
-# (The compositor-v2 layer/texture CDC chains were removed.)
-set_false_path -to [get_registers {emu:emu|comp_rst_n_sync_0}]
+# CDC false-paths for the scanout compositor (sys_top|u_compositor), which
+# replaced ASCAL. Each marks the FIRST stage of a synchroniser chain so
+# Quartus doesn't try to close timing on the inter-domain leg. (The old
+# compositor-v2 lived in emu as comp_rst_n_sync_0; it's gone.)
+#
+# FB geometry: clk_sys regs → clk_100m read domain (first sync stage).
+set_false_path -to [get_registers {*comp_fb_base_s0[*]}]
+set_false_path -to [get_registers {*comp_fb_stride_s0[*]}]
+# Reset deassertion bridges (async assert, sync deassert) — first stage.
+set_false_path -to [get_registers {*comp_h_rst[0]}]
+set_false_path -to [get_registers {*comp_a_rst[0]}]
+# Frame-start toggle clk_hdmi → clk_100m (first sync stage).
+set_false_path -to [get_registers {*frame_tgl_a0}]
+# Gray-coded consumed-line count clk_hdmi → clk_100m (first sync stage).
+set_false_path -to [get_registers {*cons_gray_a0[*]}]
 
 # f2sdram ram2 boundary: ram2 was re-clocked from pll_audio to clk_sys
 # for blit_engine_1. The f2sdram_safe_terminator in sysmem.sv handles
