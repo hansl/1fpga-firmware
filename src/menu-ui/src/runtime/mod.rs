@@ -309,6 +309,12 @@ pub struct RunConfig {
     /// HDMI mode — so smaller render resolutions trade visual
     /// crispness for proportional reduction in per-frame DDR3 work.
     pub render_res: Option<(u16, u16)>,
+    /// Wallpaper PNG to upload to the scanout compositor's wallpaper layer
+    /// (Phase C). When it loads, compositing is enabled and the content
+    /// framebuffer is cleared transparent (the wallpaper is no longer
+    /// painted into content every frame). When `None` or the file is
+    /// missing, content clears opaque as before.
+    pub wallpaper: Option<PathBuf>,
 }
 
 #[derive(Debug, Error)]
@@ -375,6 +381,26 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         "menu-ui {}: device open, HDMI {}×{}, FB {}×{}",
         BUILD_ID, info.width, info.height, fb.width, fb.height,
     );
+
+    // Phase C: upload the wallpaper to the scanout compositor's layer and
+    // enable the hardware blend, so the content FB never carries it (the
+    // per-frame full-FB wallpaper copy was the menu-fps bottleneck). On
+    // any failure compositing stays off and content clears opaque, as
+    // before — see `paint::paint`.
+    let compositing = match cfg.wallpaper.as_ref() {
+        Some(p) if crate::image::upload_wallpaper_layer(
+            &mut device,
+            &p.to_string_lossy(),
+            fb.width,
+            fb.height,
+            fb.stride,
+        ) => {
+            device.set_composite(true);
+            info!("compositing ON: wallpaper is a hardware layer; content clears transparent");
+            true
+        }
+        _ => false,
+    };
 
     // 2. Load the JS bundle.
     let bundle: Vec<u8> = match cfg.bundle_override.as_ref() {
@@ -824,6 +850,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                             &opacities,
                             &transforms,
                             Some(clip_rect),
+                            compositing,
                             f,
                         )
                     })?;
@@ -847,6 +874,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                         &opacities,
                         &transforms,
                         None,
+                        compositing,
                         frame,
                     )
                 })?

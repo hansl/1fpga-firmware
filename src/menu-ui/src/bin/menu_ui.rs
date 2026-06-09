@@ -51,6 +51,14 @@ struct Flags {
     /// proportionally — useful on slower mash-FPS at 1080p.
     #[clap(long, value_parser = parse_resolution)]
     render_res: Option<(u16, u16)>,
+
+    /// Wallpaper PNG uploaded to the scanout compositor's wallpaper layer.
+    /// When it loads, the wallpaper becomes a hardware layer and content is
+    /// composited over it — the content framebuffer no longer redraws the
+    /// wallpaper every frame. Defaults to the standard assets path; point
+    /// it at a missing file to disable compositing (content clears opaque).
+    #[clap(long, default_value = "/media/fat/menu_ui_assets/bg.png")]
+    wallpaper: PathBuf,
 }
 
 fn parse_resolution(s: &str) -> Result<(u16, u16), String> {
@@ -104,6 +112,7 @@ fn main() {
         bundle_override: flags.bundle,
         base_phys_addr: flags.base_addr,
         render_res: flags.render_res,
+        wallpaper: Some(flags.wallpaper),
     };
     if let Err(e) = menu_ui::run(cfg) {
         error!("{e}");

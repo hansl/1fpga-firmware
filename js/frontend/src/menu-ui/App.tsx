@@ -15,27 +15,15 @@ import { MenuBar } from './components/MenuBar';
 import { MenuColumn } from './components/MenuColumn';
 import { StatusBar } from './components/StatusBar';
 
-const ASSETS = '/media/fat/menu_ui_assets';
-
 const root: CSSProperties = {
   position: 'relative',
   width: VW,
   height: VH,
-  backgroundColor: '#0a0a14',
-};
-
-const bgImageStyle: CSSProperties = {
-  position: 'absolute',
-  top: 0,
-  left: 0,
-  width: VW,
-  height: VH,
-  // Wallpaper is pre-darkened during PNG conversion (see
-  // src/menu-ui/src/bin/gen_demo_assets.rs) so we can render it
-  // fully opaque here. The FPGA blit takes the Opaque blend fast
-  // path — no dst read per pixel — which more than halves the
-  // background's per-frame DDR3 traffic vs. the previous
-  // `opacity: 0.55 over root_bg` approach.
+  // No background colour: the wallpaper is a hardware scanout-compositor
+  // layer (Phase C), and this full-screen root div must stay transparent so
+  // the compositor's wallpaper shows through. An opaque bg here would paint
+  // over the transparent content clear and hide the wallpaper entirely.
+  // (When compositing is off, the Rust paint path clears to black.)
 };
 
 export function App() {
@@ -96,7 +84,6 @@ export function App() {
 
   return (
     <div style={root}>
-      <img src={`${ASSETS}/bg.png`} style={bgImageStyle} />
       <StatusBar user="hansl" notifications={2} wifi="connected" />
       <MenuBar categories={CATEGORIES} selected={cat} />
       <MenuColumn items={items} selected={item} />

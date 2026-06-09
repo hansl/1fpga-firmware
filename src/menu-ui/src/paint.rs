@@ -102,6 +102,7 @@ pub fn paint<'a>(
     opacities: &HashMap<NodeId, f32>,
     transforms: &HashMap<NodeId, Transform>,
     clip: Option<Rect>,
+    compositing: bool,
     mut frame: Frame<'a>,
 ) -> Result<Frame<'a>, DeviceError> {
     // Background clear. Use the clip-respecting variant so damage
@@ -118,7 +119,18 @@ pub fn paint<'a>(
     // wasted opaque write over every damage rect, on top of which the
     // wallpaper copy then writes again. Falls back to filling when
     // there's no such guaranteed cover (transparent/partial bg).
-    if !has_opaque_covering_child(tree, root, layouts, images, opacities, transforms) {
+    if compositing {
+        // The content FB is the upper compositor layer over the hardware
+        // wallpaper. Clear to transparent (premultiplied alpha 0) so the
+        // wallpaper shows wherever there's no UI; the FPGA blends content
+        // over it at scanout. This replaces the per-frame full-FB wallpaper
+        // copy that was the menu-fps bottleneck.
+        frame = frame.fill_rect(
+            Rect::new(0, 0, fb.width, fb.height),
+            Rgba::TRANSPARENT,
+            BlendMode::Opaque,
+        )?;
+    } else if !has_opaque_covering_child(tree, root, layouts, images, opacities, transforms) {
         let root_bg = tree
             .get(root)
             .and_then(|n| n.style.background_color)

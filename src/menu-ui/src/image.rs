@@ -220,6 +220,46 @@ fn decode_image(src: &str) -> Result<(Vec<u8>, u16, u16, bool), ImageError> {
     Ok((pixels, width, height, src_opaque))
 }
 
+/// Phase C: decode the wallpaper PNG at `path`, fit it to the framebuffer
+/// size, and upload it to the scanout compositor's opaque wallpaper layer
+/// (`Device::upload_wallpaper`). Returns `true` on success — the caller
+/// then enables compositing and clears content to transparent so the
+/// wallpaper shows through where there's no UI. Any failure (missing
+/// asset, decode/upload error) logs a warning and returns `false`, leaving
+/// compositing off (content clears opaque, as before).
+pub(crate) fn upload_wallpaper_layer(
+    device: &mut Device,
+    path: &str,
+    fb_w: u16,
+    fb_h: u16,
+    stride: u32,
+) -> bool {
+    let (pixels, w, h, _opaque) = match decode_image(path) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("wallpaper '{path}' not loaded: {e}");
+            return false;
+        }
+    };
+    // The compositor shares one stride across both layers, so the wallpaper
+    // must be exactly the framebuffer size; stretch-fit if it isn't.
+    let fitted = if (w, h) != (fb_w, fb_h) {
+        resize_bgra(&pixels, w, h, fb_w, fb_h)
+    } else {
+        pixels
+    };
+    match device.upload_wallpaper(&fitted, stride, fb_h) {
+        Ok(addr) => {
+            tracing::info!("wallpaper '{path}' → layer @ {addr:#x} ({fb_w}x{fb_h})");
+            true
+        }
+        Err(e) => {
+            tracing::warn!("wallpaper '{path}' upload failed: {e}");
+            false
+        }
+    }
+}
+
 /// Upload a packed BGRA8888 buffer of `w`×`h` as an RGBA8888 texture.
 fn upload(
     device: &mut Device,
