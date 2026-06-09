@@ -112,15 +112,23 @@ pub fn paint<'a>(
     // bottom of the stack; "opacity 0" on root would expose whatever
     // sat in the FB from a previous frame, which is meaningless for
     // a menu canvas.
-    let root_bg = tree
-        .get(root)
-        .and_then(|n| n.style.background_color)
-        .unwrap_or(Rgba::BLACK);
-    frame = frame.fill_rect(
-        Rect::new(0, 0, fb.width, fb.height),
-        root_bg,
-        BlendMode::Opaque,
-    )?;
+    // Skip the root background fill when the bottom layer (root's first
+    // child) is an opaque, full-FB image — i.e. a wallpaper that will
+    // overwrite these exact pixels anyway. Otherwise the fill is a
+    // wasted opaque write over every damage rect, on top of which the
+    // wallpaper copy then writes again. Falls back to filling when
+    // there's no such guaranteed cover (transparent/partial bg).
+    if !has_opaque_covering_child(tree, root, layouts, images, opacities, transforms) {
+        let root_bg = tree
+            .get(root)
+            .and_then(|n| n.style.background_color)
+            .unwrap_or(Rgba::BLACK);
+        frame = frame.fill_rect(
+            Rect::new(0, 0, fb.width, fb.height),
+            root_bg,
+            BlendMode::Opaque,
+        )?;
+    }
 
     frame = paint_subtree(
         tree,
@@ -136,6 +144,71 @@ pub fn paint<'a>(
         /* skip_root_bg */ true,
     )?;
     Ok(frame)
+}
+
+/// True if `node` has a child that, when painted, opaquely covers the
+/// node's entire layout box — an opaque-texture full-cover `<img>` or an
+/// opaque-background full-cover `<div>`, at full opacity and
+/// untransformed. Such a child is painted on top of the node's own
+/// background, so that background fill is dead pixels and can be
+/// skipped. Applied recursively per node, this peels off the stack of
+/// redundant full-FB fills below an opaque wallpaper (container BLACK →
+/// app `#0a0a14` → wallpaper) — each is covered by the next.
+fn has_opaque_covering_child(
+    tree: &Tree,
+    node_id: NodeId,
+    layouts: &HashMap<NodeId, ComputedLayout>,
+    images: &ImageRegistry,
+    opacities: &HashMap<NodeId, f32>,
+    transforms: &HashMap<NodeId, Transform>,
+) -> bool {
+    let Some(node) = tree.get(node_id) else {
+        return false;
+    };
+    let Some(nlay) = layouts.get(&node_id) else {
+        return false;
+    };
+    for &cid in &node.children {
+        let Some(child) = tree.get(cid) else {
+            continue;
+        };
+        // Full opacity + untransformed, so the child's layout box is
+        // exactly what it paints.
+        if opacities.get(&cid).copied().unwrap_or(1.0) < 0.999 {
+            continue;
+        }
+        let xf = transforms.get(&cid).copied().unwrap_or(Transform::IDENTITY);
+        if !xf.is_identity() || xf.has_rotation() {
+            continue;
+        }
+        let Some(clay) = layouts.get(&cid) else {
+            continue;
+        };
+        // Child layout must contain the node's box.
+        let covers = clay.x <= nlay.x + 0.5
+            && clay.y <= nlay.y + 0.5
+            && clay.x + clay.w >= nlay.x + nlay.w - 0.5
+            && clay.y + clay.h >= nlay.y + nlay.h - 0.5;
+        if !covers {
+            continue;
+        }
+        let opaque = match &child.kind {
+            NodeKind::Img { src } => matches!(
+                images.get(src),
+                Some(CachedImage::Loaded { fully_opaque: true, .. })
+            ),
+            NodeKind::Div => child
+                .style
+                .background_color
+                .map(|c| c.a == 0xFF)
+                .unwrap_or(false),
+            NodeKind::Text { .. } => false,
+        };
+        if opaque {
+            return true;
+        }
+    }
+    false
 }
 
 fn paint_subtree<'a>(
@@ -191,6 +264,10 @@ fn paint_subtree<'a>(
                 && lay.h > 0.5
                 && dw > 0 && dh > 0
                 && rect_intersects_clip(dx, dy, dw, dh, clip)
+                // Skip the fill when an opaque child (the wallpaper, or
+                // an opaque panel) covers this div — its fill would be
+                // overwritten, so it's a wasted opaque write per rect.
+                && !has_opaque_covering_child(tree, id, layouts, images, opacities, transforms)
             {
                 // Clip-respecting: paint::paint may be called
                 // under a damage-rect clip; outside that clip the
