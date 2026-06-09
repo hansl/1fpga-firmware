@@ -75,6 +75,12 @@ module menu_core_regs (
     output logic        layer_active_o,
     output logic [8:0]  layer_count_o,
 
+    // Scanout-compositor config (Phase B). WALLPAPER_ADDR (0x74) is the
+    // base of the opaque wallpaper layer; composite_en is CONTROL[8] and
+    // turns on the content-over-wallpaper blend in the sys_top compositor.
+    output logic [31:0] wallpaper_addr_o,
+    output logic        composite_en_o,
+
     // Compositor observability — surfaces through LAYER_DEBUG (0x70).
     // descriptors_i is a free-running count of layer descriptors the
     // DMA has written into the cache, so the host can verify it is
@@ -119,6 +125,7 @@ module menu_core_regs (
     localparam logic [5:0] IDX_LAYER_TABLE_BASE = 6'h1A;  // 0x68 / 4
     localparam logic [5:0] IDX_LAYER_COMMIT     = 6'h1B;  // 0x6C / 4
     localparam logic [5:0] IDX_LAYER_DEBUG      = 6'h1C;  // 0x70 / 4
+    localparam logic [5:0] IDX_WALLPAPER_ADDR   = 6'h1D;  // 0x74 / 4
 
     // The LW_H2F window is 2 MiB (21-bit address). Our register block
     // sits at host physical 0xFF210000, which is offset 0x10000 within
@@ -171,6 +178,7 @@ module menu_core_regs (
             scratch[IDX_FB0_ADDR]  <= 32'h3000_0000;
             scratch[IDX_FB1_ADDR]  <= 32'h3080_0000;
             scratch[IDX_FB2_ADDR]  <= 32'h3100_0000;
+            scratch[IDX_WALLPAPER_ADDR] <= 32'h3200_0000; // tex-pool region; host overrides
             clear_error_q <= 1'b0;
             ring_kick_q   <= 1'b0;
         end else begin
@@ -233,6 +241,8 @@ module menu_core_regs (
     assign layer_table_base_o = scratch[IDX_LAYER_TABLE_BASE];
     assign layer_active_o     = scratch[IDX_LAYER_COMMIT][31];
     assign layer_count_o      = scratch[IDX_LAYER_COMMIT][8:0];
+    assign wallpaper_addr_o   = scratch[IDX_WALLPAPER_ADDR];
+    assign composite_en_o     = scratch[IDX_CONTROL][8];
 
     // Suppress unused-input warnings.
     wire _unused = &{1'b0, req_read, 1'b0};

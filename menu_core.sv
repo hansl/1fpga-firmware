@@ -162,6 +162,11 @@ module emu
 	input   [6:0] USER_IN,
 	output  [6:0] USER_OUT,
 
+	// Scanout-compositor config (custom ports — the compositor lives in
+	// sys_top, but its layer config is decoded here in the LW_H2F regs).
+	output [31:0] COMP_WP_BASE,   // wallpaper layer base address
+	output        COMP_EN,        // composite enable (content over wallpaper)
+
 	input         OSD_STATUS
 );
 
@@ -274,6 +279,10 @@ assign VGA_VS   = 1'b0;
 assign VGA_DE   = 1'b0;
 assign CE_PIXEL = 1'b1;  // CLK_VIDEO == pixel rate for the framework
 
+// Compositor layer config out to sys_top (wallpaper base + blend enable).
+assign COMP_WP_BASE = reg_wallpaper_addr;
+assign COMP_EN      = reg_composite_en;
+
 ////////////////////////////////////////////////////////////////////////////
 // HPS I/O.
 //
@@ -348,6 +357,8 @@ wire [31:0] reg_tex_table_addr;
 wire [31:0] reg_layer_table_base;
 wire        reg_layer_active;
 wire [8:0]  reg_layer_count;
+wire [31:0] reg_wallpaper_addr;
+wire        reg_composite_en;
 wire [31:0] fetcher_ring_head;
 wire [31:0] fetcher_fence_value;
 wire [31:0] fetcher_error_info;
@@ -406,6 +417,9 @@ menu_core_regs u_menu_core_regs (
     .layer_table_base_o (reg_layer_table_base),
     .layer_active_o     (reg_layer_active),
     .layer_count_o      (reg_layer_count),
+
+    .wallpaper_addr_o   (reg_wallpaper_addr),
+    .composite_en_o     (reg_composite_en),
 
     .layer_descriptors_i (32'd0),
 

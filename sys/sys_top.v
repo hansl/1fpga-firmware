@@ -666,6 +666,13 @@ wire         vbuf_write;
 
 wire  [23:0] hdmi_data;
 wire         hdmi_vs, hdmi_hs, hdmi_de, hdmi_vbl, hdmi_brd;
+
+// Compositor layer config from emu (clk_sys regs): wallpaper base +
+// composite enable. Driven by the emu instance; consumed (synced) by the
+// scanout compositor. Declared outside the HDMI ifdef so the emu instance
+// port connections always resolve.
+wire [31:0] comp_wp_base;
+wire        comp_composite_en;
 wire         freeze;
 wire         bob_deint;
 
@@ -680,13 +687,18 @@ wire         bob_deint;
 	// feeding the existing shadowmask → OSD → HDMI_TX tail unchanged.
 	// FB base/stride come from the core's MISTER_FB regs (FB_BASE/STRIDE).
 
-	// FB geometry (clk_sys regs) → clk_100m read domain. Stable except a
-	// once-per-frame change at PRESENT/vblank; latched at frame start.
+	// FB / wallpaper geometry (clk_sys regs) → clk_100m read domain. Stable
+	// except a once-per-frame change at PRESENT/vblank; latched at frame
+	// start. composite_en is quasi-static (2-flop sync).
 	reg [31:0] comp_fb_base_s0,  comp_fb_base_s1;
+	reg [31:0] comp_wp_base_s0,  comp_wp_base_s1;
 	reg [13:0] comp_fb_stride_s0, comp_fb_stride_s1;
+	reg [1:0]  comp_en_s;
 	always @(posedge clk_100m) begin
-		comp_fb_base_s0   <= FB_BASE;   comp_fb_base_s1   <= comp_fb_base_s0;
-		comp_fb_stride_s0 <= FB_STRIDE; comp_fb_stride_s1 <= comp_fb_stride_s0;
+		comp_fb_base_s0   <= FB_BASE;     comp_fb_base_s1   <= comp_fb_base_s0;
+		comp_wp_base_s0   <= comp_wp_base; comp_wp_base_s1   <= comp_wp_base_s0;
+		comp_fb_stride_s0 <= FB_STRIDE;   comp_fb_stride_s1 <= comp_fb_stride_s0;
+		comp_en_s         <= {comp_en_s[0], comp_composite_en};
 	end
 
 	// Reset synchronisers: assert async on reset_req, deassert in-domain.
@@ -724,8 +736,10 @@ wire         bob_deint;
 		.avl_writedata     (vbuf_writedata),
 		.avl_byteenable    (vbuf_byteenable),
 
-		.fb_base    (comp_fb_base_s1),
-		.fb_stride  (comp_fb_stride_s1)
+		.fb_base        (comp_fb_base_s1),
+		.fb_stride      (comp_fb_stride_s1),
+		.wallpaper_base (comp_wp_base_s1),
+		.composite_en   (comp_en_s[1])
 	);
 `endif
 
@@ -1692,6 +1706,9 @@ emu emu
 	.VGA_SL(scanlines),
 	.VIDEO_ARX(ARX),
 	.VIDEO_ARY(ARY),
+
+	.COMP_WP_BASE(comp_wp_base),
+	.COMP_EN(comp_composite_en),
 
 `ifdef MISTER_FB
 	.FB_EN(fb_en),
