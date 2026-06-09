@@ -522,7 +522,9 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     // the next frame. This is "1-2 frames ahead" pipelining: the
     // FPGA is processing frame N while the host prepares N+1 and
     // N+2 is queued in the ring.
-    let mut pending_fences: std::collections::VecDeque<u32> =
+    // Each entry is (fence_value, submit_instant) so that on retire we
+    // can measure the frame's true FPGA render time (submit -> retire).
+    let mut pending_fences: std::collections::VecDeque<(u32, std::time::Instant)> =
         std::collections::VecDeque::with_capacity(3);
     // Bounded to 1 so the host always waits for the previous frame's
     // PRESENT to retire before reading FB_STATE.render. Without this,
@@ -535,13 +537,24 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     // CPU work for the next frame.
     const MAX_INFLIGHT_FRAMES: usize = 1;
 
-    // Damage-paint threshold: if the union of damage rects covers
-    // more than this fraction of the FB, fall back to a single
-    // clip-less paint/copy. Per-rect iteration has per-walk host
-    // overhead and per-op FPGA dispatch overhead; for big damage the
-    // wins from skipping clean pixels evaporate.
+    // Damage-paint threshold: above this fraction of the FB we fall
+    // back to a single clip-less paint instead of per-rect clipped
+    // paints. The guard exists because each damage rect costs a full
+    // tree-walk; but `coalesce_nearby` keeps the post-coalesce rect
+    // count tiny (~2-3), so that per-rect overhead is small and a
+    // partial paint stays cheaper than a full one well past 70% — a
+    // full paint redraws the *entire* opaque wallpaper (~110 ms at
+    // 1080p, the worst single-frame cost in the profiles). A category
+    // switch legitimately dirties ~45-70% (full column content change +
+    // sliding strip), and at 70% this threshold was escalating those to
+    // a whole-screen wallpaper repaint that's more expensive than the
+    // partial it replaced. Set high so only near-total damage goes full.
+    // (Deeper win, separate change: the per-FB-slot diff is 3 frames
+    // stale under triple-buffering, inflating nav damage; and
+    // `total_area` sums rects without de-overlapping — both bias this
+    // measurement upward.)
     let fb_area: u64 = (fb.width as u64) * (fb.height as u64);
-    let full_paint_threshold: u64 = fb_area * 70 / 100;
+    let full_paint_threshold: u64 = fb_area * 95 / 100;
     // Per-stage timing accumulators. Every TIMING_LOG_PERIOD frames
     // we log the average per-stage cost. Tells us where the frame
     // budget actually goes (so we can tell tick_jobs from layout
@@ -557,6 +570,18 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     let mut t_paint = Duration::ZERO;
     let mut t_fence = Duration::ZERO;
     let mut t_scanout = Duration::ZERO;
+    // Scene-build (opacity/transform/compute_scene) split out of the
+    // paint bucket — it's the "tree logic" that would move to the JS
+    // core in a 2-thread split, so we want it priced separately.
+    let mut t_scene = Duration::ZERO;
+    // True FPGA render time per frame: submit -> that frame's fence
+    // retire, independent of host/FPGA overlap. Compared against `cpu`
+    // (below) this is the CPU-bound vs FPGA-bound verdict — i.e. whether
+    // moving the JS reconcile to a second core can lift fps at all, and
+    // where the core-0/core-1 boundary should sit. `t_fpga_max` catches
+    // the full-repaint spikes that the average hides.
+    let mut t_fpga = Duration::ZERO;
+    let mut t_fpga_max = Duration::ZERO;
     // Damage-stage accounting: rect count + total area per frame,
     // and how many frames in the window fell back to full paint.
     let mut sum_paint_rect_count: u64 = 0;
@@ -710,9 +735,16 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         // The MAX_INFLIGHT_FRAMES=2 bound is here so the host can be
         // up to 1 frame ahead of the FPGA's PRESENT processing.
         let fence_wait_start = Instant::now();
+        // submit -> retire of the frame we block on = the FPGA's true
+        // render time for that frame (it started rendering at submit and
+        // is done when its fence retires), regardless of how much the
+        // host overlapped it. This is the number that decides CPU- vs
+        // FPGA-bound. 0 only on the first frame (nothing in flight yet).
+        let mut frame_fpga_dt = Duration::ZERO;
         if pending_fences.len() >= MAX_INFLIGHT_FRAMES {
-            let oldest = pending_fences.pop_front().unwrap();
-            device.wait_fence(oldest, timeout)?;
+            let (oldest_fence, oldest_submit) = pending_fences.pop_front().unwrap();
+            device.wait_fence(oldest_fence, timeout)?;
+            frame_fpga_dt = oldest_submit.elapsed();
         }
         let fence_dt = fence_wait_start.elapsed();
 
@@ -824,7 +856,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         let t7 = Instant::now();
 
         let new_token = frame.present()?.submit()?;
-        pending_fences.push_back(new_token.fence_value());
+        pending_fences.push_back((new_token.fence_value(), Instant::now()));
         let scanout_dt = Duration::ZERO;
 
         scene_hash_per_fb[render_idx] = Some(current_hash);
@@ -844,11 +876,18 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         t_images += t4 - t3;
         t_text_pop += t5 - t4;
         t_layout += t6 - t5;
-        // t7 - t6 spans damage compute + fence wait + paint + submit.
-        // Subtract the explicit fence_dt so paint shows actual work
-        // (the wait is reported separately as `fence`).
-        t_paint += (t7 - t6).saturating_sub(fence_dt);
+        // Scene build = opacity/transform/compute_scene, i.e. t6 -> the
+        // start of the fence wait. The rest of t7 - t6 (after removing
+        // the scene build and the fence wait) is the damage diff + the
+        // actual paint loop.
+        let scene_dt = fence_wait_start.saturating_duration_since(t6);
+        t_scene += scene_dt;
+        t_paint += (t7 - t6).saturating_sub(fence_dt).saturating_sub(scene_dt);
         t_fence += fence_dt;
+        t_fpga += frame_fpga_dt;
+        if frame_fpga_dt > t_fpga_max {
+            t_fpga_max = frame_fpga_dt;
+        }
         t_scanout += scanout_dt;
 
         frame_idx = frame_idx.wrapping_add(1);
@@ -856,18 +895,30 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         if frame_idx % TIMING_LOG_PERIOD == 0 {
             let n = TIMING_LOG_PERIOD as u32;
             let avg = |t: Duration| t.as_micros() as u32 / n;
+            let total = t_jobs + t_input + t_text_prep + t_images + t_text_pop
+                + t_layout + t_scene + t_paint + t_fence + t_scanout;
+            // cpu = host-thread busy time (everything except the fence
+            // wait). The cpu-vs-fpga comparison is the verdict: cpu >
+            // fpga ⇒ CPU-bound, a JS render-thread split can lift fps;
+            // fpga > cpu ⇒ render is the ceiling, split won't help fps
+            // (cut render cost instead). `fpga_max` flags full-repaint
+            // spikes the average hides.
+            let cpu = total.saturating_sub(t_fence);
             tracing::info!(
-                "frame timings (us avg over {n}): jobs={} input={} text_prep={} images={} text_pop={} layout={} paint={} fence={} scanout={} total={}",
+                "frame timings (us avg over {n}): jobs={} input={} text_prep={} images={} text_pop={} layout={} scene={} paint={} fence={} fpga={} fpga_max={} cpu={} total={}",
                 avg(t_jobs),
                 avg(t_input),
                 avg(t_text_prep),
                 avg(t_images),
                 avg(t_text_pop),
                 avg(t_layout),
+                avg(t_scene),
                 avg(t_paint),
                 avg(t_fence),
-                avg(t_scanout),
-                avg(t_jobs + t_input + t_text_prep + t_images + t_text_pop + t_layout + t_paint + t_fence + t_scanout),
+                avg(t_fpga),
+                t_fpga_max.as_micros() as u32,
+                avg(cpu),
+                avg(total),
             );
             // Damage / pixel accounting. "rects" is average rect
             // count per frame (after coalescing); "area" is average
@@ -895,6 +946,9 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
             t_paint = Duration::ZERO;
             t_fence = Duration::ZERO;
             t_scanout = Duration::ZERO;
+            t_scene = Duration::ZERO;
+            t_fpga = Duration::ZERO;
+            t_fpga_max = Duration::ZERO;
             sum_paint_rect_count = 0;
             sum_paint_area_px = 0;
             count_full_paints = 0;
