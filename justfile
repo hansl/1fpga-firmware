@@ -180,7 +180,7 @@ build-menu-ui mode="release-dev": _ensure-menu-host-image
 # auto-starts after a reboot, the previous menu_ui run may still be
 # attached, etc.). Best-effort.
 _kill-fpga-users:
-    -ssh root@{{mister_ip}} 'killall MiSTer 2>/dev/null; killall menu_ui 2>/dev/null; killall one_fpga_menu_core 2>/dev/null; killall menu_demo 2>/dev/null; killall affine_demo 2>/dev/null; true'
+    -ssh root@{{mister_ip}} 'killall MiSTer 2>/dev/null; killall menu_ui 2>/dev/null; killall one_fpga_menu_core 2>/dev/null; killall menu_demo 2>/dev/null; killall affine_demo 2>/dev/null; killall fake_input 2>/dev/null; true'
 
 # Deploy the menu-ui binary to the device
 deploy-menu-ui mode="release-dev": (build-menu-ui mode) _kill-fpga-users
@@ -210,12 +210,37 @@ deploy-menu-ui-assets:
     ssh root@{{mister_ip}} 'mkdir -p /media/fat/menu_ui_assets'
     scp docs/assets/menu-ui-demo/*.png root@{{mister_ip}}:/media/fat/menu_ui_assets/
 
-# Run the menu-ui launcher on the device, loading the deployed JS bundle
+# Run the menu-ui launcher on the device, loading the deployed JS bundle.
+# Tees the menu_ui log to _logs/menu_ui.log locally for inspection.
 run-menu-ui: _kill-fpga-users
-    ssh -t root@{{mister_ip}} '/media/fat/menu_ui --bundle /media/fat/menu_ui_app.js'
+    mkdir -p {{justfile_directory()}}/_logs
+    ssh -t root@{{mister_ip}} '/media/fat/menu_ui --bundle /media/fat/menu_ui_app.js' 2>&1 | tee {{justfile_directory()}}/_logs/menu_ui.log
 
 # Build everything menu-ui needs and deploy + run in one shot
 demo-menu-ui: deploy-menu-ui deploy-menu-ui-bundle deploy-menu-ui-assets run-menu-ui
+
+# Build the fake-input tool (creates a uinput keyboard that loops nav keys,
+# for hands-free menu navigation while capturing video on the JetKVM)
+build-fake-input mode="release-dev": _ensure-menu-host-image
+    docker run --rm -t \
+        -e RUSTUP_AUTO_INSTALL=0 \
+        -v "{{justfile_directory()}}":/home/rust/src \
+        one-fpga-musl:1.95.0 \
+        cargo build --target armv7-unknown-linux-musleabihf --bin fake_input --profile {{mode}} --no-default-features --features=platform_de10
+
+# Deploy the fake-input tool to the device
+deploy-fake-input mode="release-dev": (build-fake-input mode)
+    scp target/armv7-unknown-linux-musleabihf/{{mode}}/fake_input root@{{mister_ip}}:/media/fat/fake_input
+
+# Auto-nav capture: deploy menu-ui + the fake-input tool, then run them
+# together so the menu navigates itself while you record on the JetKVM.
+# `keys` is the looped sequence (l/r/u/d = arrows, c = confirm, b = back);
+# default oscillates right/left to exercise category-switch transitions.
+# fake_input must start first (menu_ui scans input devices once at startup).
+# Ctrl+C stops menu_ui; the auto-nav is then killed too.
+demo-menu-ui-autonav keys="rl": deploy-menu-ui deploy-menu-ui-bundle deploy-menu-ui-assets deploy-fake-input
+    mkdir -p {{justfile_directory()}}/_logs
+    ssh -t root@{{mister_ip}} 'killall fake_input menu_ui 2>/dev/null; /media/fat/fake_input --keys {{keys}} >/tmp/fake_input.log 2>&1 & FI=$!; sleep 2; /media/fat/menu_ui --bundle /media/fat/menu_ui_app.js; kill $FI 2>/dev/null; true' 2>&1 | tee {{justfile_directory()}}/_logs/menu_ui.log
 
 # Run the probe on the device (assumes the menu-core .rbf is loaded and the binary is deployed)
 probe-menu-core: _kill-fpga-users
