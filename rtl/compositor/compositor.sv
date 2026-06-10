@@ -91,7 +91,16 @@ module compositor #(
     input  logic [31:0]        fb_base,         // layer 1 (content) base
     input  logic [13:0]        fb_stride,       // shared stride (both layers)
     input  logic [31:0]        wallpaper_base,  // layer 0 (wallpaper) base
-    input  logic               composite_en     // 1 = blend content over wallpaper
+    input  logic               composite_en,    // 1 = blend content over wallpaper
+    // Content coverage mask: 1 bit per 64x64 tile (30x17 = 510 bits, packed
+    // 30 bits/row in 17 consecutive 32-bit words). A read-skip HINT: the
+    // producer reads only set tiles of the content layer and the consumer
+    // forces unset tiles transparent (-> wallpaper shows). Host keeps it
+    // conservative (covers all in-flight triple-buffer slots). When
+    // content_mask_en=0 the mask is ignored (full content read) = pre-mask
+    // behaviour. content_mask_base is host-stable, latched at frame start.
+    input  logic [31:0]        content_mask_base,
+    input  logic               content_mask_en
 );
 
     // ---- Derived timing ----------------------------------------------
@@ -103,6 +112,18 @@ module compositor #(
     localparam int LBW = $clog2(WORDS_PER_LINE);              // line-buf word addr bits (9)
     localparam int LB_SLOT = 2**LBW;                          // slot stride (512, power-of-2)
     localparam int SLOTW = $clog2(LINE_BUFS);
+
+    // ---- content coverage mask geometry ------------------------------
+    localparam int TILE        = 64;                         // tile edge (px)
+    localparam int N_TX        = H_ACTIVE / TILE;            // tiles across (30)
+    localparam int N_TY        = (V_ACTIVE + TILE-1) / TILE; // tile rows (17)
+    localparam int WORDS_PER_TILE = TILE / PIX_PER_WORD;     // 16 (128-bit words / tile)
+    localparam int WPT_LOG     = $clog2(WORDS_PER_TILE);     // 4
+    localparam int BURST_TILES = BURST / WORDS_PER_TILE;     // 8 (tiles per max burst)
+    localparam int MASK_BEATS  = (N_TY + PIX_PER_WORD-1) / PIX_PER_WORD; // 32-bit rows packed 4/beat -> 5
+    localparam int TXW         = $clog2(N_TX);               // 5
+    localparam int TYW         = $clog2(N_TY);               // 5
+    localparam int TSHIFT      = $clog2(TILE);               // 6 (px -> tile)
 
     // write side never used; byteenable all-ones (full-word reads).
     assign avl_write     = 1'b0;
@@ -137,6 +158,38 @@ module compositor #(
     always_ff @(posedge hdmi_clk) begin
         ct_rdata <= linebuf_ct[lb_raddr];
         wp_rdata <= linebuf_wp[lb_raddr];
+    end
+
+    // ================================================================
+    //  Content coverage mask storage. Written by the producer at frame
+    //  start (avl_clk) from DDR; sampled by the consumer (hdmi_clk). The
+    //  value is stable for the whole frame after the load (only rewritten
+    //  at the next frame start, during vblank), so a 2-flop array sync is
+    //  safe — any skew during the brief frame-start write settles long
+    //  before active scanout uses it. Reset all-1s = "cover everything"
+    //  so nothing is hidden before the first load / when masking is off.
+    // ================================================================
+    logic [N_TX-1:0] mask_avl [0:N_TY-1];           // avl domain (producer)
+    logic [N_TX-1:0] mask_s0  [0:N_TY-1];           // hdmi sync flop 0
+    logic [N_TX-1:0] mask_hdmi[0:N_TY-1];           // hdmi domain (consumer)
+    always_ff @(posedge hdmi_clk or negedge hdmi_rst_n) begin
+        if (!hdmi_rst_n) begin
+            for (int i = 0; i < N_TY; i++) begin
+                mask_s0[i]   <= '1;
+                mask_hdmi[i] <= '1;
+            end
+        end else
+        for (int i = 0; i < N_TY; i++) begin
+            mask_s0[i]   <= mask_avl[i];
+            mask_hdmi[i] <= mask_s0[i];
+        end
+    end
+
+    // content_mask_en into the hdmi domain (quasi-static; 2-flop).
+    logic cmask_en_h0, cmask_en_h1;
+    always_ff @(posedge hdmi_clk or negedge hdmi_rst_n) begin
+        if (!hdmi_rst_n) begin cmask_en_h0 <= 1'b0; cmask_en_h1 <= 1'b0; end
+        else begin cmask_en_h0 <= content_mask_en; cmask_en_h1 <= cmask_en_h0; end
     end
 
     // ================================================================
@@ -205,6 +258,23 @@ module compositor #(
         end
     end
 
+    // Mask tile-row for the active line, latched at the line boundary for
+    // the NEXT line (one 17:1 mux off the critical pixel path, leaving just
+    // a 30:1 bit select per pixel). nv = next vcount.
+    wire [11:0] nv = (hcount == H_TOTAL-1)
+                     ? ((vcount == V_TOTAL-1) ? 12'd0 : vcount + 12'd1)
+                     : vcount;
+    logic [N_TX-1:0] cur_mask_row;
+    always_ff @(posedge hdmi_clk or negedge hdmi_rst_n) begin
+        if (!hdmi_rst_n)              cur_mask_row <= '1;
+        else if (hcount == H_TOTAL-1) cur_mask_row <= mask_hdmi[nv[TSHIFT+TYW-1 -: TYW]];
+    end
+    // covered bit for the current column (tile_x = hcount>>6).
+    wire [TXW-1:0] tile_x   = hcount[TSHIFT+TXW-1 -: TXW];
+    wire           tile_cov = cur_mask_row[tile_x];
+    // force content transparent on unset tiles when masking is enabled.
+    wire           ct_drop  = cmask_en_h1 && !tile_cov;
+
     // selected 32-bit pixel from each registered 128-bit word. The read
     // word is in-phase with hcount: ct_rdata/wp_rdata at cycle c hold
     // word(c>>2); the lane for column c is c[1:0] = hcount[1:0].
@@ -255,7 +325,7 @@ module compositor #(
             ct_pix_q <= 32'd0; wp_pix_q <= 32'd0; test_q1 <= 24'd0;
             h_act_q1 <= 1'b0; v_act_q1 <= 1'b0; h_sync_q1 <= 1'b0; v_sync_q1 <= 1'b0;
         end else begin
-            ct_pix_q <= ct_pixel; wp_pix_q <= wp_pixel; test_q1 <= test_rgb;
+            ct_pix_q <= ct_drop ? 32'd0 : ct_pixel; wp_pix_q <= wp_pixel; test_q1 <= test_rgb;
             h_act_q1 <= h_act;   v_act_q1 <= v_act;
             h_sync_q1 <= h_sync_r; v_sync_q1 <= v_sync_r;
         end
@@ -355,10 +425,16 @@ module compositor #(
     end
 
     // ================================================================
-    //  Avalon read producer (avl_clk domain) — fills wallpaper then
-    //  content per line (content only when !composite_en).
+    //  Avalon read producer (avl_clk domain). At frame start it loads the
+    //  content coverage mask (when enabled), then fills wallpaper (full)
+    //  then content per line. With masking on, the content layer reads
+    //  only its set 64x64 tiles (WORDS_PER_TILE-word bursts), skipping the
+    //  transparent majority — the bandwidth win. P_DECIDE picks the next
+    //  burst (or skips a tile) between line bursts.
     // ================================================================
-    typedef enum logic [1:0] { P_IDLE, P_REQ, P_RX } pstate_t;
+    typedef enum logic [2:0] {
+        P_IDLE, P_DECIDE, P_REQ, P_RX, P_MREQ, P_MRX
+    } pstate_t;
     pstate_t pstate;
 
     logic             prod_layer;       // 0 = wallpaper, 1 = content
@@ -368,20 +444,53 @@ module compositor #(
     logic [31:0]      wp_line_base;     // byte addr of current wallpaper line
     logic [13:0]      fb_stride_l;
     logic             comp_en_l;        // composite_en latched per frame
+    logic             mask_rd_l;        // content_mask_en latched per frame
+    logic [31:0]      mask_base_l;      // content_mask_base latched per frame
     logic [7:0]       burst_left;
+    logic [2:0]       mask_beat;        // beat index during the mask read
 
-    wire [LBW:0] words_rem = WORDS_PER_LINE[LBW:0] - prod_word;
-    wire [7:0]   this_burst = (words_rem >= BURST[LBW:0]) ? BURST[7:0] : words_rem[7:0];
+    // masked-content tile bookkeeping
+    wire [TYW-1:0] prod_tile_y = prod_line[TSHIFT+TYW-1 -: TYW];
+    wire [5:0]     prod_tile_x = prod_word[LBW:WPT_LOG];            // 0..30
+    wire           is_mct      = (prod_layer == 1'b1) && mask_rd_l; // masked content
+    // Tile-row mask, latched once per line (in P_IDLE below) so the run
+    // scan below isn't behind the 17:1 mask_avl[prod_tile_y] select on the
+    // clk_100m burst-decision path.
+    logic [N_TX-1:0] mask_row_p;
+    wire           cur_tile_set= mask_row_p[prod_tile_x[TXW-1:0]];
+
+    // Coalesce a run of consecutive set tiles from prod_tile_x into one
+    // burst (capped at BURST_TILES) — reading only set tiles but in LARGE
+    // bursts so the DDR isn't fragmented into per-tile transactions (that
+    // fragmentation tanks effective bandwidth -> producer underrun/tearing).
+    // Zero-padded above N_TX so the +j index never reads past the row.
+    wire [N_TX+BURST_TILES-1:0] mask_row_ext = {{BURST_TILES{1'b0}}, mask_row_p};
+    logic [3:0] run_tiles;       // 0..BURST_TILES contiguous set tiles
+    always_comb begin
+        run_tiles = 4'd0;
+        for (int j = 0; j < BURST_TILES; j++)
+            if (run_tiles == j[3:0] && mask_row_ext[prod_tile_x + j[5:0]])
+                run_tiles = run_tiles + 4'd1;
+    end
+
+    wire [LBW:0] words_rem  = WORDS_PER_LINE[LBW:0] - prod_word;
+    wire [7:0]   full_burst = (words_rem >= BURST[LBW:0]) ? BURST[7:0] : words_rem[7:0];
+    wire [7:0]   mct_burst  = {run_tiles, 4'b0};                 // run_tiles * 16
+    wire [7:0]   this_burst = is_mct ? mct_burst : full_burst;
 
     wire prod_ahead_ok = ((prod_line - cons_line_a) < LINE_BUFS[11:0]);
     wire prod_more     = (prod_line < V_ACTIVE[11:0]);
+    wire line_done     = (prod_word >= WORDS_PER_LINE[LBW:0]);
 
     wire [31:0] cur_line_base = (prod_layer == 1'b0) ? wp_line_base : ct_line_base;
-    assign avl_address    = cur_line_base[N_AW+3:4] + {{(N_AW-LBW){1'b0}}, prod_word[LBW-1:0]};
-    assign avl_burstcount = (pstate == P_REQ) ? this_burst : 8'd0;
-    assign avl_read       = (pstate == P_REQ);
+    assign avl_address    = (pstate == P_MREQ)
+                            ? mask_base_l[N_AW+3:4]
+                            : cur_line_base[N_AW+3:4] + {{(N_AW-LBW){1'b0}}, prod_word[LBW-1:0]};
+    assign avl_burstcount = (pstate == P_REQ)  ? this_burst
+                          : (pstate == P_MREQ) ? MASK_BEATS[7:0] : 8'd0;
+    assign avl_read       = (pstate == P_REQ) || (pstate == P_MREQ);
 
-    // route the captured beat to the layer currently being filled
+    // route captured *line* beats to the layer being filled (not mask beats)
     assign lb_we_wp = (pstate == P_RX) && avl_readdatavalid && (prod_layer == 1'b0);
     assign lb_we_ct = (pstate == P_RX) && avl_readdatavalid && (prod_layer == 1'b1);
     assign lb_waddr = {prod_slot, prod_word[LBW-1:0]};
@@ -398,26 +507,79 @@ module compositor #(
             wp_line_base <= '0;
             fb_stride_l  <= '0;
             comp_en_l    <= 1'b0;
+            mask_rd_l    <= 1'b0;
+            mask_base_l  <= '0;
             burst_left   <= '0;
+            mask_beat    <= '0;
+            mask_row_p   <= '0;
+            for (int i = 0; i < N_TY; i++) mask_avl[i] <= '1; // all covered
         end else begin
             if (frame_start_a) begin
                 // new frame: latch geometry, reset producer to line 0.
                 fb_stride_l  <= fb_stride;
                 comp_en_l    <= composite_en;
+                mask_rd_l    <= content_mask_en;
+                mask_base_l  <= content_mask_base;
                 prod_line    <= '0;
                 prod_slot    <= '0;
                 prod_word    <= '0;
                 ct_line_base <= fb_base;
                 wp_line_base <= wallpaper_base;
                 prod_layer   <= composite_en ? 1'b0 : 1'b1; // wallpaper first if compositing
-                pstate       <= P_IDLE;
+                mask_beat    <= '0;
+                pstate       <= content_mask_en ? P_MREQ : P_IDLE; // load mask first
             end else begin
                 unique case (pstate)
+                    // ---- mask load (once per frame) ----
+                    P_MREQ: begin
+                        if (!avl_waitrequest) begin
+                            burst_left <= MASK_BEATS[7:0];
+                            mask_beat  <= '0;
+                            pstate     <= P_MRX;
+                        end
+                    end
+                    P_MRX: begin
+                        if (avl_readdatavalid) begin
+                            // each beat carries PIX_PER_WORD packed 32-bit
+                            // rows; low N_TX bits of each are the tile bits.
+                            for (int k = 0; k < PIX_PER_WORD; k++) begin
+                                if ((mask_beat * PIX_PER_WORD + k) < N_TY)
+                                    mask_avl[mask_beat * PIX_PER_WORD + k]
+                                        <= avl_readdata[k*32 +: N_TX];
+                            end
+                            mask_beat  <= mask_beat + 3'd1;
+                            burst_left <= burst_left - 8'd1;
+                            if (burst_left == 8'd1) pstate <= P_IDLE;
+                        end
+                    end
+                    // ---- per-line fill ----
                     P_IDLE: begin
                         if (prod_more && prod_ahead_ok) begin
                             prod_word  <= '0;
                             prod_layer <= comp_en_l ? 1'b0 : 1'b1;
-                            pstate     <= P_REQ;
+                            // latch this line's tile-row mask (stable for
+                            // the whole line; mask_avl is frame-stable).
+                            mask_row_p <= mask_avl[prod_tile_y];
+                            pstate     <= P_DECIDE;
+                        end
+                    end
+                    P_DECIDE: begin
+                        if (line_done) begin
+                            // current layer's line finished
+                            if (comp_en_l && prod_layer == 1'b0) begin
+                                prod_layer <= 1'b1;     // wallpaper -> content
+                                prod_word  <= '0;       // re-evaluate next cycle
+                            end else begin
+                                prod_line    <= prod_line + 12'd1;
+                                prod_slot    <= (prod_slot == LINE_BUFS-1) ? '0 : prod_slot + 1'b1;
+                                ct_line_base <= ct_line_base + {18'd0, fb_stride_l};
+                                wp_line_base <= wp_line_base + {18'd0, fb_stride_l};
+                                pstate       <= P_IDLE;
+                            end
+                        end else if (is_mct && !cur_tile_set) begin
+                            prod_word <= prod_word + WORDS_PER_TILE[LBW:0]; // skip empty tile
+                        end else begin
+                            pstate <= P_REQ;            // issue a burst
                         end
                     end
                     P_REQ: begin
@@ -430,26 +592,7 @@ module compositor #(
                         if (avl_readdatavalid) begin
                             prod_word  <= prod_word + 1'b1;
                             burst_left <= burst_left - 8'd1;
-                            if (burst_left == 8'd1) begin
-                                if (prod_word + 1'b1 >= WORDS_PER_LINE[LBW:0]) begin
-                                    // this layer's line done
-                                    if (comp_en_l && prod_layer == 1'b0) begin
-                                        // wallpaper done -> fill content next
-                                        prod_layer <= 1'b1;
-                                        prod_word  <= '0;
-                                        pstate     <= P_REQ;
-                                    end else begin
-                                        // content done -> advance to next line
-                                        prod_line    <= prod_line + 12'd1;
-                                        prod_slot    <= (prod_slot == LINE_BUFS-1) ? '0 : prod_slot + 1'b1;
-                                        ct_line_base <= ct_line_base + {18'd0, fb_stride_l};
-                                        wp_line_base <= wp_line_base + {18'd0, fb_stride_l};
-                                        pstate       <= P_IDLE;
-                                    end
-                                end else begin
-                                    pstate <= P_REQ; // next burst, same layer/line
-                                end
-                            end
+                            if (burst_left == 8'd1) pstate <= P_DECIDE;
                         end
                     end
                     default: pstate <= P_IDLE;

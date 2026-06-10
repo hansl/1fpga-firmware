@@ -673,6 +673,8 @@ wire         hdmi_vs, hdmi_hs, hdmi_de, hdmi_vbl, hdmi_brd;
 // port connections always resolve.
 wire [31:0] comp_wp_base;
 wire        comp_composite_en;
+wire [31:0] comp_mask_base;
+wire        comp_mask_en;
 wire         freeze;
 wire         bob_deint;
 
@@ -692,13 +694,17 @@ wire         bob_deint;
 	// start. composite_en is quasi-static (2-flop sync).
 	reg [31:0] comp_fb_base_s0,  comp_fb_base_s1;
 	reg [31:0] comp_wp_base_s0,  comp_wp_base_s1;
+	reg [31:0] comp_mask_base_s0, comp_mask_base_s1;
 	reg [13:0] comp_fb_stride_s0, comp_fb_stride_s1;
 	reg [1:0]  comp_en_s;
+	reg [1:0]  comp_mask_en_s;
 	always @(posedge clk_100m) begin
 		comp_fb_base_s0   <= FB_BASE;     comp_fb_base_s1   <= comp_fb_base_s0;
 		comp_wp_base_s0   <= comp_wp_base; comp_wp_base_s1   <= comp_wp_base_s0;
+		comp_mask_base_s0 <= comp_mask_base; comp_mask_base_s1 <= comp_mask_base_s0;
 		comp_fb_stride_s0 <= FB_STRIDE;   comp_fb_stride_s1 <= comp_fb_stride_s0;
 		comp_en_s         <= {comp_en_s[0], comp_composite_en};
+		comp_mask_en_s    <= {comp_mask_en_s[0], comp_mask_en};
 	end
 
 	// Reset synchronisers: assert async on reset_req, deassert in-domain.
@@ -739,7 +745,9 @@ wire         bob_deint;
 		.fb_base        (comp_fb_base_s1),
 		.fb_stride      (comp_fb_stride_s1),
 		.wallpaper_base (comp_wp_base_s1),
-		.composite_en   (comp_en_s[1])
+		.composite_en   (comp_en_s[1]),
+		.content_mask_base (comp_mask_base_s1),
+		.content_mask_en   (comp_mask_en_s[1])
 	);
 `endif
 
@@ -1709,6 +1717,8 @@ emu emu
 
 	.COMP_WP_BASE(comp_wp_base),
 	.COMP_EN(comp_composite_en),
+	.COMP_MASK_BASE(comp_mask_base),
+	.COMP_MASK_EN(comp_mask_en),
 
 `ifdef MISTER_FB
 	.FB_EN(fb_en),

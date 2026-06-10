@@ -32,6 +32,9 @@ set_clock_groups -asynchronous \
 # FB geometry: clk_sys regs → clk_100m read domain (first sync stage).
 set_false_path -to [get_registers {*comp_fb_base_s0[*]}]
 set_false_path -to [get_registers {*comp_fb_stride_s0[*]}]
+# Content-mask base + enable: clk_sys regs → clk_100m (first sync stage).
+set_false_path -to [get_registers {*comp_mask_base_s0[*]}]
+set_false_path -to [get_registers {*comp_mask_en_s[0]}]
 # Reset deassertion bridges (async assert, sync deassert) — first stage.
 set_false_path -to [get_registers {*comp_h_rst[0]}]
 set_false_path -to [get_registers {*comp_a_rst[0]}]

@@ -81,6 +81,12 @@ module menu_core_regs (
     output logic [31:0] wallpaper_addr_o,
     output logic        composite_en_o,
 
+    // Content coverage mask (task #15). CONTENT_MASK_ADDR (0x78) points at
+    // the host's 1-bit-per-64x64-tile mask (read-skip hint); content_mask_en
+    // is CONTROL[9] and gates the compositor's tile-skip + drop.
+    output logic [31:0] content_mask_addr_o,
+    output logic        content_mask_en_o,
+
     // Compositor observability — surfaces through LAYER_DEBUG (0x70).
     // descriptors_i is a free-running count of layer descriptors the
     // DMA has written into the cache, so the host can verify it is
@@ -126,6 +132,7 @@ module menu_core_regs (
     localparam logic [5:0] IDX_LAYER_COMMIT     = 6'h1B;  // 0x6C / 4
     localparam logic [5:0] IDX_LAYER_DEBUG      = 6'h1C;  // 0x70 / 4
     localparam logic [5:0] IDX_WALLPAPER_ADDR   = 6'h1D;  // 0x74 / 4
+    localparam logic [5:0] IDX_CONTENT_MASK_ADDR= 6'h1E;  // 0x78 / 4
 
     // The LW_H2F window is 2 MiB (21-bit address). Our register block
     // sits at host physical 0xFF210000, which is offset 0x10000 within
@@ -179,6 +186,7 @@ module menu_core_regs (
             scratch[IDX_FB1_ADDR]  <= 32'h3080_0000;
             scratch[IDX_FB2_ADDR]  <= 32'h3100_0000;
             scratch[IDX_WALLPAPER_ADDR] <= 32'h3200_0000; // tex-pool region; host overrides
+            scratch[IDX_CONTENT_MASK_ADDR] <= 32'h0; // host sets before enabling CONTROL[9]
             clear_error_q <= 1'b0;
             ring_kick_q   <= 1'b0;
         end else begin
@@ -243,6 +251,8 @@ module menu_core_regs (
     assign layer_count_o      = scratch[IDX_LAYER_COMMIT][8:0];
     assign wallpaper_addr_o   = scratch[IDX_WALLPAPER_ADDR];
     assign composite_en_o     = scratch[IDX_CONTROL][8];
+    assign content_mask_addr_o = scratch[IDX_CONTENT_MASK_ADDR];
+    assign content_mask_en_o   = scratch[IDX_CONTROL][9];
 
     // Suppress unused-input warnings.
     wire _unused = &{1'b0, req_read, 1'b0};

@@ -166,6 +166,8 @@ module emu
 	// sys_top, but its layer config is decoded here in the LW_H2F regs).
 	output [31:0] COMP_WP_BASE,   // wallpaper layer base address
 	output        COMP_EN,        // composite enable (content over wallpaper)
+	output [31:0] COMP_MASK_BASE, // content coverage mask base address
+	output        COMP_MASK_EN,   // content mask enable (tile read-skip)
 
 	input         OSD_STATUS
 );
@@ -280,8 +282,10 @@ assign VGA_DE   = 1'b0;
 assign CE_PIXEL = 1'b1;  // CLK_VIDEO == pixel rate for the framework
 
 // Compositor layer config out to sys_top (wallpaper base + blend enable).
-assign COMP_WP_BASE = reg_wallpaper_addr;
-assign COMP_EN      = reg_composite_en;
+assign COMP_WP_BASE   = reg_wallpaper_addr;
+assign COMP_EN        = reg_composite_en;
+assign COMP_MASK_BASE = reg_content_mask_addr;
+assign COMP_MASK_EN   = reg_content_mask_en;
 
 ////////////////////////////////////////////////////////////////////////////
 // HPS I/O.
@@ -359,6 +363,8 @@ wire        reg_layer_active;
 wire [8:0]  reg_layer_count;
 wire [31:0] reg_wallpaper_addr;
 wire        reg_composite_en;
+wire [31:0] reg_content_mask_addr;
+wire        reg_content_mask_en;
 wire [31:0] fetcher_ring_head;
 wire [31:0] fetcher_fence_value;
 wire [31:0] fetcher_error_info;
@@ -420,6 +426,8 @@ menu_core_regs u_menu_core_regs (
 
     .wallpaper_addr_o   (reg_wallpaper_addr),
     .composite_en_o     (reg_composite_en),
+    .content_mask_addr_o (reg_content_mask_addr),
+    .content_mask_en_o   (reg_content_mask_en),
 
     .layer_descriptors_i (32'd0),
 
