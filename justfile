@@ -238,9 +238,11 @@ deploy-fake-input mode="release-dev": (build-fake-input mode)
 # default oscillates right/left to exercise category-switch transitions.
 # fake_input must start first (menu_ui scans input devices once at startup).
 # Ctrl+C stops menu_ui; the auto-nav is then killed too.
-demo-menu-ui-autonav keys="rl": deploy-menu-ui deploy-menu-ui-bundle deploy-menu-ui-assets deploy-fake-input
+# `wp` overrides the wallpaper path; pass wp=/none to disable compositing
+# (1-layer scanout) — useful to A/B the scanout-contention cost.
+demo-menu-ui-autonav keys="rl" wp="/media/fat/menu_ui_assets/bg.png": deploy-menu-ui deploy-menu-ui-bundle deploy-menu-ui-assets deploy-fake-input
     mkdir -p {{justfile_directory()}}/_logs
-    ssh -t root@{{mister_ip}} 'killall fake_input menu_ui 2>/dev/null; /media/fat/fake_input --keys {{keys}} >/tmp/fake_input.log 2>&1 & FI=$!; sleep 2; /media/fat/menu_ui --bundle /media/fat/menu_ui_app.js; kill $FI 2>/dev/null; true' 2>&1 | tee {{justfile_directory()}}/_logs/menu_ui.log
+    ssh -t root@{{mister_ip}} 'killall fake_input menu_ui 2>/dev/null; /media/fat/fake_input --keys {{keys}} >/tmp/fake_input.log 2>&1 & FI=$!; sleep 2; /media/fat/menu_ui --bundle /media/fat/menu_ui_app.js --wallpaper {{wp}}; kill $FI 2>/dev/null; true' 2>&1 | tee {{justfile_directory()}}/_logs/menu_ui.log
 
 # Run the probe on the device (assumes the menu-core .rbf is loaded and the binary is deployed)
 probe-menu-core: _kill-fpga-users

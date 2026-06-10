@@ -152,6 +152,7 @@ pub fn paint<'a>(
         opacities,
         transforms,
         clip,
+        compositing,
         frame,
         /* skip_root_bg */ true,
     )?;
@@ -233,6 +234,13 @@ fn paint_subtree<'a>(
     opacities: &HashMap<NodeId, f32>,
     transforms: &HashMap<NodeId, Transform>,
     clip: Option<Rect>,
+    // True when this subtree is painted directly over the pristine
+    // transparent clear (compositing on, nothing opaque underneath yet).
+    // Content over the clear can use Opaque (write-only copy) instead of
+    // SrcAlpha — identical pixels for premultiplied src over a transparent
+    // dst, but no per-pixel dst read (~half the DDR traffic). It flips to
+    // false under any node that paints a background.
+    dst_clear: bool,
     mut frame: Frame<'a>,
     skip_root_bg: bool,
 ) -> Result<Frame<'a>, DeviceError> {
@@ -297,7 +305,7 @@ fn paint_subtree<'a>(
             // different dst sizing path; the no-cull case still
             // benefits from the engine's own clip rejection.
             if scaled || rect_intersects_clip(dx, dy, dw, dh, clip) {
-                frame = paint_text(content, id, lay, text_styles, text_cache, opacity_u8, xf, scaled, frame)?;
+                frame = paint_text(content, id, lay, text_styles, text_cache, opacity_u8, xf, scaled, dst_clear, frame)?;
             }
         }
         NodeKind::Img { src } => {
@@ -305,13 +313,17 @@ fn paint_subtree<'a>(
             // when unrotated) so a rotated icon's corners aren't culled.
             let (ax, ay, aw, ah) = xf.apply_to_aabb(lay.x, lay.y, lay.w, lay.h);
             if rect_intersects_clip(clamp_u16(ax), clamp_u16(ay), clamp_u16(aw), clamp_u16(ah), clip) {
-                frame = paint_img(src, lay, images, opacity_u8, xf, frame)?;
+                frame = paint_img(src, lay, images, opacity_u8, xf, dst_clear, frame)?;
             }
         }
     }
 
+    // Children are no longer over the pristine clear once this node has
+    // painted a background of its own (e.g. the ActionBar's faint bar):
+    // their content must SrcAlpha-blend over it, not copy over it.
+    let child_dst_clear = dst_clear && node.style.background_color.is_none();
     for &child in &node.children {
-        frame = paint_subtree(tree, child, layouts, text_styles, text_cache, images, opacities, transforms, clip, frame, false)?;
+        frame = paint_subtree(tree, child, layouts, text_styles, text_cache, images, opacities, transforms, clip, child_dst_clear, frame, false)?;
     }
     Ok(frame)
 }
@@ -341,6 +353,7 @@ fn paint_img<'a>(
     images: &ImageRegistry,
     opacity_u8: u8,
     xf: Transform,
+    dst_clear: bool,
     frame: Frame<'a>,
 ) -> Result<Frame<'a>, DeviceError> {
     // Prefer a texture pre-resized to this node's base layout box
@@ -377,8 +390,10 @@ fn paint_img<'a>(
         // both axes.
         let scale = (tw / src_w as f32).max(0.0) as f64;
         // Affine v1 has no tint (RGBA-only), so opacity can't be applied
-        // here. Use SrcAlpha so the rotated-out corners stay transparent
-        // and the bilinear edges composite cleanly over the wallpaper.
+        // here. Over the transparent clear, Opaque copy is correct (the
+        // rotated-out corners sample as transparent and copy over the
+        // already-transparent FB) and avoids the per-pixel dst read;
+        // otherwise SrcAlpha so the corners/edges composite cleanly.
         return frame.blit_affine_rotate(
             &texture,
             Rect::new(0, 0, src_w, src_h),
@@ -386,7 +401,7 @@ fn paint_img<'a>(
             scale,
             cx,
             cy,
-            BlendMode::SrcAlpha,
+            if dst_clear { BlendMode::Opaque } else { BlendMode::SrcAlpha },
         );
     }
 
@@ -401,7 +416,9 @@ fn paint_img<'a>(
     // rendered at opacity 1.0 the two produce identical pixels, but
     // Opaque has half the DDR traffic — load-bearing for the
     // full-screen wallpaper (1920×1080 → ~14 ms vs ~28 ms per paint).
-    let blend = if fully_opaque && opacity_u8 == 0xFF {
+    // Over the transparent clear, any premultiplied src can be copied
+    // (Opaque, write-only) — same pixels as SrcAlpha but no dst read.
+    let blend = if (dst_clear || fully_opaque) && opacity_u8 == 0xFF {
         BlendMode::Opaque
     } else {
         BlendMode::SrcAlpha
@@ -427,6 +444,7 @@ fn paint_text<'a>(
     opacity_u8: u8,
     xf: Transform,
     scaled: bool,
+    dst_clear: bool,
     frame: Frame<'a>,
 ) -> Result<Frame<'a>, DeviceError> {
     let Some(rs) = text_styles.get(&id) else {
@@ -479,9 +497,16 @@ fn paint_text<'a>(
         Rect::new(0, 0, cached.width, cached.height),
         dst,
         CopyOpts {
-            // Color baked into the RT; SrcAlpha so transparent areas
-            // outside the glyphs don't overwrite the framebuffer.
-            blend: BlendMode::SrcAlpha,
+            // Color baked into the RT. Over the transparent clear the RT's
+            // transparent padding copies transparent over an already-
+            // transparent FB, so Opaque (write-only) is correct and skips
+            // the per-pixel dst read; otherwise SrcAlpha so the padding
+            // doesn't clobber what's underneath.
+            blend: if dst_clear && opacity_u8 == 0xFF {
+                BlendMode::Opaque
+            } else {
+                BlendMode::SrcAlpha
+            },
             filter: Filter::Nearest,
             tint: opacity_tint(opacity_u8),
         },
