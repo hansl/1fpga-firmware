@@ -51,6 +51,13 @@ pub const DEFAULT_TEX_TABLE_COUNT: u32 = 65_535;
 /// Size of the texture data pool (224 MB).
 pub const TEX_POOL_SIZE: usize = 224 * 1024 * 1024;
 
+/// Content coverage mask (task #15). One bit per 64x64 tile; the
+/// compositor reads 5x128-bit beats = 80 bytes, with one packed u32 per
+/// tile row in the low 30 bits. The two ping-pong mask buffers are
+/// allocated from the texture pool.
+pub const MASK_ROWS: usize = 17; // ceil(1080 / 64)
+pub const MASK_BYTES: usize = 80; // 5 beats x 16 bytes (>= MASK_ROWS*4)
+
 /// Number of layer descriptor slots per layer table. 256 is enough
 /// for a complex menu UI (background + cards + text + transition
 /// overlays + reserve) and fits comfortably in BRAM on the FPGA

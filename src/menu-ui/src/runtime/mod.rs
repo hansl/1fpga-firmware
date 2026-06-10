@@ -315,6 +315,12 @@ pub struct RunConfig {
     /// painted into content every frame). When `None` or the file is
     /// missing, content clears opaque as before.
     pub wallpaper: Option<PathBuf>,
+    /// Enable the content coverage mask (task #15) when compositing: the
+    /// host computes a per-frame 64x64-tile coverage bitmap so the
+    /// compositor skips reading the transparent majority of the content
+    /// layer, cutting scanout DDR contention. No effect without a
+    /// wallpaper (compositing off). Default true.
+    pub content_mask: bool,
 }
 
 #[derive(Debug, Error)]
@@ -401,6 +407,17 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         }
         _ => false,
     };
+
+    // Content coverage mask (task #15): only meaningful with compositing
+    // (it gates the content layer over the wallpaper). Enabled on the
+    // first successful upload below.
+    let content_mask_on = compositing && cfg.content_mask;
+    let mut coverage_ring = [menu_core_host::mask::CoverageMask::empty(); 3];
+    let mut coverage_frame: usize = 0;
+    let mut content_mask_enabled = false;
+    if content_mask_on {
+        info!("content coverage mask: ON (host computes per-frame tile bitmap)");
+    }
 
     // 2. Load the JS bundle.
     let bundle: Vec<u8> = match cfg.bundle_override.as_ref() {
@@ -886,6 +903,37 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         let new_token = frame.present()?.submit()?;
         pending_fences.push_back((new_token.fence_value(), Instant::now()));
         let scanout_dt = Duration::ZERO;
+
+        // Content coverage mask (task #15): derive the tile bitmap from the
+        // already-built scene's painted bounding boxes (no extra tree walk),
+        // unioned over the last 3 frames so the displayed slot (which lags
+        // render under triple-buffering) is always covered. Conservative —
+        // marks whole tiles touched by any drawn box, never drops content.
+        // We only get here on a frame that actually painted (idle frames
+        // `continue` at the slot-unchanged check above), so the mask tracks
+        // content changes without any extra per-frame work when idle.
+        if content_mask_on {
+            let mut cov = menu_core_host::mask::CoverageMask::empty();
+            for item in &current_scene.items {
+                cov.mark_rect(
+                    item.bbox.x as i32,
+                    item.bbox.y as i32,
+                    item.bbox.w as u32,
+                    item.bbox.h as u32,
+                );
+            }
+            coverage_ring[coverage_frame % 3] = cov;
+            coverage_frame += 1;
+            let mut union = coverage_ring[0];
+            union.union(&coverage_ring[1]);
+            union.union(&coverage_ring[2]);
+            device.upload_content_mask(union.words())?;
+            if !content_mask_enabled {
+                device.set_content_mask(true);
+                content_mask_enabled = true;
+                info!("content coverage mask enabled ({} tiles)", union.covered_tiles());
+            }
+        }
 
         scene_hash_per_fb[render_idx] = Some(current_hash);
         scene_per_fb[render_idx] = Some(current_scene);

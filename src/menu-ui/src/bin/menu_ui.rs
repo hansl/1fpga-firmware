@@ -59,6 +59,16 @@ struct Flags {
     /// it at a missing file to disable compositing (content clears opaque).
     #[clap(long, default_value = "/media/fat/menu_ui_assets/bg.png")]
     wallpaper: PathBuf,
+
+    /// Content coverage mask (task #15): when compositing, the host hands
+    /// the compositor a 64x64-tile bitmap so it skips reading the
+    /// transparent majority of the content layer. Default OFF — for the
+    /// scattered main-menu content the tile-masked read fragments the DDR
+    /// access and is net-slower than the full sequential read; it's kept
+    /// for contiguous upper layers (Phase D). Pass `--content-mask true`
+    /// to experiment.
+    #[clap(long = "content-mask", default_value_t = false, action = clap::ArgAction::Set)]
+    content_mask: bool,
 }
 
 fn parse_resolution(s: &str) -> Result<(u16, u16), String> {
@@ -113,6 +123,7 @@ fn main() {
         base_phys_addr: flags.base_addr,
         render_res: flags.render_res,
         wallpaper: Some(flags.wallpaper),
+        content_mask: flags.content_mask,
     };
     if let Err(e) = menu_ui::run(cfg) {
         error!("{e}");

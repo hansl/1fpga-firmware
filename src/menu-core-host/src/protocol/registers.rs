@@ -48,6 +48,13 @@ pub const LAYER_DEBUG: usize = 0x70;
 /// layer when `CONTROL_COMPOSITE` is set. Full-screen BGRA8888, same
 /// stride as the content FB (`FB_STRIDE`).
 pub const WALLPAPER_ADDR: usize = 0x74;
+/// Base address of the content coverage mask (scanout compositor, task
+/// #15). 1 bit per 64x64 tile, 30 bits/row packed in 17 consecutive
+/// little-endian u32 words (the compositor reads 5x128-bit beats). A set
+/// bit = "this tile may have non-transparent content → read + blend it";
+/// unset tiles are skipped on read and forced transparent. Gated by
+/// `CONTROL_CONTENT_MASK`.
+pub const CONTENT_MASK_ADDR: usize = 0x78;
 pub const PERF_CYCLES_BUSY: usize = 0x80;
 pub const PERF_CMDS_EXEC: usize = 0x84;
 pub const PERF_BYTES_READ: usize = 0x88;
@@ -69,6 +76,11 @@ pub const CONTROL_CLEAR_ERROR: u32 = 1 << 2;
 /// (Phase B). When clear, the compositor scans out the content FB
 /// directly (no wallpaper read/blend). Latched into `CONTROL[8]`.
 pub const CONTROL_COMPOSITE: u32 = 1 << 8;
+/// Enable the content coverage mask (task #15): the compositor reads only
+/// the content tiles set in the mask at `CONTENT_MASK_ADDR` and forces the
+/// rest transparent. When clear, the full content layer is read (Phase C
+/// behaviour). Latched into `CONTROL[9]`.
+pub const CONTROL_CONTENT_MASK: u32 = 1 << 9;
 
 // --- FB_STATE field extraction (§3.2) ----------------------------------
 

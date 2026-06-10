@@ -144,6 +144,13 @@ pub struct Device {
     tex_alloc: BumpAllocator,
     next_tex_id: u16,
     tex_table_capacity: u16,
+    /// Ping-pong physical addresses of the two content-coverage-mask
+    /// buffers, allocated lazily from the texture pool on first upload.
+    /// Double-buffered so the host never overwrites the mask the
+    /// compositor is currently latched on. `mask_idx` selects the next
+    /// buffer to write.
+    mask_bufs: Option<[u32; 2]>,
+    mask_idx: usize,
 }
 
 impl Device {
@@ -212,6 +219,8 @@ impl Device {
             tex_alloc: BumpAllocator::new(tex_pool_phys, mem::TEX_POOL_SIZE as u32),
             next_tex_id: 0,
             tex_table_capacity: mem::DEFAULT_TEX_TABLE_COUNT as u16,
+            mask_bufs: None,
+            mask_idx: 0,
         })
     }
 
@@ -424,6 +433,75 @@ impl Device {
             cur | registers::CONTROL_COMPOSITE
         } else {
             cur & !registers::CONTROL_COMPOSITE
+        };
+        self.regs.write32(registers::CONTROL, next);
+    }
+
+    fn alloc_mask_buf(&mut self) -> Result<u32, DeviceError> {
+        self.tex_alloc
+            .alloc(mem::MASK_BYTES as u32, TEX_BURST_ALIGN)
+            .map_err(|e| match e {
+                AllocError::OutOfMemory {
+                    requested,
+                    remaining,
+                } => DeviceError::TexturePoolExhausted {
+                    needed: requested,
+                    free: remaining,
+                },
+                AllocError::BadAlignment(_) => unreachable!("64 is power of two"),
+            })
+    }
+
+    /// Upload the content coverage mask (task #15) and point the compositor
+    /// at it. `words` holds one u32 per tile row (low 30 bits = tile-x
+    /// coverage); at most `mem::MASK_ROWS` are used, the rest zero-padded.
+    /// Double-buffered: writes the alternate buffer then updates
+    /// `CONTENT_MASK_ADDR`, so the compositor (which latches the address at
+    /// frame start) reads a complete mask. Pair with
+    /// [`Self::set_content_mask`] to enable.
+    pub fn upload_content_mask(&mut self, words: &[u32]) -> Result<(), DeviceError> {
+        if self.tex_pool_map.is_none() {
+            self.init_texture_storage()?;
+        }
+        let bufs = match self.mask_bufs {
+            Some(b) => b,
+            None => {
+                let pair = [self.alloc_mask_buf()?, self.alloc_mask_buf()?];
+                self.mask_bufs = Some(pair);
+                pair
+            }
+        };
+        let idx = self.mask_idx & 1;
+        let phys = bufs[idx];
+        let pool_base_phys = self.cfg.base_phys_addr + mem::TEX_POOL_OFFSET as u32;
+        let offset_in_pool = (phys - pool_base_phys) as usize;
+
+        let mut bytes = [0u8; mem::MASK_BYTES];
+        let n = words.len().min(mem::MASK_ROWS);
+        for (i, w) in words[..n].iter().enumerate() {
+            bytes[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+        }
+        let pool_map = self.tex_pool_map.as_mut().expect("init checked above");
+        // SAFETY: the buffer is MASK_BYTES inside the pool (bump-allocated),
+        // so the dst window is in bounds; volatile byte copy into /dev/mem.
+        unsafe {
+            let dst = pool_map.as_mut_ptr().add(offset_in_pool);
+            volatile_copy_to_devmem(dst, &bytes);
+        }
+        self.regs.write32(registers::CONTENT_MASK_ADDR, phys);
+        self.mask_idx ^= 1;
+        Ok(())
+    }
+
+    /// Enable or disable the content coverage mask (`CONTROL[9]`, task #15).
+    /// Upload at least one mask via [`Self::upload_content_mask`] before
+    /// enabling. Read-modify-write so other CONTROL bits are preserved.
+    pub fn set_content_mask(&mut self, on: bool) {
+        let cur = self.regs.read32(registers::CONTROL);
+        let next = if on {
+            cur | registers::CONTROL_CONTENT_MASK
+        } else {
+            cur & !registers::CONTROL_CONTENT_MASK
         };
         self.regs.write32(registers::CONTROL, next);
     }
@@ -657,6 +735,8 @@ impl Device {
     pub fn reset_textures(&mut self) {
         self.tex_alloc.reset();
         self.next_tex_id = 0;
+        // The ping-pong mask buffers came from this pool; force re-alloc.
+        self.mask_bufs = None;
     }
 
     /// Allocate an RGBA8888 render-target texture with the given

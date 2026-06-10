@@ -29,6 +29,7 @@ pub mod devmem;
 pub mod device;
 pub mod error;
 pub mod frame;
+pub mod mask;
 pub mod texture;
 
 pub use protocol::{BlendMode, Filter, Rect, Rgba, TextureFormat};
