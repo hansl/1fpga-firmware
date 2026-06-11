@@ -87,6 +87,16 @@ module menu_core_regs (
     output logic [31:0] content_mask_addr_o,
     output logic        content_mask_en_o,
 
+    // Boxart overlay layer (Phase D). A small placed + translatable FB
+    // blended over content. BASE (0x90) = byte addr; POS (0x94) = {y:i16,
+    // x:i16}; SIZE (0x98) = {_, h:12, _, w:12}; STRIDE (0x9C) = bytes/row;
+    // boxart_en is CONTROL[10]. Position is updated per frame for animation.
+    output logic [31:0] boxart_addr_o,
+    output logic [31:0] boxart_pos_o,
+    output logic [31:0] boxart_size_o,
+    output logic [31:0] boxart_stride_o,
+    output logic        boxart_en_o,
+
     // Compositor observability — surfaces through LAYER_DEBUG (0x70).
     // descriptors_i is a free-running count of layer descriptors the
     // DMA has written into the cache, so the host can verify it is
@@ -133,6 +143,10 @@ module menu_core_regs (
     localparam logic [5:0] IDX_LAYER_DEBUG      = 6'h1C;  // 0x70 / 4
     localparam logic [5:0] IDX_WALLPAPER_ADDR   = 6'h1D;  // 0x74 / 4
     localparam logic [5:0] IDX_CONTENT_MASK_ADDR= 6'h1E;  // 0x78 / 4
+    localparam logic [5:0] IDX_BOXART_BASE      = 6'h24;  // 0x90 / 4
+    localparam logic [5:0] IDX_BOXART_POS       = 6'h25;  // 0x94 / 4
+    localparam logic [5:0] IDX_BOXART_SIZE      = 6'h26;  // 0x98 / 4
+    localparam logic [5:0] IDX_BOXART_STRIDE    = 6'h27;  // 0x9C / 4
 
     // The LW_H2F window is 2 MiB (21-bit address). Our register block
     // sits at host physical 0xFF210000, which is offset 0x10000 within
@@ -187,6 +201,10 @@ module menu_core_regs (
             scratch[IDX_FB2_ADDR]  <= 32'h3100_0000;
             scratch[IDX_WALLPAPER_ADDR] <= 32'h3200_0000; // tex-pool region; host overrides
             scratch[IDX_CONTENT_MASK_ADDR] <= 32'h0; // host sets before enabling CONTROL[9]
+            scratch[IDX_BOXART_BASE]   <= 32'h0; // host sets before enabling CONTROL[10]
+            scratch[IDX_BOXART_POS]    <= 32'h0;
+            scratch[IDX_BOXART_SIZE]   <= 32'h0;
+            scratch[IDX_BOXART_STRIDE] <= 32'h0;
             clear_error_q <= 1'b0;
             ring_kick_q   <= 1'b0;
         end else begin
@@ -253,6 +271,11 @@ module menu_core_regs (
     assign composite_en_o     = scratch[IDX_CONTROL][8];
     assign content_mask_addr_o = scratch[IDX_CONTENT_MASK_ADDR];
     assign content_mask_en_o   = scratch[IDX_CONTROL][9];
+    assign boxart_addr_o       = scratch[IDX_BOXART_BASE];
+    assign boxart_pos_o        = scratch[IDX_BOXART_POS];
+    assign boxart_size_o       = scratch[IDX_BOXART_SIZE];
+    assign boxart_stride_o     = scratch[IDX_BOXART_STRIDE];
+    assign boxart_en_o         = scratch[IDX_CONTROL][10];
 
     // Suppress unused-input warnings.
     wire _unused = &{1'b0, req_read, 1'b0};

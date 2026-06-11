@@ -675,6 +675,11 @@ wire [31:0] comp_wp_base;
 wire        comp_composite_en;
 wire [31:0] comp_mask_base;
 wire        comp_mask_en;
+wire [31:0] comp_boxart_base;
+wire [31:0] comp_boxart_pos;
+wire [31:0] comp_boxart_size;
+wire [31:0] comp_boxart_stride;
+wire        comp_boxart_en;
 wire         freeze;
 wire         bob_deint;
 
@@ -695,16 +700,26 @@ wire         bob_deint;
 	reg [31:0] comp_fb_base_s0,  comp_fb_base_s1;
 	reg [31:0] comp_wp_base_s0,  comp_wp_base_s1;
 	reg [31:0] comp_mask_base_s0, comp_mask_base_s1;
+	reg [31:0] comp_bx_base_s0,   comp_bx_base_s1;
+	reg [31:0] comp_bx_pos_s0,    comp_bx_pos_s1;
+	reg [31:0] comp_bx_size_s0,   comp_bx_size_s1;
+	reg [13:0] comp_bx_stride_s0, comp_bx_stride_s1;
 	reg [13:0] comp_fb_stride_s0, comp_fb_stride_s1;
 	reg [1:0]  comp_en_s;
 	reg [1:0]  comp_mask_en_s;
+	reg [1:0]  comp_bx_en_s;
 	always @(posedge clk_100m) begin
 		comp_fb_base_s0   <= FB_BASE;     comp_fb_base_s1   <= comp_fb_base_s0;
 		comp_wp_base_s0   <= comp_wp_base; comp_wp_base_s1   <= comp_wp_base_s0;
 		comp_mask_base_s0 <= comp_mask_base; comp_mask_base_s1 <= comp_mask_base_s0;
+		comp_bx_base_s0   <= comp_boxart_base;   comp_bx_base_s1   <= comp_bx_base_s0;
+		comp_bx_pos_s0    <= comp_boxart_pos;    comp_bx_pos_s1    <= comp_bx_pos_s0;
+		comp_bx_size_s0   <= comp_boxart_size;   comp_bx_size_s1   <= comp_bx_size_s0;
+		comp_bx_stride_s0 <= comp_boxart_stride[13:0]; comp_bx_stride_s1 <= comp_bx_stride_s0;
 		comp_fb_stride_s0 <= FB_STRIDE;   comp_fb_stride_s1 <= comp_fb_stride_s0;
 		comp_en_s         <= {comp_en_s[0], comp_composite_en};
 		comp_mask_en_s    <= {comp_mask_en_s[0], comp_mask_en};
+		comp_bx_en_s      <= {comp_bx_en_s[0], comp_boxart_en};
 	end
 
 	// Reset synchronisers: assert async on reset_req, deassert in-domain.
@@ -747,7 +762,14 @@ wire         bob_deint;
 		.wallpaper_base (comp_wp_base_s1),
 		.composite_en   (comp_en_s[1]),
 		.content_mask_base (comp_mask_base_s1),
-		.content_mask_en   (comp_mask_en_s[1])
+		.content_mask_en   (comp_mask_en_s[1]),
+		.boxart_base    (comp_bx_base_s1),
+		.boxart_x       (comp_bx_pos_s1[15:0]),
+		.boxart_y       (comp_bx_pos_s1[31:16]),
+		.boxart_w       (comp_bx_size_s1[11:0]),
+		.boxart_h       (comp_bx_size_s1[27:16]),
+		.boxart_stride  (comp_bx_stride_s1),
+		.boxart_en      (comp_bx_en_s[1])
 	);
 `endif
 
@@ -1719,6 +1741,11 @@ emu emu
 	.COMP_EN(comp_composite_en),
 	.COMP_MASK_BASE(comp_mask_base),
 	.COMP_MASK_EN(comp_mask_en),
+	.COMP_BOXART_BASE(comp_boxart_base),
+	.COMP_BOXART_POS(comp_boxart_pos),
+	.COMP_BOXART_SIZE(comp_boxart_size),
+	.COMP_BOXART_STRIDE(comp_boxart_stride),
+	.COMP_BOXART_EN(comp_boxart_en),
 
 `ifdef MISTER_FB
 	.FB_EN(fb_en),

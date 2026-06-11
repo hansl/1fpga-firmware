@@ -168,6 +168,11 @@ module emu
 	output        COMP_EN,        // composite enable (content over wallpaper)
 	output [31:0] COMP_MASK_BASE, // content coverage mask base address
 	output        COMP_MASK_EN,   // content mask enable (tile read-skip)
+	output [31:0] COMP_BOXART_BASE,   // boxart overlay FB base address
+	output [31:0] COMP_BOXART_POS,    // {y:i16, x:i16}
+	output [31:0] COMP_BOXART_SIZE,   // {_, h:12, _, w:12}
+	output [31:0] COMP_BOXART_STRIDE, // bytes per boxart row
+	output        COMP_BOXART_EN,     // boxart layer enable
 
 	input         OSD_STATUS
 );
@@ -286,6 +291,11 @@ assign COMP_WP_BASE   = reg_wallpaper_addr;
 assign COMP_EN        = reg_composite_en;
 assign COMP_MASK_BASE = reg_content_mask_addr;
 assign COMP_MASK_EN   = reg_content_mask_en;
+assign COMP_BOXART_BASE   = reg_boxart_addr;
+assign COMP_BOXART_POS    = reg_boxart_pos;
+assign COMP_BOXART_SIZE   = reg_boxart_size;
+assign COMP_BOXART_STRIDE = reg_boxart_stride;
+assign COMP_BOXART_EN     = reg_boxart_en;
 
 ////////////////////////////////////////////////////////////////////////////
 // HPS I/O.
@@ -365,6 +375,11 @@ wire [31:0] reg_wallpaper_addr;
 wire        reg_composite_en;
 wire [31:0] reg_content_mask_addr;
 wire        reg_content_mask_en;
+wire [31:0] reg_boxart_addr;
+wire [31:0] reg_boxart_pos;
+wire [31:0] reg_boxart_size;
+wire [31:0] reg_boxart_stride;
+wire        reg_boxart_en;
 wire [31:0] fetcher_ring_head;
 wire [31:0] fetcher_fence_value;
 wire [31:0] fetcher_error_info;
@@ -428,6 +443,11 @@ menu_core_regs u_menu_core_regs (
     .composite_en_o     (reg_composite_en),
     .content_mask_addr_o (reg_content_mask_addr),
     .content_mask_en_o   (reg_content_mask_en),
+    .boxart_addr_o       (reg_boxart_addr),
+    .boxart_pos_o        (reg_boxart_pos),
+    .boxart_size_o       (reg_boxart_size),
+    .boxart_stride_o     (reg_boxart_stride),
+    .boxart_en_o         (reg_boxart_en),
 
     .layer_descriptors_i (32'd0),
 

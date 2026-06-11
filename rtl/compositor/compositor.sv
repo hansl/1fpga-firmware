@@ -50,11 +50,18 @@ module compositor #(
     // Avalon-MM (vbuf) geometry.
     parameter int N_DW     = 128,          // data width
     parameter int N_AW     = 28,           // address width (16-byte words)
-    parameter int BURST    = 128,          // beats per burst (<=255; ASCAL uses 128)
+    // Beats per burst (<=255). Larger = fewer DDR transactions / row
+    // activations = higher effective bandwidth; bumped from 128 to 255 to
+    // give the 3-layer (wallpaper+content+boxart) scanline headroom.
+    parameter int BURST    = 255,
 
     // Number of whole-line buffers per layer for DDR read-ahead. >=2;
-    // deeper rides out DDR contention.
-    parameter int LINE_BUFS = 4,
+    // deeper rides out DDR contention. 6 (was 4): the boxart's extra reads
+    // leave a small residual per-line deficit after BURST=255, and the
+    // deeper read-ahead absorbs it. Affordable because the boxart ring is
+    // now 128-word slots (LB_SLOT_BX), so total line-buffer BRAM barely
+    // grows — keeping the HPS register-bus timing in range.
+    parameter int LINE_BUFS = 6,
 
     // Synthesis-time bring-up aid: 1 = ignore DDR, emit a colour-bar test
     // pattern (proves clk_hdmi + timing + HDMI tail in isolation from the
@@ -100,7 +107,20 @@ module compositor #(
     // content_mask_en=0 the mask is ignored (full content read) = pre-mask
     // behaviour. content_mask_base is host-stable, latched at frame start.
     input  logic [31:0]        content_mask_base,
-    input  logic               content_mask_en
+    input  logic               content_mask_en,
+
+    // Boxart overlay (layer 2): a small PLACED + TRANSLATABLE FB blended
+    // over content within its rect [x, x+w) x [y, y+h). Position is SIGNED
+    // (may run partly off-screen for slide in/out) and latched per frame, so
+    // the host animates it with cheap per-frame register writes — no blit,
+    // content FB untouched. The compositor clips to the visible intersection.
+    input  logic [31:0]         boxart_base,
+    input  logic signed [15:0]  boxart_x,
+    input  logic signed [15:0]  boxart_y,
+    input  logic [11:0]         boxart_w,
+    input  logic [11:0]         boxart_h,
+    input  logic [13:0]         boxart_stride,
+    input  logic                boxart_en
 );
 
     // ---- Derived timing ----------------------------------------------
@@ -119,7 +139,15 @@ module compositor #(
     localparam int N_TY        = (V_ACTIVE + TILE-1) / TILE; // tile rows (17)
     localparam int WORDS_PER_TILE = TILE / PIX_PER_WORD;     // 16 (128-bit words / tile)
     localparam int WPT_LOG     = $clog2(WORDS_PER_TILE);     // 4
-    localparam int BURST_TILES = BURST / WORDS_PER_TILE;     // 8 (tiles per max burst)
+    // Tiles per coalesced masked-content burst. Fixed at 8 (=128 words),
+    // decoupled from BURST so raising BURST for full-line reads doesn't
+    // grow the run-scan logic (which congests the HPS register-bus timing).
+    localparam int BURST_TILES = 8;
+    // Boxart ring slot: the panel is <=512px = <=128 words, so its line
+    // buffer needs only 128-word slots (vs 512 for full lines) — that saved
+    // BRAM funds the deeper read-ahead below without growing total memory.
+    localparam int LB_SLOT_BX  = 128;
+    localparam int LBW_BX      = $clog2(LB_SLOT_BX);         // 7
     localparam int MASK_BEATS  = (N_TY + PIX_PER_WORD-1) / PIX_PER_WORD; // 32-bit rows packed 4/beat -> 5
     localparam int TXW         = $clog2(N_TX);               // 5
     localparam int TYW         = $clog2(N_TY);               // 5
@@ -142,20 +170,31 @@ module compositor #(
     logic [N_DW-1:0] linebuf_ct [LINE_BUFS*LB_SLOT-1:0];
     (* ramstyle = "no_rw_check, M10K" *)
     logic [N_DW-1:0] linebuf_wp [LINE_BUFS*LB_SLOT-1:0];
+    // Boxart overlay ring (layer 2). Narrow slots (LB_SLOT_BX): filled in
+    // boxart-column space [0,w<=128) on covered lines; read at column
+    // (hcount - boxart_x). Its own write+read addresses (different slot
+    // stride from the full-line ct/wp rings).
+    (* ramstyle = "no_rw_check, M10K" *)
+    logic [N_DW-1:0] linebuf_bx [LINE_BUFS*LB_SLOT_BX-1:0];
 
     // write ports (driven by the producer)
-    logic                  lb_we_ct, lb_we_wp;
-    logic [SLOTW+LBW-1:0]  lb_waddr;       // shared (one layer fills at a time)
-    logic [N_DW-1:0]       lb_wdata;
-    // read ports (driven by the consumer, shared address)
-    logic [SLOTW+LBW-1:0]  lb_raddr;
-    logic [N_DW-1:0]       ct_rdata, wp_rdata;
+    logic                   lb_we_ct, lb_we_wp, lb_we_bx;
+    logic [SLOTW+LBW-1:0]    lb_waddr;      // ct/wp (one fills at a time)
+    logic [SLOTW+LBW_BX-1:0] lb_waddr_bx;   // boxart (narrow slot)
+    logic [N_DW-1:0]         lb_wdata;
+    // read ports (driven by the consumer). ct/wp share an address (screen
+    // column); the boxart reads at its own translated column + narrow slot.
+    logic [SLOTW+LBW-1:0]    lb_raddr;
+    logic [SLOTW+LBW_BX-1:0] lb_raddr_bx;
+    logic [N_DW-1:0]         ct_rdata, wp_rdata, bx_rdata;
 
     always_ff @(posedge avl_clk) begin
         if (lb_we_ct) linebuf_ct[lb_waddr] <= lb_wdata;
         if (lb_we_wp) linebuf_wp[lb_waddr] <= lb_wdata;
+        if (lb_we_bx) linebuf_bx[lb_waddr_bx] <= lb_wdata;
     end
     always_ff @(posedge hdmi_clk) begin
+        bx_rdata <= linebuf_bx[lb_raddr_bx];
         ct_rdata <= linebuf_ct[lb_raddr];
         wp_rdata <= linebuf_wp[lb_raddr];
     end
@@ -228,6 +267,34 @@ module compositor #(
         else begin comp_en_h0 <= composite_en; comp_en_h1 <= comp_en_h0; end
     end
 
+    // ---- Boxart placement config into the hdmi domain ----------------
+    // 2-flop sync from the host-stable ports, then latch once per frame
+    // (top of vblank) so the whole active frame uses one position — a
+    // mid-frame position change would shear the panel.
+    logic               bx_en_h0,  bx_en_h1;
+    logic signed [15:0] bx_x_h0,   bx_x_h1,  bx_y_h0, bx_y_h1;
+    logic [11:0]        bx_w_h0,   bx_w_h1,  bx_h_h0, bx_h_h1;
+    always_ff @(posedge hdmi_clk or negedge hdmi_rst_n) begin
+        if (!hdmi_rst_n) begin
+            bx_en_h0<=1'b0; bx_en_h1<=1'b0; bx_x_h0<='0; bx_x_h1<='0;
+            bx_y_h0<='0; bx_y_h1<='0; bx_w_h0<='0; bx_w_h1<='0; bx_h_h0<='0; bx_h_h1<='0;
+        end else begin
+            bx_en_h0<=boxart_en; bx_en_h1<=bx_en_h0;
+            bx_x_h0<=boxart_x;   bx_x_h1<=bx_x_h0;   bx_y_h0<=boxart_y; bx_y_h1<=bx_y_h0;
+            bx_w_h0<=boxart_w;   bx_w_h1<=bx_w_h0;   bx_h_h0<=boxart_h; bx_h_h1<=bx_h_h0;
+        end
+    end
+    logic               bx_en_f;
+    logic signed [15:0] bx_x_f, bx_y_f;
+    logic [11:0]        bx_w_f, bx_h_f;
+    always_ff @(posedge hdmi_clk or negedge hdmi_rst_n) begin
+        if (!hdmi_rst_n) begin
+            bx_en_f<=1'b0; bx_x_f<='0; bx_y_f<='0; bx_w_f<='0; bx_h_f<='0;
+        end else if (hcount == 12'd0 && vcount == V_ACTIVE) begin
+            bx_en_f<=bx_en_h1; bx_x_f<=bx_x_h1; bx_y_f<=bx_y_h1; bx_w_f<=bx_w_h1; bx_h_f<=bx_h_h1;
+        end
+    end
+
     // ---- consumer line bookkeeping (hdmi domain) ----------------------
     logic [SLOTW-1:0] rd_slot;        // line-buffer slot for the active line
 
@@ -275,6 +342,28 @@ module compositor #(
     // force content transparent on unset tiles when masking is enabled.
     wire           ct_drop  = cmask_en_h1 && !tile_cov;
 
+    // ---- Boxart per-pixel placement / clip --------------------------
+    // bx_col/bx_row are signed: the panel may sit partly off-screen during
+    // a slide; the cover bits clip to the visible intersection. The boxart
+    // line buffer holds the panel row in column space [0,w); we read it at
+    // (screen col - boxart_x), 1 cycle ahead like the content read.
+    wire signed [16:0] bx_row = $signed({5'b0, vcount}) - bx_y_f;
+    wire signed [16:0] bx_col = $signed({5'b0, hcount}) - bx_x_f;
+    wire bx_v_cover = bx_en_f && (bx_row >= 0) && (bx_row < $signed({5'b0, bx_h_f}));
+    wire bx_h_cover = (bx_col >= 0) && (bx_col < $signed({5'b0, bx_w_f}));
+    wire bx_cover   = bx_v_cover && bx_h_cover;        // boxart covers this pixel
+    wire signed [16:0] bx_col_nx = $signed({5'b0, nx}) - bx_x_f;
+    assign lb_raddr_bx = {rd_slot_next, bx_col_nx[LBW_BX+1:2]}; // (nx-x)/4, narrow boxart slot
+    logic [31:0] bx_pixel;
+    always_comb begin
+        unique case (bx_col[1:0])               // lane = (col - x) & 3
+            2'd0: bx_pixel = bx_rdata[31:0];
+            2'd1: bx_pixel = bx_rdata[63:32];
+            2'd2: bx_pixel = bx_rdata[95:64];
+            2'd3: bx_pixel = bx_rdata[127:96];
+        endcase
+    end
+
     // selected 32-bit pixel from each registered 128-bit word. The read
     // word is in-phase with hcount: ct_rdata/wp_rdata at cycle c hold
     // word(c>>2); the lane for column c is c[1:0] = hcount[1:0].
@@ -309,32 +398,33 @@ module compositor #(
         endcase
     end
 
-    // ---- 3-stage pixel pipeline --------------------------------------
-    // The premultiplied blend has an 8x8 multiply per channel; folding it
-    // into the same cycle as the BRAM read + lane mux only reached
-    // ~109 MHz, so the multiply gets its own register-to-register stage.
-    // ct_pixel/wp_pixel are in-phase with hcount (pixel(c) at cycle c).
-    //   stage 1: register the selected layer pixels + sync
-    //   stage 2: premultiplied blend -> pix_q2 + sync
-    //   stage 3: HDMI output register
-    logic [31:0] ct_pix_q, wp_pix_q;
+    // ---- 4-stage pixel pipeline --------------------------------------
+    // Each premultiplied "over" blend has an 8x8 multiply per channel and
+    // gets its own register-to-register stage (folding it into the BRAM
+    // read only reached ~109 MHz). Two blends now: content-over-wallpaper,
+    // then boxart-over-that.
+    //   stage 1: register selected layer pixels (ct/wp/bx) + cover + sync
+    //   stage 2: content-over-wallpaper blend -> base_q2 (+ carry bx) + sync
+    //   stage 3: boxart-over-base blend -> pix_q3 + sync
+    //   stage 4: HDMI output register
+    logic [31:0] ct_pix_q, wp_pix_q, bx_pix_q;
+    logic        bx_cover_q1;
     logic [23:0] test_q1;
     logic        h_act_q1, v_act_q1, h_sync_q1, v_sync_q1;
     always_ff @(posedge hdmi_clk or negedge hdmi_rst_n) begin
         if (!hdmi_rst_n) begin
-            ct_pix_q <= 32'd0; wp_pix_q <= 32'd0; test_q1 <= 24'd0;
+            ct_pix_q <= 32'd0; wp_pix_q <= 32'd0; bx_pix_q <= 32'd0;
+            bx_cover_q1 <= 1'b0; test_q1 <= 24'd0;
             h_act_q1 <= 1'b0; v_act_q1 <= 1'b0; h_sync_q1 <= 1'b0; v_sync_q1 <= 1'b0;
         end else begin
-            ct_pix_q <= ct_drop ? 32'd0 : ct_pixel; wp_pix_q <= wp_pixel; test_q1 <= test_rgb;
+            ct_pix_q <= ct_drop ? 32'd0 : ct_pixel; wp_pix_q <= wp_pixel;
+            bx_pix_q <= bx_pixel; bx_cover_q1 <= bx_cover; test_q1 <= test_rgb;
             h_act_q1 <= h_act;   v_act_q1 <= v_act;
             h_sync_q1 <= h_sync_r; v_sync_q1 <= v_sync_r;
         end
     end
 
-    // stage 2 combinational: premultiplied "over" blend.
-    // out.rgb = content.rgb + wallpaper.rgb * (255 - content.a) / 256.
-    // Content is premultiplied so this never exceeds 255 for valid inputs;
-    // saturate anyway as belt-and-suspenders.
+    // stage 2 combinational: content-over-wallpaper premultiplied blend.
     wire [7:0]  c_a  = ct_pix_q[31:24];
     wire [7:0]  c_r  = ct_pix_q[23:16];
     wire [7:0]  c_g  = ct_pix_q[15:8];
@@ -351,22 +441,52 @@ module compositor #(
     wire [7:0]  ob   = sb[8] ? 8'hFF : sb[7:0];
     wire [23:0] content_rgb = {c_r, c_g, c_b};
     wire [23:0] blend_rgb   = comp_en_h1 ? {or_, og, ob} : content_rgb;
-    wire [23:0] pix_sel     = TEST_PATTERN ? test_q1 : blend_rgb;
+    wire [23:0] base_sel    = TEST_PATTERN ? test_q1 : blend_rgb;
 
-    logic [23:0] pix_q2;
+    logic [23:0] base_q2;
+    logic [31:0] bx_pix_q2;
+    logic        bx_cover_q2;
     logic        h_act_q2, v_act_q2, h_sync_q2, v_sync_q2;
     always_ff @(posedge hdmi_clk or negedge hdmi_rst_n) begin
         if (!hdmi_rst_n) begin
-            pix_q2 <= 24'd0;
+            base_q2 <= 24'd0; bx_pix_q2 <= 32'd0; bx_cover_q2 <= 1'b0;
             h_act_q2 <= 1'b0; v_act_q2 <= 1'b0; h_sync_q2 <= 1'b0; v_sync_q2 <= 1'b0;
         end else begin
-            pix_q2 <= pix_sel;
+            base_q2 <= base_sel; bx_pix_q2 <= bx_pix_q; bx_cover_q2 <= bx_cover_q1;
             h_act_q2 <= h_act_q1;   v_act_q2 <= v_act_q1;
             h_sync_q2 <= h_sync_q1; v_sync_q2 <= v_sync_q1;
         end
     end
 
-    // stage 3: HDMI output register
+    // stage 3 combinational: boxart-over-base premultiplied blend.
+    // out.rgb = boxart.rgb + base.rgb * (255 - boxart.a) / 256.
+    wire [7:0]  bx_a2 = bx_pix_q2[31:24];
+    wire [7:0]  ibx   = 8'd255 - bx_a2;
+    wire [15:0] dr_m  = base_q2[23:16] * ibx;
+    wire [15:0] dg_m  = base_q2[15:8]  * ibx;
+    wire [15:0] db_m  = base_q2[7:0]   * ibx;
+    wire [8:0]  xr    = bx_pix_q2[23:16] + dr_m[15:8];
+    wire [8:0]  xg    = bx_pix_q2[15:8]  + dg_m[15:8];
+    wire [8:0]  xb    = bx_pix_q2[7:0]   + db_m[15:8];
+    wire [7:0]  fr    = xr[8] ? 8'hFF : xr[7:0];
+    wire [7:0]  fg    = xg[8] ? 8'hFF : xg[7:0];
+    wire [7:0]  fb    = xb[8] ? 8'hFF : xb[7:0];
+    wire [23:0] pix_sel = bx_cover_q2 ? {fr, fg, fb} : base_q2;
+
+    logic [23:0] pix_q3;
+    logic        h_act_q3, v_act_q3, h_sync_q3, v_sync_q3;
+    always_ff @(posedge hdmi_clk or negedge hdmi_rst_n) begin
+        if (!hdmi_rst_n) begin
+            pix_q3 <= 24'd0;
+            h_act_q3 <= 1'b0; v_act_q3 <= 1'b0; h_sync_q3 <= 1'b0; v_sync_q3 <= 1'b0;
+        end else begin
+            pix_q3 <= pix_sel;
+            h_act_q3 <= h_act_q2;   v_act_q3 <= v_act_q2;
+            h_sync_q3 <= h_sync_q2; v_sync_q3 <= v_sync_q2;
+        end
+    end
+
+    // stage 4: HDMI output register
     always_ff @(posedge hdmi_clk or negedge hdmi_rst_n) begin
         if (!hdmi_rst_n) begin
             hdmi_d   <= 24'd0;
@@ -375,11 +495,11 @@ module compositor #(
             hdmi_de  <= 1'b0;
             hdmi_vbl <= 1'b1;
         end else begin
-            hdmi_d   <= (h_act_q2 && v_act_q2) ? pix_q2 : 24'd0;
-            hdmi_hs  <= h_sync_q2;
-            hdmi_vs  <= v_sync_q2;
-            hdmi_de  <= h_act_q2 && v_act_q2;
-            hdmi_vbl <= ~v_act_q2;
+            hdmi_d   <= (h_act_q3 && v_act_q3) ? pix_q3 : 24'd0;
+            hdmi_hs  <= h_sync_q3;
+            hdmi_vs  <= v_sync_q3;
+            hdmi_de  <= h_act_q3 && v_act_q3;
+            hdmi_vbl <= ~v_act_q3;
         end
     end
 
@@ -437,7 +557,7 @@ module compositor #(
     } pstate_t;
     pstate_t pstate;
 
-    logic             prod_layer;       // 0 = wallpaper, 1 = content
+    logic [1:0]       prod_layer;       // 0 = wallpaper, 1 = content, 2 = boxart
     logic [SLOTW-1:0] prod_slot;
     logic [LBW:0]     prod_word;        // 0..WORDS_PER_LINE
     logic [31:0]      ct_line_base;     // byte addr of current content line
@@ -449,10 +569,22 @@ module compositor #(
     logic [7:0]       burst_left;
     logic [2:0]       mask_beat;        // beat index during the mask read
 
+    // boxart (layer 2) config latched per frame, + the current boxart-row
+    // byte address (computed once when the layer-2 fill for a line starts).
+    logic [31:0]      bx_base_l, bx_line_base;
+    logic signed [15:0] bx_y_l;
+    logic [11:0]      bx_h_l, bx_w_l;
+    logic [13:0]      bx_stride_l;
+    logic             bx_en_l;
+    wire [LBW:0]      bx_words = (bx_w_l + 12'd3) >> 2;          // ceil(w/4) words/row
+    wire signed [16:0] bx_prod_row = $signed({5'b0, prod_line}) - bx_y_l;
+    wire              bx_cover_prod = bx_en_l && (bx_prod_row >= 0)
+                                      && (bx_prod_row < $signed({5'b0, bx_h_l}));
+
     // masked-content tile bookkeeping
     wire [TYW-1:0] prod_tile_y = prod_line[TSHIFT+TYW-1 -: TYW];
     wire [5:0]     prod_tile_x = prod_word[LBW:WPT_LOG];            // 0..30
-    wire           is_mct      = (prod_layer == 1'b1) && mask_rd_l; // masked content
+    wire           is_mct      = (prod_layer == 2'd1) && mask_rd_l; // masked content
     // Tile-row mask, latched once per line (in P_IDLE below) so the run
     // scan below isn't behind the 17:1 mask_avl[prod_tile_y] select on the
     // clk_100m burst-decision path.
@@ -473,16 +605,20 @@ module compositor #(
                 run_tiles = run_tiles + 4'd1;
     end
 
-    wire [LBW:0] words_rem  = WORDS_PER_LINE[LBW:0] - prod_word;
+    // boxart (layer 2) reads only its own row width; wp/content read the line.
+    wire [LBW:0] layer_words = (prod_layer == 2'd2) ? bx_words : WORDS_PER_LINE[LBW:0];
+    wire [LBW:0] words_rem  = layer_words - prod_word;
     wire [7:0]   full_burst = (words_rem >= BURST[LBW:0]) ? BURST[7:0] : words_rem[7:0];
     wire [7:0]   mct_burst  = {run_tiles, 4'b0};                 // run_tiles * 16
     wire [7:0]   this_burst = is_mct ? mct_burst : full_burst;
 
     wire prod_ahead_ok = ((prod_line - cons_line_a) < LINE_BUFS[11:0]);
     wire prod_more     = (prod_line < V_ACTIVE[11:0]);
-    wire line_done     = (prod_word >= WORDS_PER_LINE[LBW:0]);
+    wire line_done     = (prod_word >= layer_words);
 
-    wire [31:0] cur_line_base = (prod_layer == 1'b0) ? wp_line_base : ct_line_base;
+    wire [31:0] cur_line_base = (prod_layer == 2'd0) ? wp_line_base
+                              : (prod_layer == 2'd1) ? ct_line_base
+                              :                        bx_line_base;
     assign avl_address    = (pstate == P_MREQ)
                             ? mask_base_l[N_AW+3:4]
                             : cur_line_base[N_AW+3:4] + {{(N_AW-LBW){1'b0}}, prod_word[LBW-1:0]};
@@ -491,15 +627,17 @@ module compositor #(
     assign avl_read       = (pstate == P_REQ) || (pstate == P_MREQ);
 
     // route captured *line* beats to the layer being filled (not mask beats)
-    assign lb_we_wp = (pstate == P_RX) && avl_readdatavalid && (prod_layer == 1'b0);
-    assign lb_we_ct = (pstate == P_RX) && avl_readdatavalid && (prod_layer == 1'b1);
-    assign lb_waddr = {prod_slot, prod_word[LBW-1:0]};
+    assign lb_we_wp = (pstate == P_RX) && avl_readdatavalid && (prod_layer == 2'd0);
+    assign lb_we_ct = (pstate == P_RX) && avl_readdatavalid && (prod_layer == 2'd1);
+    assign lb_we_bx = (pstate == P_RX) && avl_readdatavalid && (prod_layer == 2'd2);
+    assign lb_waddr    = {prod_slot, prod_word[LBW-1:0]};
+    assign lb_waddr_bx = {prod_slot, prod_word[LBW_BX-1:0]};
     assign lb_wdata = avl_readdata;
 
     always_ff @(posedge avl_clk or negedge avl_rst_n) begin
         if (!avl_rst_n) begin
             pstate       <= P_IDLE;
-            prod_layer   <= 1'b1;
+            prod_layer   <= 2'd1;
             prod_line    <= '0;
             prod_slot    <= '0;
             prod_word    <= '0;
@@ -512,6 +650,13 @@ module compositor #(
             burst_left   <= '0;
             mask_beat    <= '0;
             mask_row_p   <= '0;
+            bx_base_l    <= '0;
+            bx_line_base <= '0;
+            bx_y_l       <= '0;
+            bx_h_l       <= '0;
+            bx_w_l       <= '0;
+            bx_stride_l  <= '0;
+            bx_en_l      <= 1'b0;
             for (int i = 0; i < N_TY; i++) mask_avl[i] <= '1; // all covered
         end else begin
             if (frame_start_a) begin
@@ -525,8 +670,15 @@ module compositor #(
                 prod_word    <= '0;
                 ct_line_base <= fb_base;
                 wp_line_base <= wallpaper_base;
-                prod_layer   <= composite_en ? 1'b0 : 1'b1; // wallpaper first if compositing
+                prod_layer   <= composite_en ? 2'd0 : 2'd1; // wallpaper first if compositing
                 mask_beat    <= '0;
+                // latch boxart placement for the frame
+                bx_base_l    <= boxart_base;
+                bx_y_l       <= boxart_y;
+                bx_h_l       <= boxart_h;
+                bx_w_l       <= boxart_w;
+                bx_stride_l  <= boxart_stride;
+                bx_en_l      <= boxart_en;
                 pstate       <= content_mask_en ? P_MREQ : P_IDLE; // load mask first
             end else begin
                 unique case (pstate)
@@ -556,7 +708,7 @@ module compositor #(
                     P_IDLE: begin
                         if (prod_more && prod_ahead_ok) begin
                             prod_word  <= '0;
-                            prod_layer <= comp_en_l ? 1'b0 : 1'b1;
+                            prod_layer <= comp_en_l ? 2'd0 : 2'd1;
                             // latch this line's tile-row mask (stable for
                             // the whole line; mask_avl is frame-stable).
                             mask_row_p <= mask_avl[prod_tile_y];
@@ -565,11 +717,21 @@ module compositor #(
                     end
                     P_DECIDE: begin
                         if (line_done) begin
-                            // current layer's line finished
-                            if (comp_en_l && prod_layer == 1'b0) begin
-                                prod_layer <= 1'b1;     // wallpaper -> content
-                                prod_word  <= '0;       // re-evaluate next cycle
+                            // current layer's line finished — advance the
+                            // layer chain wallpaper -> content -> boxart.
+                            if (prod_layer == 2'd0) begin
+                                prod_layer <= 2'd1;     // wallpaper -> content
+                                prod_word  <= '0;
+                            end else if (prod_layer == 2'd1 && bx_cover_prod) begin
+                                // content -> boxart (this line is covered).
+                                // Latch the boxart-row byte address (one
+                                // multiply, not per pixel).
+                                prod_layer   <= 2'd2;
+                                prod_word    <= '0;
+                                bx_line_base <= bx_base_l
+                                                + (bx_prod_row[8:0] * bx_stride_l);
                             end else begin
+                                // all layers done for this line -> next line
                                 prod_line    <= prod_line + 12'd1;
                                 prod_slot    <= (prod_slot == LINE_BUFS-1) ? '0 : prod_slot + 1'b1;
                                 ct_line_base <= ct_line_base + {18'd0, fb_stride_l};
