@@ -69,6 +69,12 @@ struct Flags {
     /// to experiment.
     #[clap(long = "content-mask", default_value_t = false, action = clap::ArgAction::Set)]
     content_mask: bool,
+
+    /// Phase D bring-up: upload a test boxart panel and slide it in/out at
+    /// the right edge (animated purely by per-frame position registers, no
+    /// blit). Validates the placed + translatable overlay layer.
+    #[clap(long = "boxart-demo", default_value_t = false, action = clap::ArgAction::Set)]
+    boxart_demo: bool,
 }
 
 fn parse_resolution(s: &str) -> Result<(u16, u16), String> {
@@ -124,6 +130,7 @@ fn main() {
         render_res: flags.render_res,
         wallpaper: Some(flags.wallpaper),
         content_mask: flags.content_mask,
+        boxart_demo: flags.boxart_demo,
     };
     if let Err(e) = menu_ui::run(cfg) {
         error!("{e}");

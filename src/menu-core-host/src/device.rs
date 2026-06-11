@@ -151,6 +151,10 @@ pub struct Device {
     /// buffer to write.
     mask_bufs: Option<[u32; 2]>,
     mask_idx: usize,
+    /// Physical address of the boxart overlay FB, allocated lazily from the
+    /// texture pool on first `upload_boxart` and reused (content updates on
+    /// selection; position animates via registers).
+    boxart_fb: Option<u32>,
 }
 
 impl Device {
@@ -221,6 +225,7 @@ impl Device {
             tex_table_capacity: mem::DEFAULT_TEX_TABLE_COUNT as u16,
             mask_bufs: None,
             mask_idx: 0,
+            boxart_fb: None,
         })
     }
 
@@ -506,6 +511,87 @@ impl Device {
         self.regs.write32(registers::CONTROL, next);
     }
 
+    /// Upload boxart panel pixels (BGRA8888 premultiplied, tightly packed at
+    /// `w*4` bytes/row) to the overlay FB and program its size + stride
+    /// (Phase D). The FB is allocated once from the texture pool and reused;
+    /// re-upload only when the art changes. Position is set separately via
+    /// [`Self::set_boxart_pos`] (cheap, per frame for animation); enable via
+    /// [`Self::set_boxart`].
+    pub fn upload_boxart(&mut self, pixels: &[u8], w: u16, h: u16) -> Result<(), DeviceError> {
+        if (w as usize) > mem::BOXART_MAX_W || (h as usize) > mem::BOXART_MAX_H {
+            return Err(DeviceError::BoxartTooLarge {
+                width: w,
+                height: h,
+                max: mem::BOXART_MAX_W as u16,
+            });
+        }
+        let needed = (w as usize) * (h as usize) * 4;
+        if pixels.len() < needed {
+            return Err(DeviceError::TextureDataTruncated {
+                expected: needed,
+                got: pixels.len(),
+            });
+        }
+        if self.tex_pool_map.is_none() {
+            self.init_texture_storage()?;
+        }
+        let phys = match self.boxart_fb {
+            Some(p) => p,
+            None => {
+                let p = self
+                    .tex_alloc
+                    .alloc(mem::BOXART_FB_BYTES as u32, TEX_BURST_ALIGN)
+                    .map_err(|e| match e {
+                        AllocError::OutOfMemory {
+                            requested,
+                            remaining,
+                        } => DeviceError::TexturePoolExhausted {
+                            needed: requested,
+                            free: remaining,
+                        },
+                        AllocError::BadAlignment(_) => unreachable!("64 is power of two"),
+                    })?;
+                self.boxart_fb = Some(p);
+                p
+            }
+        };
+        let pool_base_phys = self.cfg.base_phys_addr + mem::TEX_POOL_OFFSET as u32;
+        let offset_in_pool = (phys - pool_base_phys) as usize;
+        let pool_map = self.tex_pool_map.as_mut().expect("init checked above");
+        // SAFETY: the boxart FB is BOXART_FB_BYTES inside the pool and
+        // `needed <= BOXART_FB_BYTES` (size checked above).
+        unsafe {
+            let dst = pool_map.as_mut_ptr().add(offset_in_pool);
+            volatile_copy_to_devmem(dst, &pixels[..needed]);
+        }
+        self.regs.write32(registers::BOXART_BASE, phys);
+        self.regs
+            .write32(registers::BOXART_SIZE, ((h as u32) << 16) | (w as u32));
+        self.regs.write32(registers::BOXART_STRIDE, (w as u32) * 4);
+        Ok(())
+    }
+
+    /// Set the boxart panel's top-left position (signed; may be off-screen
+    /// for slide animations). Cheap single register write — call per frame
+    /// to animate without touching the blit engine.
+    pub fn set_boxart_pos(&mut self, x: i16, y: i16) {
+        let packed = (((y as u16) as u32) << 16) | ((x as u16) as u32);
+        self.regs.write32(registers::BOXART_POS, packed);
+    }
+
+    /// Enable or disable the boxart overlay layer (`CONTROL[10]`, Phase D).
+    /// Upload art + set position first. Read-modify-write so other CONTROL
+    /// bits are preserved.
+    pub fn set_boxart(&mut self, on: bool) {
+        let cur = self.regs.read32(registers::CONTROL);
+        let next = if on {
+            cur | registers::CONTROL_BOXART
+        } else {
+            cur & !registers::CONTROL_BOXART
+        };
+        self.regs.write32(registers::CONTROL, next);
+    }
+
     fn init_texture_storage(&mut self) -> Result<(), DeviceError> {
         let pool_phys = self.cfg.base_phys_addr + mem::TEX_POOL_OFFSET as u32;
         let table_phys = self.cfg.base_phys_addr + mem::TEX_TABLE_OFFSET as u32;
@@ -735,8 +821,9 @@ impl Device {
     pub fn reset_textures(&mut self) {
         self.tex_alloc.reset();
         self.next_tex_id = 0;
-        // The ping-pong mask buffers came from this pool; force re-alloc.
+        // The mask + boxart buffers came from this pool; force re-alloc.
         self.mask_bufs = None;
+        self.boxart_fb = None;
     }
 
     /// Allocate an RGBA8888 render-target texture with the given

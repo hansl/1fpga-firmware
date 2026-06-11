@@ -250,6 +250,13 @@ demo-menu-ui-autonav keys="rl" wp="/media/fat/menu_ui_assets/bg.png" cm="false" 
     mkdir -p {{justfile_directory()}}/_logs
     ssh -t root@{{mister_ip}} 'killall fake_input menu_ui 2>/dev/null; /media/fat/fake_input --keys {{keys}} --interval-ms {{iv}} >/tmp/fake_input.log 2>&1 & FI=$!; sleep 2; /media/fat/menu_ui --bundle /media/fat/menu_ui_app.js --wallpaper {{wp}} --content-mask {{cm}}; kill $FI 2>/dev/null; true' 2>&1 | tee {{justfile_directory()}}/_logs/menu_ui.log
 
+# Phase D boxart-layer bring-up: run the menu with a test panel that slides
+# in/out at the right edge (animated purely by per-frame position registers,
+# no blit). Validates the placed + translatable overlay layer. Ctrl+C to stop.
+demo-menu-ui-boxart: deploy-menu-ui deploy-menu-ui-bundle deploy-menu-ui-assets
+    mkdir -p {{justfile_directory()}}/_logs
+    ssh -t root@{{mister_ip}} 'killall fake_input menu_ui 2>/dev/null; /media/fat/menu_ui --bundle /media/fat/menu_ui_app.js --wallpaper /media/fat/menu_ui_assets/bg.png --boxart-demo true' 2>&1 | tee {{justfile_directory()}}/_logs/menu_ui.log
+
 # Run the probe on the device (assumes the menu-core .rbf is loaded and the binary is deployed)
 probe-menu-core: _kill-fpga-users
     ssh root@{{mister_ip}} '/media/fat/one_fpga_menu_core probe'

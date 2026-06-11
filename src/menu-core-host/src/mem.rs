@@ -58,6 +58,13 @@ pub const TEX_POOL_SIZE: usize = 224 * 1024 * 1024;
 pub const MASK_ROWS: usize = 17; // ceil(1080 / 64)
 pub const MASK_BYTES: usize = 80; // 5 beats x 16 bytes (>= MASK_ROWS*4)
 
+/// Boxart overlay layer (Phase D). The placed panel FB is allocated once
+/// from the texture pool at this max size and reused for each art upload
+/// (content changes on selection; position animates via registers).
+pub const BOXART_MAX_W: usize = 512;
+pub const BOXART_MAX_H: usize = 512;
+pub const BOXART_FB_BYTES: usize = BOXART_MAX_W * BOXART_MAX_H * 4;
+
 /// Number of layer descriptor slots per layer table. 256 is enough
 /// for a complex menu UI (background + cards + text + transition
 /// overlays + reserve) and fits comfortably in BRAM on the FPGA

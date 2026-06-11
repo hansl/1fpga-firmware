@@ -321,6 +321,10 @@ pub struct RunConfig {
     /// layer, cutting scanout DDR contention. No effect without a
     /// wallpaper (compositing off). Default true.
     pub content_mask: bool,
+    /// Phase D bring-up: upload a test boxart panel and animate its position
+    /// (slide in/out at the right edge) to validate the placed+translatable
+    /// overlay layer end-to-end. No effect without compositing.
+    pub boxart_demo: bool,
 }
 
 #[derive(Debug, Error)]
@@ -356,6 +360,33 @@ impl From<boa_engine::JsError> for RuntimeError {
 /// milestones will replace this with `include_bytes!(...)` once the
 /// Rollup output is stable.
 const EMBEDDED_BUNDLE: &[u8] = b"";
+
+/// 256x256 BGRA8888 premultiplied test panel for the Phase D boxart
+/// bring-up demo: translucent teal fill (~85% alpha) with an opaque white
+/// border, so it's obviously an overlay and its edges/clipping are visible.
+fn boxart_demo_panel() -> (Vec<u8>, u16, u16) {
+    const W: usize = 256;
+    const H: usize = 256;
+    let mut px = vec![0u8; W * H * 4];
+    for y in 0..H {
+        for x in 0..W {
+            let i = (y * W + x) * 4;
+            let border = x < 4 || x >= W - 4 || y < 4 || y >= H - 4;
+            let (b, g, r, a): (u8, u8, u8, u8) = if border {
+                (255, 255, 255, 255) // opaque white
+            } else {
+                let a = 217u16; // ~85%
+                let prem = |c: u16| (c * a / 255) as u8;
+                (prem(128), prem(128), prem(0), a as u8) // premult teal
+            };
+            px[i] = b;
+            px[i + 1] = g;
+            px[i + 2] = r;
+            px[i + 3] = a;
+        }
+    }
+    (px, W as u16, H as u16)
+}
 
 pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     // 1. Open the FPGA device + configure framebuffer + start engine.
@@ -418,6 +449,24 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     if content_mask_on {
         info!("content coverage mask: ON (host computes per-frame tile bitmap)");
     }
+
+    // Phase D boxart-layer bring-up demo: upload a test panel once and
+    // animate ONLY its position each frame (slide in/out at the right edge)
+    // — proves the placed+translatable overlay blends over the menu and
+    // clips off-screen, with zero blit work (content FB untouched).
+    let boxart_demo = cfg.boxart_demo;
+    if boxart_demo {
+        let (px, bw, bh) = boxart_demo_panel();
+        match device.upload_boxart(&px, bw, bh) {
+            Ok(()) => {
+                device.set_boxart_pos(1920, 400); // start fully off-screen right
+                device.set_boxart(true);
+                info!("boxart demo: ON ({}x{} panel sliding at the right edge)", bw, bh);
+            }
+            Err(e) => error!("boxart demo upload failed: {e}"),
+        }
+    }
+    let mut boxart_anim: u64 = 0;
 
     // 2. Load the JS bundle.
     let bundle: Vec<u8> = match cfg.bundle_override.as_ref() {
@@ -633,6 +682,21 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
 
     while running.load(Ordering::SeqCst) {
         let t0 = Instant::now();
+
+        // Boxart demo: slide the panel in from the right edge and back, a
+        // pure per-frame register write (no blit). Runs every loop tick
+        // (even idle ones) so the motion stays smooth.
+        if boxart_demo {
+            const PERIOD: u64 = 240; // frames per in-out cycle
+            let phase = boxart_anim % PERIOD;
+            let tri = if phase < PERIOD / 2 { phase } else { PERIOD - phase };
+            let frac = tri as f32 / (PERIOD / 2) as f32; // 0 -> 1 -> 0
+            let x_off = 1920.0_f32; // fully off the right edge
+            let x_on = (1920 - 256 - 40) as f32; // fully on, 40px inset
+            let x = (x_off - frac * (x_off - x_on)).round() as i16;
+            device.set_boxart_pos(x, 400);
+            boxart_anim = boxart_anim.wrapping_add(1);
+        }
 
         // 0a. Drive the JS job queue forward by one tick. We can't
         //     use `context.run_jobs()` here — it blocks until every

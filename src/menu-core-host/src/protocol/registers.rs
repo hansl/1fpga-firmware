@@ -59,6 +59,16 @@ pub const PERF_CYCLES_BUSY: usize = 0x80;
 pub const PERF_CMDS_EXEC: usize = 0x84;
 pub const PERF_BYTES_READ: usize = 0x88;
 pub const PERF_BYTES_WRITTEN: usize = 0x8C;
+/// Boxart overlay layer (Phase D). A small placed + translatable FB blended
+/// over content within its rect. `BASE` = byte addr; `POS` packs
+/// `((y as i16 as u16) as u32) << 16 | (x as i16 as u16) as u32` (signed,
+/// may be off-screen for slide animations); `SIZE` packs `(h << 16) | w`;
+/// `STRIDE` = bytes/row. Position is rewritten per frame to animate (no
+/// blit; content FB untouched). Gated by `CONTROL_BOXART`.
+pub const BOXART_BASE: usize = 0x90;
+pub const BOXART_POS: usize = 0x94;
+pub const BOXART_SIZE: usize = 0x98;
+pub const BOXART_STRIDE: usize = 0x9C;
 
 // --- STATUS bits (§3.2) ------------------------------------------------
 
@@ -81,6 +91,10 @@ pub const CONTROL_COMPOSITE: u32 = 1 << 8;
 /// rest transparent. When clear, the full content layer is read (Phase C
 /// behaviour). Latched into `CONTROL[9]`.
 pub const CONTROL_CONTENT_MASK: u32 = 1 << 9;
+/// Enable the boxart overlay layer (Phase D): the compositor blends the FB
+/// at `BOXART_BASE` over the content within the `BOXART_POS`/`BOXART_SIZE`
+/// rect. Latched into `CONTROL[10]`.
+pub const CONTROL_BOXART: u32 = 1 << 10;
 
 // --- FB_STATE field extraction (§3.2) ----------------------------------
 

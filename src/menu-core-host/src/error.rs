@@ -102,6 +102,10 @@ pub enum DeviceError {
     #[error("affine blit source {width}×{height} exceeds the 128×128 limit")]
     AffineSourceTooLarge { width: u16, height: u16 },
 
+    /// Boxart panel exceeds the placed-layer FB (Phase D).
+    #[error("boxart panel {width}×{height} exceeds the {max}×{max} limit")]
+    BoxartTooLarge { width: u16, height: u16, max: u16 },
+
     /// `std::io` error from the bridge enable path.
     #[error("io error: {0}")]
     Io(#[from] io::Error),
