@@ -398,15 +398,22 @@ module compositor #(
         endcase
     end
 
-    // ---- 4-stage pixel pipeline --------------------------------------
-    // Each premultiplied "over" blend has an 8x8 multiply per channel and
-    // gets its own register-to-register stage (folding it into the BRAM
-    // read only reached ~109 MHz). Two blends now: content-over-wallpaper,
-    // then boxart-over-that.
-    //   stage 1: register selected layer pixels (ct/wp/bx) + cover + sync
-    //   stage 2: content-over-wallpaper blend -> base_q2 (+ carry bx) + sync
-    //   stage 3: boxart-over-base blend -> pix_q3 + sync
-    //   stage 4: HDMI output register
+    // ---- 6-stage pixel pipeline --------------------------------------
+    // Each premultiplied "over" blend is inv-alpha -> 8x8 multiply -> add
+    // -> saturate -> select. As a single stage that missed clk_hdmi
+    // (148.5 MHz) by ~3.4 ns (content) / ~1.1 ns (boxart), so each blend
+    // is split across TWO register-to-register stages: an "a" half that
+    // does the subtract + multiplies and registers the products (letting
+    // the fitter pack the DSP output register), and a "b" half that does
+    // the add/saturate/select. Pixel data and sync travel together
+    // through every stage, so the extra latency is invisible at the
+    // output (hs/vs/de stay aligned with the pixel).
+    //   stage 1 : register selected layer pixels (ct/wp/bx) + cover + sync
+    //   stage 2a: content-over-wallpaper multiplies  -> products + carries
+    //   stage 2b: content-over-wallpaper add/select  -> base_q2  + sync
+    //   stage 3a: boxart-over-base multiplies        -> products + carries
+    //   stage 3b: boxart-over-base add/select        -> pix_q3   + sync
+    //   stage 4 : HDMI output register
     logic [31:0] ct_pix_q, wp_pix_q, bx_pix_q;
     logic        bx_cover_q1;
     logic [23:0] test_q1;
@@ -424,24 +431,47 @@ module compositor #(
         end
     end
 
-    // stage 2 combinational: content-over-wallpaper premultiplied blend.
+    // stage 2a combinational: content-over-wallpaper, MULTIPLY half.
+    //   inverse-alpha + wallpaper.rgb * (255 - content.a).
     wire [7:0]  c_a  = ct_pix_q[31:24];
-    wire [7:0]  c_r  = ct_pix_q[23:16];
-    wire [7:0]  c_g  = ct_pix_q[15:8];
-    wire [7:0]  c_b  = ct_pix_q[7:0];
     wire [7:0]  ia   = 8'd255 - c_a;
     wire [15:0] wr_m = wp_pix_q[23:16] * ia;
     wire [15:0] wg_m = wp_pix_q[15:8]  * ia;
     wire [15:0] wb_m = wp_pix_q[7:0]   * ia;
-    wire [8:0]  sr   = c_r + wr_m[15:8];
-    wire [8:0]  sg   = c_g + wg_m[15:8];
-    wire [8:0]  sb   = c_b + wb_m[15:8];
-    wire [7:0]  or_  = sr[8] ? 8'hFF : sr[7:0];
-    wire [7:0]  og   = sg[8] ? 8'hFF : sg[7:0];
-    wire [7:0]  ob   = sb[8] ? 8'hFF : sb[7:0];
-    wire [23:0] content_rgb = {c_r, c_g, c_b};
-    wire [23:0] blend_rgb   = comp_en_h1 ? {or_, og, ob} : content_rgb;
-    wire [23:0] base_sel    = TEST_PATTERN ? test_q1 : blend_rgb;
+
+    logic [23:0] crgb_q2a;    // content rgb, carried for the add
+    logic [23:0] wmul_q2a;    // {wr_m, wg_m, wb_m}[15:8] — the /256 products
+    logic        comp_q2a;
+    logic [23:0] test_q2a;
+    logic [31:0] bx_pix_q2a;
+    logic        bx_cover_q2a;
+    logic        h_act_q2a, v_act_q2a, h_sync_q2a, v_sync_q2a;
+    always_ff @(posedge hdmi_clk or negedge hdmi_rst_n) begin
+        if (!hdmi_rst_n) begin
+            crgb_q2a <= 24'd0; wmul_q2a <= 24'd0; comp_q2a <= 1'b0;
+            test_q2a <= 24'd0; bx_pix_q2a <= 32'd0; bx_cover_q2a <= 1'b0;
+            h_act_q2a <= 1'b0; v_act_q2a <= 1'b0; h_sync_q2a <= 1'b0; v_sync_q2a <= 1'b0;
+        end else begin
+            crgb_q2a     <= ct_pix_q[23:0];
+            wmul_q2a     <= {wr_m[15:8], wg_m[15:8], wb_m[15:8]};
+            comp_q2a     <= comp_en_h1;
+            test_q2a     <= test_q1;
+            bx_pix_q2a   <= bx_pix_q;
+            bx_cover_q2a <= bx_cover_q1;
+            h_act_q2a  <= h_act_q1;   v_act_q2a  <= v_act_q1;
+            h_sync_q2a <= h_sync_q1;  v_sync_q2a <= v_sync_q1;
+        end
+    end
+
+    // stage 2b combinational: content-over-wallpaper, ADD/SELECT half.
+    wire [8:0]  sr  = crgb_q2a[23:16] + wmul_q2a[23:16];
+    wire [8:0]  sg  = crgb_q2a[15:8]  + wmul_q2a[15:8];
+    wire [8:0]  sb  = crgb_q2a[7:0]   + wmul_q2a[7:0];
+    wire [7:0]  or_ = sr[8] ? 8'hFF : sr[7:0];
+    wire [7:0]  og  = sg[8] ? 8'hFF : sg[7:0];
+    wire [7:0]  ob  = sb[8] ? 8'hFF : sb[7:0];
+    wire [23:0] blend_rgb = comp_q2a ? {or_, og, ob} : crgb_q2a;
+    wire [23:0] base_sel  = TEST_PATTERN ? test_q2a : blend_rgb;
 
     logic [23:0] base_q2;
     logic [31:0] bx_pix_q2;
@@ -452,26 +482,48 @@ module compositor #(
             base_q2 <= 24'd0; bx_pix_q2 <= 32'd0; bx_cover_q2 <= 1'b0;
             h_act_q2 <= 1'b0; v_act_q2 <= 1'b0; h_sync_q2 <= 1'b0; v_sync_q2 <= 1'b0;
         end else begin
-            base_q2 <= base_sel; bx_pix_q2 <= bx_pix_q; bx_cover_q2 <= bx_cover_q1;
-            h_act_q2 <= h_act_q1;   v_act_q2 <= v_act_q1;
-            h_sync_q2 <= h_sync_q1; v_sync_q2 <= v_sync_q1;
+            base_q2 <= base_sel; bx_pix_q2 <= bx_pix_q2a; bx_cover_q2 <= bx_cover_q2a;
+            h_act_q2 <= h_act_q2a;   v_act_q2 <= v_act_q2a;
+            h_sync_q2 <= h_sync_q2a; v_sync_q2 <= v_sync_q2a;
         end
     end
 
-    // stage 3 combinational: boxart-over-base premultiplied blend.
-    // out.rgb = boxart.rgb + base.rgb * (255 - boxart.a) / 256.
+    // stage 3a combinational: boxart-over-base, MULTIPLY half.
+    //   out.rgb = boxart.rgb + base.rgb * (255 - boxart.a) / 256.
     wire [7:0]  bx_a2 = bx_pix_q2[31:24];
     wire [7:0]  ibx   = 8'd255 - bx_a2;
     wire [15:0] dr_m  = base_q2[23:16] * ibx;
     wire [15:0] dg_m  = base_q2[15:8]  * ibx;
     wire [15:0] db_m  = base_q2[7:0]   * ibx;
-    wire [8:0]  xr    = bx_pix_q2[23:16] + dr_m[15:8];
-    wire [8:0]  xg    = bx_pix_q2[15:8]  + dg_m[15:8];
-    wire [8:0]  xb    = bx_pix_q2[7:0]   + db_m[15:8];
-    wire [7:0]  fr    = xr[8] ? 8'hFF : xr[7:0];
-    wire [7:0]  fg    = xg[8] ? 8'hFF : xg[7:0];
-    wire [7:0]  fb    = xb[8] ? 8'hFF : xb[7:0];
-    wire [23:0] pix_sel = bx_cover_q2 ? {fr, fg, fb} : base_q2;
+
+    logic [23:0] bxrgb_q3a;   // boxart rgb, carried for the add
+    logic [23:0] dmul_q3a;    // {dr_m, dg_m, db_m}[15:8] — the /256 products
+    logic [23:0] base_q3a;    // base rgb, carried for the non-cover path
+    logic        bx_cover_q3a;
+    logic        h_act_q3a, v_act_q3a, h_sync_q3a, v_sync_q3a;
+    always_ff @(posedge hdmi_clk or negedge hdmi_rst_n) begin
+        if (!hdmi_rst_n) begin
+            bxrgb_q3a <= 24'd0; dmul_q3a <= 24'd0; base_q3a <= 24'd0;
+            bx_cover_q3a <= 1'b0;
+            h_act_q3a <= 1'b0; v_act_q3a <= 1'b0; h_sync_q3a <= 1'b0; v_sync_q3a <= 1'b0;
+        end else begin
+            bxrgb_q3a    <= bx_pix_q2[23:0];
+            dmul_q3a     <= {dr_m[15:8], dg_m[15:8], db_m[15:8]};
+            base_q3a     <= base_q2;
+            bx_cover_q3a <= bx_cover_q2;
+            h_act_q3a  <= h_act_q2;   v_act_q3a  <= v_act_q2;
+            h_sync_q3a <= h_sync_q2;  v_sync_q3a <= v_sync_q2;
+        end
+    end
+
+    // stage 3b combinational: boxart-over-base, ADD/SELECT half.
+    wire [8:0]  xr = bxrgb_q3a[23:16] + dmul_q3a[23:16];
+    wire [8:0]  xg = bxrgb_q3a[15:8]  + dmul_q3a[15:8];
+    wire [8:0]  xb = bxrgb_q3a[7:0]   + dmul_q3a[7:0];
+    wire [7:0]  fr = xr[8] ? 8'hFF : xr[7:0];
+    wire [7:0]  fg = xg[8] ? 8'hFF : xg[7:0];
+    wire [7:0]  fb = xb[8] ? 8'hFF : xb[7:0];
+    wire [23:0] pix_sel = bx_cover_q3a ? {fr, fg, fb} : base_q3a;
 
     logic [23:0] pix_q3;
     logic        h_act_q3, v_act_q3, h_sync_q3, v_sync_q3;
@@ -481,8 +533,8 @@ module compositor #(
             h_act_q3 <= 1'b0; v_act_q3 <= 1'b0; h_sync_q3 <= 1'b0; v_sync_q3 <= 1'b0;
         end else begin
             pix_q3 <= pix_sel;
-            h_act_q3 <= h_act_q2;   v_act_q3 <= v_act_q2;
-            h_sync_q3 <= h_sync_q2; v_sync_q3 <= v_sync_q2;
+            h_act_q3 <= h_act_q3a;   v_act_q3 <= v_act_q3a;
+            h_sync_q3 <= h_sync_q3a; v_sync_q3 <= v_sync_q3a;
         end
     end
 
