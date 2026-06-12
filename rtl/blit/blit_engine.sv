@@ -162,7 +162,8 @@ module blit_engine (
         S_AFF_ROW,         // per-row: dst row addr, reset x accumulator
         S_AFF_PIX_MAC,     // compute ix/iy/frac, bank read addresses
         S_AFF_PIX_READ,    // BRAM read-latency bubble
-        S_AFF_PIX_FILTER,  // bilinear blend the 4 taps → src_pixel_q
+        S_AFF_PIX_FILTER,  // bilinear stage 1: x-interp the 4 taps → top/bot rows
+        S_AFF_PIX_FILTER2, // bilinear stage 2: y-interp top/bot → src_pixel_q
         S_AFF_FETCH_DST,   // RMW dst read (SrcAlpha/Additive)
         S_AFF_WAIT_DST,
         S_AFF_BLEND,       // dst blend (own cycle for timing)
@@ -379,6 +380,10 @@ module blit_engine (
     logic [7:0]         aff_fx8_q, aff_fy8_q;
     logic               aff_t00v_q, aff_t01v_q, aff_t10v_q, aff_t11v_q;
 
+    // Bilinear stage-1 outputs: the two x-interpolated source rows,
+    // held one cycle for the y-interpolation in S_AFF_PIX_FILTER2.
+    logic [31:0] aff_top_q, aff_bot_q;
+
     // Registered BRAM read outputs (one per physical copy).
     logic [31:0] ea_q, eb_q, oa_q, ob_q;
 
@@ -537,31 +542,42 @@ module blit_engine (
         else                 return res[7:0];
     endfunction
 
-    // Separable bilinear of a 2x2 texel quad (premultiplied-alpha safe).
+    // Separable bilinear of a 2x2 texel quad (premultiplied-alpha safe),
     //   t00=(ix,iy) t01=(ix+1,iy) t10=(ix,iy+1) t11=(ix+1,iy+1)
-    // fx/fy are the 8-bit fractional sub-texel positions.
-    function automatic logic [31:0] bilinear(
-        input logic [31:0] t00,
-        input logic [31:0] t01,
-        input logic [31:0] t10,
-        input logic [31:0] t11,
-        input logic [7:0]  fx,
+    // split into two pipeline halves so each carries only ONE `lerp8`
+    // (one multiply) of combinational depth. The full 2×2 blend in a
+    // single cycle chained two multiplies and missed clk_sys by ~8 ns;
+    // the FSM now runs `bilinear_row_x` in S_AFF_PIX_FILTER (registering
+    // the two x-interpolated rows) and `bilinear_col_y` the next cycle in
+    // S_AFF_PIX_FILTER2. Result is bit-identical to the one-shot form
+    // (pack_pixel/ch_* round-trip exactly).
+
+    // Stage 1: x-interpolate one source row. `left`/`right` are the two
+    // horizontally-adjacent taps; returns the per-channel lerp at fx.
+    function automatic logic [31:0] bilinear_row_x(
+        input logic [31:0] left,
+        input logic [31:0] right,
+        input logic [7:0]  fx
+    );
+        bilinear_row_x = pack_pixel(
+            lerp8(ch_r(left), ch_r(right), fx),
+            lerp8(ch_g(left), ch_g(right), fx),
+            lerp8(ch_b(left), ch_b(right), fx),
+            lerp8(ch_a(left), ch_a(right), fx)
+        );
+    endfunction
+
+    // Stage 2: y-interpolate the two x-interpolated rows at fy.
+    function automatic logic [31:0] bilinear_col_y(
+        input logic [31:0] top,
+        input logic [31:0] bot,
         input logic [7:0]  fy
     );
-        logic [7:0] r0, r1, g0, g1, b0, b1, a0, a1;
-        r0 = lerp8(ch_r(t00), ch_r(t01), fx);
-        r1 = lerp8(ch_r(t10), ch_r(t11), fx);
-        g0 = lerp8(ch_g(t00), ch_g(t01), fx);
-        g1 = lerp8(ch_g(t10), ch_g(t11), fx);
-        b0 = lerp8(ch_b(t00), ch_b(t01), fx);
-        b1 = lerp8(ch_b(t10), ch_b(t11), fx);
-        a0 = lerp8(ch_a(t00), ch_a(t01), fx);
-        a1 = lerp8(ch_a(t10), ch_a(t11), fx);
-        bilinear = pack_pixel(
-            lerp8(r0, r1, fy),
-            lerp8(g0, g1, fy),
-            lerp8(b0, b1, fy),
-            lerp8(a0, a1, fy)
+        bilinear_col_y = pack_pixel(
+            lerp8(ch_r(top), ch_r(bot), fy),
+            lerp8(ch_g(top), ch_g(bot), fy),
+            lerp8(ch_b(top), ch_b(bot), fy),
+            lerp8(ch_a(top), ch_a(bot), fy)
         );
     endfunction
 
@@ -793,6 +809,8 @@ module blit_engine (
             aff_t01v_q           <= 1'b0;
             aff_t10v_q           <= 1'b0;
             aff_t11v_q           <= 1'b0;
+            aff_top_q            <= 32'd0;
+            aff_bot_q            <= 32'd0;
             done_o               <= 1'b0;
         end else begin
             done_o <= 1'b0;
@@ -1684,8 +1702,7 @@ module blit_engine (
                 end
 
                 S_AFF_PIX_FILTER: begin
-                    automatic logic [31:0] t00, t01, t10, t11, srcpix;
-                    automatic logic [7:0]  sa;
+                    automatic logic [31:0] t00, t01, t10, t11;
                     // Parity mux: aff_ix_q[0] picks which bank is the
                     // left column of the quad (even-x bank vs odd-x).
                     t00 = aff_ix_q[0] ? oa_q : ea_q;
@@ -1696,7 +1713,17 @@ module blit_engine (
                     if (!aff_t01v_q) t01 = 32'd0;
                     if (!aff_t10v_q) t10 = 32'd0;
                     if (!aff_t11v_q) t11 = 32'd0;
-                    srcpix = bilinear(t00, t01, t10, t11, aff_fx8_q, aff_fy8_q);
+                    // x-interpolate both rows now; y-interpolation runs
+                    // next cycle so each stage holds only one lerp8.
+                    aff_top_q <= bilinear_row_x(t00, t01, aff_fx8_q);
+                    aff_bot_q <= bilinear_row_x(t10, t11, aff_fx8_q);
+                    state     <= S_AFF_PIX_FILTER2;
+                end
+
+                S_AFF_PIX_FILTER2: begin
+                    automatic logic [31:0] srcpix;
+                    automatic logic [7:0]  sa;
+                    srcpix = bilinear_col_y(aff_top_q, aff_bot_q, aff_fy8_q);
                     sa = ch_a(srcpix);
                     // Source is premultiplied; same blend fast paths as
                     // the COPY path.
