@@ -67,6 +67,10 @@ export function App() {
   );
   useIntent(
     'navigate_down',
+    // `cat` is in the dep array: the clamp reads the *current* category's
+    // item count, so the handler must refresh when the category changes.
+    // (With `[]` it was a stale closure pinned to category 0's length —
+    // over/under-scrolling the row cursor in every other category.)
     useCallback((e) => {
       if (e.kind === 'pressed' || e.kind === 'repeat') {
         setItem((i) => {
@@ -74,7 +78,7 @@ export function App() {
           return Math.min(len - 1, i + 1);
         });
       }
-    }, []),
+    }, [cat]),
   );
 
   const category = CATEGORIES[cat];
