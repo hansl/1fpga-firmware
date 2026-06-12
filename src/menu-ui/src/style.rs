@@ -134,6 +134,15 @@ pub struct Style {
     // additively by descendants, like scale is multiplicatively.
     pub rotate: Option<f32>,
 
+    // Translation in pixels, applied to the paint rect *after* scaling.
+    // Inherited additively by descendants — a parent with translate_x=40
+    // shifts every child by 40 too — exactly like CSS `transform:
+    // translate`. The layout box is NOT affected: Taffy still places
+    // neighbours as though the element were at the origin, so animating
+    // translate is paint-only (no reflow). Default 0 on both axes.
+    pub translate_x: Option<f32>,
+    pub translate_y: Option<f32>,
+
     // ---- Text --------------------------------------------------------
     pub color: Option<Rgba>,
     /// Font family — looked up in `FontRegistry`. `None` means use
@@ -184,6 +193,8 @@ impl Style {
         if patch.scale_x.is_some()         { self.scale_x = patch.scale_x; }
         if patch.scale_y.is_some()         { self.scale_y = patch.scale_y; }
         if patch.rotate.is_some()          { self.rotate = patch.rotate; }
+        if patch.translate_x.is_some()     { self.translate_x = patch.translate_x; }
+        if patch.translate_y.is_some()     { self.translate_y = patch.translate_y; }
         if patch.color.is_some()           { self.color = patch.color; }
         if patch.font_family.is_some()     { self.font_family = patch.font_family.clone(); }
         if patch.font_size.is_some()       { self.font_size = patch.font_size; }
@@ -244,10 +255,17 @@ pub struct Transform {
     /// Accumulated rotation in degrees (clockwise), about the rect
     /// centre. Only <img> nodes act on it (via the affine blit).
     pub rotation: f32,
+    /// Accumulated translation in pixels, added to the dst rect *after*
+    /// the scale-about-centre step. Additive down the subtree, with no
+    /// scale interaction (the menu's translated nodes have no scaled
+    /// ancestors, so a plain sum matches CSS for that case). Paint-only.
+    pub tx: f32,
+    pub ty: f32,
 }
 
 impl Transform {
-    pub const IDENTITY: Self = Self { scale_x: 1.0, scale_y: 1.0, rotation: 0.0 };
+    pub const IDENTITY: Self =
+        Self { scale_x: 1.0, scale_y: 1.0, rotation: 0.0, tx: 0.0, ty: 0.0 };
 
     #[inline]
     pub fn is_identity(self) -> bool {
@@ -278,8 +296,9 @@ impl Transform {
         let cy = y + h * 0.5;
         let new_w = w * sx;
         let new_h = h * sy;
-        let new_x = cx - new_w * 0.5;
-        let new_y = cy - new_h * 0.5;
+        // Scale about the centre, then apply the accumulated translate.
+        let new_x = cx - new_w * 0.5 + self.tx;
+        let new_y = cy - new_h * 0.5 + self.ty;
         (new_x, new_y, new_w, new_h)
     }
 
@@ -334,6 +353,8 @@ fn walk_transform(
         scale_x: parent.scale_x * sx,
         scale_y: parent.scale_y * sy,
         rotation: parent.rotation + node.style.rotate.unwrap_or(0.0),
+        tx: parent.tx + node.style.translate_x.unwrap_or(0.0),
+        ty: parent.ty + node.style.translate_y.unwrap_or(0.0),
     };
     out.insert(id, here);
     for &child in &node.children {

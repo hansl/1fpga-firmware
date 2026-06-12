@@ -43,6 +43,14 @@ pub struct UiState {
 struct UiStateInner {
     tree: Tree,
     root: NodeId,
+    // Boxart overlay layer (Phase D). A second root in the same tree,
+    // rendered to the hardware boxart layer instead of the content FB. Its
+    // position is set imperatively (so the slide is pure register writes,
+    // no React re-render); visibility gates the layer enable.
+    boxart_root: NodeId,
+    boxart_x: i16,
+    boxart_y: i16,
+    boxart_visible: bool,
 }
 
 impl UiState {
@@ -60,6 +68,31 @@ impl UiState {
 
     fn set_root(&self, root: NodeId) {
         self.inner.borrow_mut().root = root;
+    }
+
+    /// The boxart overlay root (`NodeId::NONE` if no boxart layer is mounted).
+    pub fn boxart_root(&self) -> NodeId {
+        self.inner.borrow().boxart_root
+    }
+
+    /// Boxart placement + visibility for the current frame (x, y, visible).
+    pub fn boxart_placement(&self) -> (i16, i16, bool) {
+        let b = self.inner.borrow();
+        (b.boxart_x, b.boxart_y, b.boxart_visible)
+    }
+
+    fn set_boxart_root(&self, root: NodeId) {
+        self.inner.borrow_mut().boxart_root = root;
+    }
+
+    fn set_boxart_pos(&self, x: i16, y: i16) {
+        let mut b = self.inner.borrow_mut();
+        b.boxart_x = x;
+        b.boxart_y = y;
+    }
+
+    fn set_boxart_visible(&self, visible: bool) {
+        self.inner.borrow_mut().boxart_visible = visible;
     }
 }
 
@@ -160,6 +193,18 @@ pub fn register(loader: &MapModuleLoader, context: &mut Context) -> JsResult<()>
             NativeFunction::from_fn_ptr(warmup_glyphs),
         ),
         (
+            js_string!("boxartSetLayer"),
+            NativeFunction::from_fn_ptr(set_boxart_layer),
+        ),
+        (
+            js_string!("boxartMoveTo"),
+            NativeFunction::from_fn_ptr(boxart_move_to),
+        ),
+        (
+            js_string!("boxartSetVisible"),
+            NativeFunction::from_fn_ptr(boxart_set_visible),
+        ),
+        (
             js_string!("run"),
             NativeFunction::from_fn_ptr(run_app),
         ),
@@ -242,6 +287,34 @@ fn commit_text_update(
         .to_std_string_escaped();
     let state = ui_state(context)?;
     state.with_tree_mut(|t| t.set_text(id, text));
+    Ok(JsValue::undefined())
+}
+
+/// Register a node (and its subtree) as the boxart overlay layer's root —
+/// the runtime renders it to the hardware boxart layer instead of the
+/// content FB. Called by the reconciler when the `<Boxart>` portal mounts.
+fn set_boxart_layer(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let id = NodeId(args.get_or_undefined(0).to_u32(context)?);
+    ui_state(context)?.set_boxart_root(id);
+    tracing::debug!("gui.boxart.setLayer({})", id.0);
+    Ok(JsValue::undefined())
+}
+
+/// Move the boxart panel (signed screen position; may be off-screen for a
+/// slide). Imperative on purpose: the runtime writes the position register
+/// each frame, so animating is pure register writes — no React re-render,
+/// no blit.
+fn boxart_move_to(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let x = args.get_or_undefined(0).to_i32(context)? as i16;
+    let y = args.get_or_undefined(1).to_i32(context)? as i16;
+    ui_state(context)?.set_boxart_pos(x, y);
+    Ok(JsValue::undefined())
+}
+
+/// Show/hide the boxart layer (gates the compositor layer enable).
+fn boxart_set_visible(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let v = args.get_or_undefined(0).to_boolean();
+    ui_state(context)?.set_boxart_visible(v);
     Ok(JsValue::undefined())
 }
 
@@ -395,6 +468,8 @@ fn start_tween(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
         "scaleX",
         "scaleY",
         "rotate",
+        "translateX",
+        "translateY",
         "top",
         "right",
         "bottom",
@@ -793,6 +868,9 @@ fn parse_style_value(value: &JsValue, context: &mut Context) -> JsResult<Style> 
         }
     }
     out.rotate = read_f32(&o, "rotate", context)?;
+    // Translate offsets (paint-only); missing axis stays None = no shift.
+    out.translate_x = read_f32(&o, "translateX", context)?;
+    out.translate_y = read_f32(&o, "translateY", context)?;
 
     let ff = o.get(js_string!("fontFamily"), context)?;
     if !ff.is_undefined() {

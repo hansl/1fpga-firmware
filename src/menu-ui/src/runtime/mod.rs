@@ -680,6 +680,13 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     let mut sum_paint_area_px: u64 = 0;
     let mut count_full_paints: u32 = 0;
 
+    // Cached layout: the Taffy solve (~4.8 ms) is recomputed only when a
+    // layout-affecting change happened (structure / text / layout style).
+    // Paint-only tween frames (opacity / scale / rotate) reuse it — that's
+    // what makes transform animations cheap.
+    let mut layouts: std::collections::HashMap<NodeId, crate::layout::ComputedLayout> =
+        std::collections::HashMap::new();
+
     while running.load(Ordering::SeqCst) {
         let t0 = Instant::now();
 
@@ -804,19 +811,25 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
 
         let t5 = Instant::now();
 
-        // 5. Compute layout. Taffy's measure function consults the
+        // 5. Compute layout — but only when something layout-affecting
+        //    changed since last frame (structure / text / a layout style).
+        //    Paint-only tween frames reuse the cached `layouts`, skipping
+        //    Taffy's ~4.8 ms solve. Taffy's measure function consults the
         //    font atlas / image registry for text and img leaves.
-        let layouts = ui_state.with_tree(|tree| {
-            crate::layout::compute(
-                tree,
-                root,
-                fb.width as f32,
-                fb.height as f32,
-                &text_styles,
-                &fonts,
-                &images,
-            )
-        });
+        if ui_state.with_tree(|tree| tree.is_layout_dirty()) {
+            layouts = ui_state.with_tree(|tree| {
+                crate::layout::compute(
+                    tree,
+                    root,
+                    fb.width as f32,
+                    fb.height as f32,
+                    &text_styles,
+                    &fonts,
+                    &images,
+                )
+            });
+            ui_state.with_tree_mut(|tree| tree.clear_layout_dirty());
+        }
 
         let t6 = Instant::now();
 

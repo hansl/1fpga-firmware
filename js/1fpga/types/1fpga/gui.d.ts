@@ -70,6 +70,13 @@ declare module '1fpga:gui' {
     // <img> elements act on it (rendered via the FPGA affine blit, whose
     // source is capped at 128×128); ignored for other elements.
     rotate?: number;
+    // Translation in pixels, applied after scale. Inherited additively by
+    // descendants (CSS `transform: translate` shape). Animating it is
+    // paint-only — it never triggers a reflow — so it's the cheap way to
+    // slide an element or whole subtree (the XMB strip, a modal panel, a
+    // long list) without taxing layout or the blit engine.
+    translateX?: number;
+    translateY?: number;
 
     // ---- Text --------------------------------------------------------
     color?: string;

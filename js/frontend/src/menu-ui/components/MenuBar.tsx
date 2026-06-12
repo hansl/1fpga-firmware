@@ -119,7 +119,11 @@ export const MenuBar = memo(function MenuBar({
   // solve for inner_left given selected sits at CENTRE_X.
   const targetLeft = CENTRE_X - (selected + 0.5) * SLOT_WIDTH;
   const ref = useRef<gui.NodeId | null>(null);
-  useTween(ref, { left: targetLeft }, { duration: 280, easing: 'easeOut' });
+  // Slide via translateX (paint-only) instead of `left` (layout): the
+  // strip's layout position stays pinned at 0, and the horizontal scroll
+  // is a pure transform offset. The ~280ms glide then reuses the cached
+  // layout every frame instead of forcing a full Taffy reflow per frame.
+  useTween(ref, { translateX: targetLeft }, { duration: 280, easing: 'easeOut' });
 
   return (
     <>
@@ -129,7 +133,8 @@ export const MenuBar = memo(function MenuBar({
           ref={ref}
           style={{
             ...stripInnerStyle,
-            left: targetLeft,
+            left: 0,
+            translateX: targetLeft,
             width: SLOT_WIDTH * categories.length,
           }}
         >

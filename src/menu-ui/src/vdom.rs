@@ -50,6 +50,13 @@ pub struct Tree {
     /// Marks whether the tree changed since the last paint. Cleared by
     /// the runtime after each successful frame.
     dirty: bool,
+    /// Marks whether anything LAYOUT-affecting changed since the last
+    /// `layout::compute` (structure, text, or a layout style field).
+    /// Paint-only changes (opacity/scale/rotate tweens, color, img src)
+    /// do NOT set it, so the runtime can reuse the cached layout across
+    /// those frames — the whole point being cheap transform animations.
+    /// Cleared by the runtime when it (re)computes layout.
+    layout_dirty: bool,
 }
 
 impl Default for Tree {
@@ -67,6 +74,8 @@ impl Tree {
             nodes: vec![None],
             free: Vec::new(),
             dirty: false,
+            // First frame must lay out: the tree starts "needs layout".
+            layout_dirty: true,
         }
     }
 
@@ -84,7 +93,7 @@ impl Tree {
             self.nodes.push(Some(node));
             NodeId((self.nodes.len() - 1) as u32)
         };
-        self.dirty = true;
+        self.dirty = true; self.layout_dirty = true;
         id
     }
 
@@ -111,7 +120,7 @@ impl Tree {
         }
         self.nodes[id.0 as usize] = None;
         self.free.push(id.0);
-        self.dirty = true;
+        self.dirty = true; self.layout_dirty = true;
     }
 
     pub fn append_child(&mut self, parent: NodeId, child: NodeId) {
@@ -125,7 +134,7 @@ impl Tree {
         if let Some(p) = self.nodes[parent.0 as usize].as_mut() {
             p.children.push(child);
         }
-        self.dirty = true;
+        self.dirty = true; self.layout_dirty = true;
     }
 
     /// Insert `child` into `parent`'s children list immediately before
@@ -146,7 +155,7 @@ impl Tree {
                 None => p.children.push(child),
             }
         }
-        self.dirty = true;
+        self.dirty = true; self.layout_dirty = true;
     }
 
     /// Detach `child` from `parent`'s children list without recursively
@@ -164,7 +173,7 @@ impl Tree {
         if let Some(c) = self.nodes[child.0 as usize].as_mut() {
             c.parent = NodeId::NONE;
         }
-        self.dirty = true;
+        self.dirty = true; self.layout_dirty = true;
     }
 
     fn detach_from_parent(&mut self, child: NodeId) {
@@ -182,6 +191,17 @@ impl Tree {
     pub fn set_style(&mut self, id: NodeId, style: Style) {
         if let Some(n) = self.nodes.get_mut(id.0 as usize).and_then(|s| s.as_mut()) {
             n.style = style;
+            self.dirty = true; self.layout_dirty = true;
+        }
+    }
+
+    /// Like [`Self::set_style`] but for a style change the caller knows is
+    /// PAINT-ONLY (opacity/scale/rotate/color) — it marks the tree dirty for
+    /// repaint but NOT layout-dirty, so the runtime keeps the cached layout.
+    /// Used by transform/opacity tweens (see `runtime::anim`).
+    pub fn set_style_paint(&mut self, id: NodeId, style: Style) {
+        if let Some(n) = self.nodes.get_mut(id.0 as usize).and_then(|s| s.as_mut()) {
+            n.style = style;
             self.dirty = true;
         }
     }
@@ -192,7 +212,7 @@ impl Tree {
             && matches!(n.kind, NodeKind::Text { .. })
         {
             n.kind = NodeKind::Text { content };
-            self.dirty = true;
+            self.dirty = true; self.layout_dirty = true;
         }
     }
 
@@ -204,6 +224,7 @@ impl Tree {
             && matches!(n.kind, NodeKind::Img { .. })
         {
             n.kind = NodeKind::Img { src };
+            // paint-only: a fixed-size <img>'s pixels change, not the layout.
             self.dirty = true;
         }
     }
@@ -218,6 +239,17 @@ impl Tree {
 
     pub fn clear_dirty(&mut self) {
         self.dirty = false;
+    }
+
+    /// True if a layout-affecting change happened since the last
+    /// [`Self::clear_layout_dirty`] — the runtime recomputes layout only
+    /// then, otherwise it reuses the cached `ComputedLayout` map.
+    pub fn is_layout_dirty(&self) -> bool {
+        self.layout_dirty
+    }
+
+    pub fn clear_layout_dirty(&mut self) {
+        self.layout_dirty = false;
     }
 }
 

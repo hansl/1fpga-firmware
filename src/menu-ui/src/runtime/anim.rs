@@ -35,6 +35,8 @@ pub enum TweenProp {
     ScaleX,
     ScaleY,
     Rotate,
+    TranslateX,
+    TranslateY,
     Top,
     Right,
     Bottom,
@@ -48,6 +50,8 @@ impl TweenProp {
             "scaleX" => Some(Self::ScaleX),
             "scaleY" => Some(Self::ScaleY),
             "rotate" => Some(Self::Rotate),
+            "translateX" => Some(Self::TranslateX),
+            "translateY" => Some(Self::TranslateY),
             "top" => Some(Self::Top),
             "right" => Some(Self::Right),
             "bottom" => Some(Self::Bottom),
@@ -65,6 +69,9 @@ impl TweenProp {
             Self::ScaleX => style.scale_x.unwrap_or(1.0),
             Self::ScaleY => style.scale_y.unwrap_or(1.0),
             Self::Rotate => style.rotate.unwrap_or(0.0),
+            // Translation offsets default to 0 (no shift).
+            Self::TranslateX => style.translate_x.unwrap_or(0.0),
+            Self::TranslateY => style.translate_y.unwrap_or(0.0),
             // Position offsets: 0 is a sensible "no offset" default
             // for the from-value when the style hasn't committed yet.
             Self::Top => style.top.unwrap_or(0.0),
@@ -87,6 +94,9 @@ impl TweenProp {
             Self::ScaleY => patch.scale_y = Some(value.max(0.0)),
             // Rotation in degrees; any value is legal (it wraps).
             Self::Rotate => patch.rotate = Some(value),
+            // Translation in pixels; any value is legal (signed offset).
+            Self::TranslateX => patch.translate_x = Some(value),
+            Self::TranslateY => patch.translate_y = Some(value),
             // Position offsets: pass through unchanged. Negative
             // values are CSS-legal (drag an element off-screen).
             Self::Top => patch.top = Some(value),
@@ -95,6 +105,15 @@ impl TweenProp {
             Self::Left => patch.left = Some(value),
         }
         patch
+    }
+
+    /// Whether animating this prop affects LAYOUT (position offsets feed
+    /// Taffy) vs only paint (opacity/scale/rotate/translate are applied
+    /// at paint). Paint-only tweens let the runtime reuse the cached
+    /// layout — `translateX/Y` is the cheap way to slide an element or
+    /// subtree without reflowing, unlike `left/top` which do.
+    fn is_layout(self) -> bool {
+        matches!(self, Self::Top | Self::Right | Self::Bottom | Self::Left)
     }
 }
 
@@ -274,11 +293,18 @@ impl AnimationManager {
 /// merge path JS's `gui.updateStyle` uses.
 fn apply(ui_state: &UiState, node_id: NodeId, prop: TweenProp, value: f32) {
     let patch = prop.write(value);
+    let layout = prop.is_layout();
     ui_state.with_tree_mut(|t| {
         if let Some(node) = t.get(node_id) {
             let mut merged = node.style.clone();
             merged.merge_from(&patch);
-            t.set_style(node_id, merged);
+            // Position tweens reflow; opacity/scale/rotate keep the cached
+            // layout (set_style_paint marks paint-dirty only).
+            if layout {
+                t.set_style(node_id, merged);
+            } else {
+                t.set_style_paint(node_id, merged);
+            }
         }
     });
 }
