@@ -199,6 +199,38 @@ impl Style {
         if patch.font_family.is_some()     { self.font_family = patch.font_family.clone(); }
         if patch.font_size.is_some()       { self.font_size = patch.font_size; }
     }
+
+    /// True if `self` and `other` would produce the SAME Taffy layout —
+    /// i.e. they differ (if at all) only in paint-only fields:
+    /// background-color, opacity, color, scale, rotate, translate.
+    ///
+    /// Used by [`crate::vdom::Tree::set_style`] (the path every React
+    /// `commitUpdate` funnels through) to decide whether a style change
+    /// needs a reflow or can reuse the cached layout. Implemented by
+    /// neutralising the paint-only fields on clones and comparing the
+    /// rest — deliberately conservative: any field NOT in the exclusion
+    /// list, including a future one, counts as layout-affecting, forcing
+    /// a relayout rather than risking a skipped one. (`overflow` is
+    /// intentionally treated as layout-affecting; it isn't animated, so
+    /// being conservative there costs nothing.)
+    pub fn layout_eq(&self, other: &Style) -> bool {
+        if self == other {
+            return true;
+        }
+        let neutralise = |src: &Style| -> Style {
+            let mut s = src.clone();
+            s.background_color = None;
+            s.opacity = None;
+            s.color = None;
+            s.scale_x = None;
+            s.scale_y = None;
+            s.rotate = None;
+            s.translate_x = None;
+            s.translate_y = None;
+            s
+        };
+        neutralise(self) == neutralise(other)
+    }
 }
 
 /// Identifier for a registered font — kept as a small `String` since

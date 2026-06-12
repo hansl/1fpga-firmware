@@ -190,8 +190,17 @@ impl Tree {
 
     pub fn set_style(&mut self, id: NodeId, style: Style) {
         if let Some(n) = self.nodes.get_mut(id.0 as usize).and_then(|s| s.as_mut()) {
+            // React's commitUpdate funnels EVERY style change through here.
+            // Only a layout-affecting field change forces a reflow; a
+            // paint-only change (opacity/scale/rotate/translate/color)
+            // keeps the cached layout. This is what lets paint-only
+            // re-renders — e.g. brightening the selected row on vertical
+            // nav — skip the relayout entirely.
+            if !n.style.layout_eq(&style) {
+                self.layout_dirty = true;
+            }
             n.style = style;
-            self.dirty = true; self.layout_dirty = true;
+            self.dirty = true;
         }
     }
 
@@ -295,5 +304,31 @@ mod tests {
         assert!(t.dirty());
         t.clear_dirty();
         assert!(!t.dirty());
+    }
+
+    #[test]
+    fn set_style_paint_only_change_skips_layout_dirty() {
+        let mut t = Tree::new();
+        let a = t.create(NodeKind::Div, Style::default());
+        // Simulate a completed layout pass.
+        t.clear_layout_dirty();
+        assert!(!t.is_layout_dirty());
+
+        // Paint-only change (opacity): repaint-dirty, NOT layout-dirty.
+        let paint = Style { opacity: Some(0.5), ..Style::default() };
+        t.set_style(a, paint.clone());
+        assert!(t.dirty());
+        assert!(
+            !t.is_layout_dirty(),
+            "an opacity-only change must reuse the cached layout"
+        );
+
+        // Layout change (width) on top of the paint field: must relayout.
+        let layout = Style { width: Some(100.0), ..paint };
+        t.set_style(a, layout);
+        assert!(
+            t.is_layout_dirty(),
+            "a width change must force a relayout"
+        );
     }
 }
