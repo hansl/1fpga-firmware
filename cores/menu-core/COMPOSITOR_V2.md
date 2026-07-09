@@ -424,8 +424,19 @@ Specifically dirty-mark conditions per slot diff:
 
 - New descriptor has `enabled` set and old didn't: mark `[new_y, new_y+h)`.
 - Old descriptor had `enabled` and new doesn't: mark `[old_y, old_y+h)`.
-- Both enabled and any of {`dst_*`, `src_*`, `tex_id`, `color`, `flags`,
+- Both enabled and any of {`dst_*`, `src_*`, `color`, `flags`,
   `opacity`, `z_priority`} differ: mark union of both ranges.
+
+> **Amendment (2026-07-09):** `tex_id` is excluded from the diff. The
+> per-frame source-RT double-buffer flip (§9) is a `tex_id`-only change
+> on a full-screen layer; auto-dirtying its dst range forced a
+> full-height recomposite + drain every frame, oversubscribing the
+> scanout writer and starving scanlines (visible as a mosaic of frame
+> generations + never-drained garbage bands). Hosts that swap `tex_id`
+> MUST declare the content difference between the two textures via
+> `INVALIDATE_RECT` — the menu-ui damage tracker already paints and
+> invalidates exactly that union. A `tex_id` change accompanied by any
+> other field change still fires.
 
 This is computed inside the BRAM-bank-swap logic on `LAYER_COMMIT`: as the
 active index flips, the new and old banks' descriptors are compared
@@ -658,6 +669,31 @@ revisit if visible.
 
 (Open question for review: option A may actually be reasonable on this
 architecture if DDR3 has headroom. Measure phase 1 bandwidth first.)
+
+### 10.4. Option D: per-slot pending masks (IMPLEMENTED)
+
+What actually shipped is none of the above: the implementation kept the
+triple-buffer rotation from v1 (fb_swapper unchanged, writer drains into
+FB[render_idx], MISTER_FB reads FB[display_idx]) and solved the stale-
+clean-scanline catch in the dirty bitmask itself. The bitmask holds one
+**pending mask per FB slot** (3 × 1024 bits) plus the building mask:
+
+- `INVALIDATE_RECT` / `INVALIDATE_ALL` accumulate into BUILDING as before.
+- `MASK_COMMIT` ORs BUILDING into all three pending masks and clears
+  BUILDING (host-visible semantics unchanged).
+- The writer's drain gate for a frame reads PENDING[render_idx].
+- When the writer finishes draining scanline y into slot k, it pulses a
+  clear-on-drain feedback and PENDING[k][y] is cleared.
+
+So a dirty scanline stays pending until it has landed in *every* slot
+(three compositor frames), after which all three buffers are coherent and
+the rotation is invisible. Boot marks all three pending masks fully dirty,
+so every slot gets at least one full composite (no uninitialized-DDR3
+garbage). Scanlines ≥1024 (mask is 1024 bits, V_ACTIVE 1080) have no
+storage and are treated as always dirty. No tearing (display only ever
+shows presented frames), no option-A copy bandwidth; the cost is ~2 extra
+DDR3-written frames per damaged region and the always-dirty bottom 56
+lines (~11 MB/s at 26.6 Hz).
 
 ---
 

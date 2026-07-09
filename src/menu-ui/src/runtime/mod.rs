@@ -998,7 +998,14 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         // those ops with real semantics, so the smoke test is redundant
         // when composite_v2 is on.
         let (fence_dt, scanout_dt) = if composite_v2 {
-            let token = frame.mask_commit()?.submit()?;
+            // Submit the frame's blits + INVALIDATE_RECTs and wait for
+            // the ring to drain. MASK_COMMIT is deliberately NOT part
+            // of this submission: publishing the invalidates while
+            // layer 0 still points at the PREVIOUS RT would let the
+            // compositor drain the damaged scanlines with stale
+            // content — and clear their per-slot pending bits, so the
+            // real content would never be composited.
+            let token = frame.submit()?;
             let t_submit = Instant::now();
             match token.wait(timeout) {
                 Ok(()) => {}
@@ -1029,6 +1036,14 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                 ).with_blend(LayerBlend::Opaque);
                 device.set_layer(0, &desc)?;
                 device.commit_layers();
+            }
+            // NOW publish the damage. The layer table points at the
+            // new RT, so every scanline the compositor drains from
+            // here on composites current content.
+            let token = device.begin_frame().mask_commit()?.submit()?;
+            if let Err(e) = token.wait(timeout) {
+                dump_compositor_regs(&device, "mask-commit-fence-timeout");
+                return Err(e.into());
             }
             let t_done = Instant::now();
             (t_done - t_submit, Duration::ZERO)
