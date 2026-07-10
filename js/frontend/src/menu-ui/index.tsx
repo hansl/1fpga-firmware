@@ -13,7 +13,7 @@ import * as gui from '1fpga:gui';
 import './input';
 
 import { App } from './App';
-import { ALL_ICON_CODEPOINTS } from './components/Icon';
+import { ALL_ICON_CODEPOINTS, iconCodepoint, type IconName } from './components/Icon';
 import { render } from './reconciler';
 import { s } from './scale';
 
@@ -35,10 +35,21 @@ const DEMO_CHARS = ASCII + SYMBOLS;
  *  atlases match the actual pixel sizes the layout will request at
  *  this viewport. Sourced by grepping `fontSize:` in the components
  *  — keep in sync when new sizes are introduced. */
-const DEFAULT_DESIGN_SIZES = [16, 20, 22, 24, 26, 28, 32, 36, 48, 72];
-/** Icon sizes used in components (StatusBar/Notifications use 24,
- *  ActionBar uses 22). */
-const ICON_DESIGN_SIZES = [22, 24];
+const DEFAULT_DESIGN_SIZES = [16, 18, 20, 22, 24, 26, 28, 32, 36, 40, 44, 48, 72];
+/** Icon sizes used in components (ActionBar 22, GameList 24, the
+ *  status cluster / news ticker 26). */
+const ICON_DESIGN_SIZES = [22, 24, 26];
+/** The card-sized glyphs (carousel fallback art 110, docked card 72)
+ *  are warmed with ONLY the glyphs cards actually draw — a full
+ *  2000-glyph Material atlas at 110px would be enormous. */
+const CARD_GLYPH_DESIGN_SIZES = [72, 110];
+const CARD_GLYPH_NAMES: IconName[] = [
+  'sports_esports',
+  'videogame_asset',
+  'keyboard',
+  'memory',
+  'gamepad',
+];
 
 function dedup(xs: number[]): number[] {
   const seen = new Set<number>();
@@ -60,5 +71,10 @@ export async function main(): Promise<void> {
   const iconSizes = dedup(ICON_DESIGN_SIZES.map(s));
   gui.warmupGlyphs('default', defaultSizes, DEMO_CHARS);
   gui.warmupGlyphs('icons', iconSizes, ALL_ICON_CODEPOINTS);
+  gui.warmupGlyphs(
+    'icons',
+    dedup(CARD_GLYPH_DESIGN_SIZES.map(s)),
+    CARD_GLYPH_NAMES.map(iconCodepoint).join(''),
+  );
   render(<App />);
 }

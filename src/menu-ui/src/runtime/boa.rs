@@ -37,6 +37,9 @@ pub fn build_context() -> JsResult<(Context, Rc<SimpleJobExecutor>, Rc<MapModule
     // bridge is also stored as context data; the runtime fetches it
     // from there for the per-tick reply drain.
     crate::db::register(&loader, &mut context)?;
+    // `1fpga:fs`: filesystem access (content scanning, game-dir
+    // browsing). Sync IO behind settled promises — see fs_mod.rs.
+    crate::fs_mod::register(&loader, &mut context)?;
     Ok((context, executor, loader))
 }
 

@@ -50,9 +50,23 @@ export type IconName =
   | 'sd_card'
   | 'usb'
   | 'folder'
+  | 'folder_open'
+  | 'description'
   // Power
   | 'power_settings_new'
-  | 'restart_alt';
+  | 'restart_alt'
+  // Status cluster / theme
+  | 'bluetooth'
+  | 'bluetooth_disabled'
+  | 'battery_full'
+  | 'battery_charging_full'
+  | 'schedule'
+  | 'campaign'
+  | 'newspaper'
+  | 'chevron_left'
+  | 'chevron_right'
+  | 'bolt'
+  | 'power';
 
 // Hex codepoints — converted to single-char strings via
 // String.fromCodePoint at module init. Keeping them as hex numbers
@@ -95,8 +109,21 @@ const HEX: Record<IconName, number> = {
   sd_card:              0xe623,
   usb:                  0xe1e0,
   folder:               0xe2c7,
+  folder_open:          0xe2c8,
+  description:          0xe873,
   power_settings_new:   0xe8ac,
   restart_alt:          0xf053,
+  bluetooth:            0xe1a7,
+  bluetooth_disabled:   0xe1a9,
+  battery_full:         0xe1a4,
+  battery_charging_full: 0xe1a3,
+  schedule:             0xe8b5,
+  campaign:             0xef49,
+  newspaper:            0xeb81,
+  chevron_left:         0xe5cb,
+  chevron_right:        0xe5cc,
+  bolt:                 0xea0b,
+  power:                0xe63c,
 };
 
 const CODEPOINTS: Record<IconName, string> = Object.fromEntries(

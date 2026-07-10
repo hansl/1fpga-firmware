@@ -16,6 +16,21 @@ declare module '1fpga:fs' {
 
   export function readDir(path: string): Promise<string[]>;
 
+  /** One entry of a directory listing (see {@link readDirEntries}). */
+  export interface DirEntry {
+    name: string;
+    /** True when the entry is a directory. */
+    dir: boolean;
+    /** File size in bytes (0 for directories). */
+    size: number;
+  }
+
+  /**
+   * List a directory with per-entry type and size in one call —
+   * avoids a follow-up `isDir`/`fileSize` per entry when scanning.
+   */
+  export function readDirEntries(path: string): Promise<DirEntry[]>;
+
   export function isFile(path: string): Promise<boolean>;
 
   /**

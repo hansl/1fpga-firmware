@@ -10,6 +10,13 @@ import { RouterProvider, Routes } from './router';
 import { resolveStartupRoute } from './boot';
 import { HomeScreen } from './screens/Home';
 import { CollectionScreen } from './screens/Collection';
+import { StubScreen } from './screens/Stub';
+
+const TITLES: Record<string, string> = {
+  network: 'Network',
+  bluetooth: 'Bluetooth',
+  account: 'Account',
+};
 
 export function App() {
   return (
@@ -19,8 +26,17 @@ export function App() {
           routes={[
             { pattern: '/home', render: () => <HomeScreen /> },
             {
-              pattern: '/collections/:id',
-              render: (p) => <CollectionScreen id={p.id} />,
+              pattern: '/collections/:sys',
+              render: (p) => <CollectionScreen sys={p.sys} />,
+            },
+            { pattern: '/settings', render: () => <StubScreen title="Settings" /> },
+            {
+              pattern: '/settings/:sub',
+              render: (p) => <StubScreen title={TITLES[p.sub] ?? p.sub} />,
+            },
+            {
+              pattern: '/notifications',
+              render: () => <StubScreen title="Notifications" />,
             },
           ]}
         />

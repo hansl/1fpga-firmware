@@ -7,27 +7,23 @@
 // absent table (fresh SD card, migrations not yet run) or malformed
 // value all fall back to '/home'.
 
-import * as db from '1fpga:db';
+import { globalGet } from './services/db';
 
 export const STARTUP_ROUTE_KEY = 'ui.startupRoute';
 
 export async function resolveStartupRoute(): Promise<string | null> {
   try {
-    const d = await db.load('1fpga');
-    const row = await d.queryOne<{ value: string }>(
-      'SELECT value FROM GlobalStorage WHERE key = ?',
-      [STARTUP_ROUTE_KEY],
-    );
-    if (!row) return null;
-    // `value` is a JSON column; a route is stored as a JSON string.
-    const parsed: unknown = JSON.parse(row.value);
-    if (typeof parsed === 'string' && parsed.startsWith('/')) {
-      return parsed;
+    // Through getDb() so the schema is applied before the first
+    // query — a fresh SD card boots clean instead of warning.
+    const value = await globalGet<unknown>(STARTUP_ROUTE_KEY);
+    if (value == null) return null;
+    if (typeof value === 'string' && value.startsWith('/')) {
+      return value;
     }
-    console.warn(`ignoring malformed ${STARTUP_ROUTE_KEY}: ${row.value}`);
+    console.warn(`ignoring malformed ${STARTUP_ROUTE_KEY}: ${JSON.stringify(value)}`);
     return null;
   } catch (e) {
-    // Fresh install or missing migrations — not an error.
+    // Unreadable database — boot the default route rather than hang.
     console.warn(`startup route lookup skipped: ${e}`);
     return null;
   }

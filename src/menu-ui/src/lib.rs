@@ -18,6 +18,7 @@
 pub mod db;
 pub mod display_list;
 pub mod font;
+pub mod fs_mod;
 pub mod host;
 pub mod image;
 pub mod input;

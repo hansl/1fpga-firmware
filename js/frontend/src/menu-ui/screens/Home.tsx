@@ -1,26 +1,25 @@
-// Home screen: the carousel-first shell.
+// Home: news ticker top-left, status cluster top-right, system card
+// carousel centre — the themed shell, running on real library data
+// (schema + local scan via ensureBooted, systems from the catalog
+// tables).
 //
-// The old App god-component's cursor state is decomposed here: the
-// CAROUSEL zone owns its own category/item cursors, the STATUS zone
-// owns its own highlight, and crossings are explicit `moveFocus`
-// calls at cursor edges (see focus/index.tsx). Selecting a category
-// pushes a route — screens never reach into each other's state.
-//
-// Still rendering the demo CATEGORIES data and XMB-era components;
-// both get replaced as the new theme's screens and the 1fpga:db-
-// backed catalog queries land. The architecture (zones + routes) is
-// what this file establishes.
+// Zone layout: STATUS (cluster items, left/right + confirm routes)
+// above CAROUSEL (cards, left/right + confirm opens the collection);
+// crossings are explicit moveFocus calls at cursor edges.
 
 import { useCallback, useState } from 'react';
 import type { CSSProperties } from 'react';
 
-import { CATEGORIES } from '../data';
-import { VW, VH } from '../scale';
-import { ActionBar } from '../components/ActionBar';
-import { MenuBar } from '../components/MenuBar';
-import { StatusBar } from '../components/StatusBar';
+import { VW, VH, s } from '../scale';
+import { ActionBar, type ActionBinding } from '../components/ActionBar';
 import { FocusZone, useFocus, useZoneFocused, useZoneIntent } from '../focus';
 import { useRouter } from '../router';
+import { globalGet } from '../services/db';
+import { listSystems, type SystemCard } from '../services/library';
+import { useAsync } from '../services/useAsync';
+import { CardCarousel } from '../theme/CardCarousel';
+import { NewsTicker } from '../theme/NewsTicker';
+import { STATUS_ITEMS, StatusCluster } from '../theme/StatusCluster';
 
 const root: CSSProperties = {
   position: 'relative',
@@ -29,31 +28,56 @@ const root: CSSProperties = {
   // Transparent: the wallpaper is the hardware base layer.
 };
 
+const centerMsg: CSSProperties = {
+  position: 'absolute',
+  left: 0,
+  right: 0,
+  top: Math.round(VH * 0.45),
+  textAlign: 'center',
+  fontSize: s(28),
+  color: '#9fb4c8',
+};
+
+const CAROUSEL_ACTIONS: ActionBinding[] = [
+  { intent: 'navigate_leftright', label: 'Browse' },
+  { intent: 'navigate_up', label: 'Status' },
+  { intent: 'confirm', label: 'Open' },
+];
+
+const DEFAULT_NEWS = 'Welcome to 1FPGA';
+
 export function HomeScreen() {
+  const systems = useAsync(() => listSystems(), []);
+  const news = useAsync(() => globalGet<string>('ui.news'), []);
+
   return (
     <div style={root}>
+      <NewsTicker text={typeof news.value === 'string' ? news.value : DEFAULT_NEWS} />
+      {/* Carousel zone FIRST: zone registration order doubles as the
+          "focus falls back here" order when returning to this screen
+          (see FocusProvider._register). */}
+      <FocusZone id="carousel" neighbors={{ up: 'status' }}>
+        {systems.loading ? (
+          <div style={centerMsg}>Scanning library…</div>
+        ) : systems.error ? (
+          <div style={centerMsg}>{`Library unavailable: ${systems.error}`}</div>
+        ) : (
+          <CarouselZone systems={systems.value ?? []} />
+        )}
+      </FocusZone>
       <FocusZone id="status" neighbors={{ down: 'carousel' }}>
         <StatusZone />
-      </FocusZone>
-      <FocusZone id="carousel" neighbors={{ up: 'status' }}>
-        <CarouselZone />
       </FocusZone>
     </div>
   );
 }
 
-/**
- * Top status strip. Focusable so UP from the carousel reaches the
- * settings/wifi/bluetooth/account/notification cluster; per-item
- * focus visuals arrive with the themed StatusCluster component —
- * for now the whole strip brightens while focused and left/right
- * move an (invisible) highlight index so the interaction contract
- * is already exercised.
- */
+/** Owns the status cluster's item cursor and routes its confirms. */
 function StatusZone() {
   const focused = useZoneFocused();
   const focus = useFocus();
-  const [, setSel] = useState(0);
+  const router = useRouter();
+  const [sel, setSel] = useState(0);
 
   useZoneIntent(
     'navigate_left',
@@ -67,9 +91,18 @@ function StatusZone() {
     'navigate_right',
     useCallback((e) => {
       if (e.kind === 'pressed' || e.kind === 'repeat') {
-        setSel((s) => Math.min(4, s + 1));
+        setSel((s) => Math.min(STATUS_ITEMS.length - 1, s + 1));
       }
     }, []),
+  );
+  useZoneIntent(
+    'confirm',
+    useCallback(
+      (e) => {
+        if (e.kind === 'pressed') router.navigate(STATUS_ITEMS[sel].route);
+      },
+      [router, sel],
+    ),
   );
   useZoneIntent(
     'navigate_down',
@@ -90,34 +123,33 @@ function StatusZone() {
     ),
   );
 
-  return (
-    <div style={{ opacity: focused ? 1 : 0.75 }}>
-      <StatusBar user="hansl" notifications={2} wifi="connected" />
-    </div>
-  );
+  return <StatusCluster focused={focused} selected={sel} />;
 }
 
-/** The system/category carousel. Owns its own cursor. */
-function CarouselZone() {
+/** Owns the card cursor; confirm opens the system's collection. */
+function CarouselZone({ systems }: { systems: SystemCard[] }) {
   const focus = useFocus();
   const router = useRouter();
-  const [cat, setCat] = useState(0);
+  const [sel, setSel] = useState(0);
 
   useZoneIntent(
     'navigate_left',
     useCallback((e) => {
       if (e.kind === 'pressed' || e.kind === 'repeat') {
-        setCat((c) => Math.max(0, c - 1));
+        setSel((s) => Math.max(0, s - 1));
       }
     }, []),
   );
   useZoneIntent(
     'navigate_right',
-    useCallback((e) => {
-      if (e.kind === 'pressed' || e.kind === 'repeat') {
-        setCat((c) => Math.min(CATEGORIES.length - 1, c + 1));
-      }
-    }, []),
+    useCallback(
+      (e) => {
+        if (e.kind === 'pressed' || e.kind === 'repeat') {
+          setSel((s) => Math.min(systems.length - 1, s + 1));
+        }
+      },
+      [systems.length],
+    ),
   );
   useZoneIntent(
     'navigate_up',
@@ -132,21 +164,23 @@ function CarouselZone() {
     'confirm',
     useCallback(
       (e) => {
-        if (e.kind === 'pressed') {
-          // Route by index until categories come from the catalog DB
-          // with stable ids.
-          router.navigate(`/collections/${cat}`);
+        if (e.kind === 'pressed' && systems.length > 0) {
+          const sys = systems[Math.min(sel, systems.length - 1)];
+          router.navigate(`/collections/${encodeURIComponent(sys.uniqueName)}`);
         }
       },
-      [router, cat],
+      [router, systems, sel],
     ),
   );
 
-  const category = CATEGORIES[cat];
+  if (systems.length === 0) {
+    return <div style={centerMsg}>No systems found on this card.</div>;
+  }
+  const clamped = Math.min(sel, systems.length - 1);
   return (
     <>
-      <MenuBar categories={CATEGORIES} selected={cat} />
-      <ActionBar actions={category.defaultActions} />
+      <CardCarousel systems={systems} selected={clamped} />
+      <ActionBar actions={CAROUSEL_ACTIONS} />
     </>
   );
 }
