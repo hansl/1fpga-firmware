@@ -33,6 +33,36 @@ pub const REGS_PHYS_ADDR: u32 = 0xFF21_0000;
 /// the maximum-throughput burst tier.
 const TEX_BURST_ALIGN: u32 = 64;
 
+/// Physical page holding the HPS SDRAM controller scheduler registers
+/// (Cyclone V HPS TRM ch. 12, CTRLGRP block at 0xFFC20000; the
+/// scheduler cluster starts at +0x5000).
+const SDR_SCHED_PHYS: u32 = 0xFFC2_5000;
+
+/// `mppriority` offset within that page. 30-bit `userpriority` field:
+/// 3-bit absolute priority per MPFE command port, ports 0-9 packed
+/// LSB-first. 0 = lowest, 7 = highest; equal priorities fall back to
+/// weighted round-robin.
+const SDR_MPPRIORITY_OFF: usize = 0xAC;
+
+/// Priority word that lifts the HDMI scanout above everything else.
+///
+/// Command-port mapping (Cyclone V HPS TRM table 12-4; matches the
+/// RocketBoards SDRAM performance design): ports 0/1 = f2h_sdram0
+/// read/write (sys_top `ram1`), 2/3 = f2h_sdram1 (`ram2`), 4/5 =
+/// f2h_sdram2 (`vbuf` — the HDMI scanout's DDR3 reads), 6-9 = L3/MPU.
+/// u-boot leaves the whole register at 0, i.e. round-robin.
+///
+/// The menu core's bulk masters (blit engines, ring fetcher) put
+/// sustained multi-burst traffic on ram1/ram2; under round-robin
+/// arbitration they starve the scanout's real-time reads and the
+/// display re-emits its last 128-byte burst — full-width bands of
+/// 32-pixel-period vertical stripes across whatever rows were being
+/// scanned during the stall (diagnosed 2026-07-09 on the
+/// compositor-v2 branch; the mechanism applies to any design whose
+/// scanout reads DDR3). Highest priority for the scanout port fixes
+/// it; bulk masters absorb the latency.
+const MPPRIORITY_VBUF_REALTIME: u32 = (7 << (3 * 4)) | (7 << (3 * 5));
+
 /// Round `x` up to the next multiple of `align`. `align` must be a
 /// power of two.
 #[inline]
@@ -180,6 +210,23 @@ impl Device {
         }
 
         bridge::enable_lwh2f()?;
+
+        // Make the HDMI scanout the highest-priority SDRAM port before
+        // we start generating bulk DDR3 traffic — see
+        // MPPRIORITY_VBUF_REALTIME for the full story.
+        {
+            let mut sched_map = DevMemMap::create(SDR_SCHED_PHYS, 0x100)?;
+            // SAFETY: SDR_MPPRIORITY_OFF (0xAC) lies within the mapped
+            // 0x100-byte region; volatile single-word store as required
+            // for device memory.
+            unsafe {
+                let p = sched_map
+                    .as_mut_ptr()
+                    .add(SDR_MPPRIORITY_OFF)
+                    .cast::<u32>();
+                p.write_volatile(MPPRIORITY_VBUF_REALTIME);
+            }
+        }
 
         let mut regs_map = DevMemMap::create(cfg.regs_phys_addr, registers::REGISTER_WINDOW_SIZE)?;
         // SAFETY: `regs_map` covers REGISTER_WINDOW_SIZE bytes and lives
