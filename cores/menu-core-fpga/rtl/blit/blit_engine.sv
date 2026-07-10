@@ -123,10 +123,11 @@ module blit_engine (
 
     // Burst-COPY path (RGBA→RGBA): each transaction reads/writes up to
     // BURST_BEATS_MAX consecutive 64-bit beats (= 2 RGBA pixels each).
-    // S_NEXT_PIXEL picks the largest aligned burst that fits the
-    // remainder of the row; misaligned starts and odd-length tails fall
-    // back to the per-pixel path. A8 sources stay per-pixel (different
-    // addressing).
+    // S_NEXT_PIXEL picks the largest burst that fits the remainder of
+    // the row; the src side realigns via a skid (word-granular for
+    // RGBA, byte-granular for A8), so only the dst needs even-pixel
+    // alignment. Odd dst starts / odd tails take at most one
+    // per-pixel step.
     //
     // BURST_BEATS_MAX = 8 (16 RGBA pixels per transaction). The slave's
     // burstcnt tolerates this — FILL_BURST already uses up to 255.
@@ -311,7 +312,11 @@ module blit_engine (
     // leading word (and the trailing one on the last beat). Constant
     // along a row (src and dst x advance together).
     logic        copy_src_skew_q;
-    logic [3:0]  copy_fetch_beats_q;   // burst_len + skew (1..9)
+    logic [3:0]  copy_fetch_beats_q;   // src fetch beats (RGBA 1..9, A8 1..3)
+    // A8 skid: one byte per pixel, so the src run starts at any of the
+    // 8 byte lanes of its first beat. Byte-granular analogue of
+    // copy_src_skew_q; only one of the two is nonzero per burst.
+    logic [2:0]  copy_a8_skew_q;
     // Per-burst beat / pixel cursors.
     logic [3:0]  copy_beat_idx_q;
     logic [4:0]  copy_pixel_idx_q;
@@ -796,6 +801,7 @@ module blit_engine (
             copy_burst_len_q     <= 4'd0;
             copy_src_skew_q      <= 1'b0;
             copy_fetch_beats_q   <= 4'd0;
+            copy_a8_skew_q       <= 3'd0;
             copy_beat_idx_q      <= 4'd0;
             copy_pixel_idx_q     <= 5'd0;
             prefetch_alpha_or_q  <= 8'd0;
@@ -1155,11 +1161,9 @@ module blit_engine (
                     end else if (mode_q == MODE_COPY) begin
                         // Burst-COPY dispatch: pick the largest aligned
                         // burst that fits the remainder of the row.
-                        // Both src and dst pixel byte-addresses must be
-                        // (burst_pixels * 4)-byte aligned for the slave to
-                        // accept the burst. Falls back through smaller
-                        // bursts down to the per-pixel path. A8 sources
-                        // bypass burst entirely (different addressing).
+                        // dst needs even-pixel (8-byte) alignment for
+                        // full-BE write beats; src (RGBA or A8) starts
+                        // anywhere thanks to the capture-time skid.
                         //
                         // For 16-px bursts we also check whether a
                         // src prefetch (issued during the previous
@@ -1231,8 +1235,7 @@ module blit_engine (
                             end else begin
                                 state <= S_FETCH_DST_BURST;
                             end
-                        end else if (rgba && dst_al
-                                     && (remaining_copy >= 16'd2)) begin
+                        end else if (dst_al && (remaining_copy >= 16'd2)) begin
                             // Generalized burst: 1..8 dst beats
                             // (2..16 px), src at any pixel offset via
                             // the skid. Replaces the old ladder that
@@ -1243,8 +1246,26 @@ module blit_engine (
                             // path and forcing the host's 16-px text
                             // snapping.
                             copy_burst_len_q   <= blen;
-                            copy_src_skew_q    <= s_skew;
-                            copy_fetch_beats_q <= blen + {3'd0, s_skew};
+                            if (rgba) begin
+                                copy_src_skew_q    <= s_skew;
+                                copy_a8_skew_q     <= 3'd0;
+                                copy_fetch_beats_q <= blen + {3'd0, s_skew};
+                            end else begin
+                                // A8: 2*blen source BYTES; one beat
+                                // carries 8 pixels. Fetch from the
+                                // beat-aligned base, ceil((run +
+                                // byte_skew)/8) beats (1..3 — an A8
+                                // 16-px chunk is 2 payload beats vs
+                                // RGBA's 8; this tier is what turns
+                                // glyph blits from one bus round-trip
+                                // PER PIXEL into ~3 per 16 pixels).
+                                copy_src_skew_q    <= 1'b0;
+                                copy_a8_skew_q     <= src_pixel_byte_addr[2:0];
+                                copy_fetch_beats_q <= 4'(
+                                    ({2'd0, blen, 1'b0}
+                                     + {4'd0, src_pixel_byte_addr[2:0]}
+                                     + 7'd7) >> 3);
+                            end
                             copy_beat_idx_q  <= 4'd0;
                             copy_pixel_idx_q <= 5'd0;
                             alpha_or_q       <= 8'd0;
@@ -1426,11 +1447,13 @@ module blit_engine (
                 // Result: horizontal slits of foreign pixels in the
                 // current row, visible in menu-ui's text rasters.
                 S_WAIT_SRC_BURST: if (ddram_dout_valid_i & ~prefetch_active_q) begin
-                    // Each beat is a 64-bit word holding two RGBA pixels
-                    // (low 32 = lower-x pixel, high 32 = upper-x). Apply
-                    // tint per-pixel as we capture, and accumulate alpha
-                    // OR/AND so the burst-level fast-path decision after
-                    // the last beat is one comparison.
+                    // RGBA: each beat holds two pixels (word skid, see
+                    // dispatch). A8: each beat holds EIGHT pixels (byte
+                    // skid) which are tint-expanded on capture. Both
+                    // paths land tinted BGRA in src_buf and fold the
+                    // alpha OR/AND summaries over accepted pixels only,
+                    // so the shared last-beat fast-path decision below
+                    // is format-agnostic.
                     automatic logic [31:0] src_lo;
                     automatic logic [31:0] src_hi;
                     automatic logic [31:0] computed_lo;
@@ -1444,6 +1467,33 @@ module blit_engine (
                     automatic logic [7:0]  next_alpha_or;
                     automatic logic [7:0]  next_alpha_and;
                     automatic logic        is_last_beat;
+                    automatic logic [6:0]  a8_wbase;
+                    automatic logic [6:0]  a8_lim;
+                    automatic logic [6:0]  a8_widx;
+                    automatic logic [7:0]  a8_a;
+                    next_alpha_or  = alpha_or_q;
+                    next_alpha_and = alpha_and_q;
+                    if (format_q == FMT_A8) begin
+                        a8_wbase = {copy_beat_idx_q, 3'b000};
+                        a8_lim   = {2'd0, copy_burst_len_q, 1'b0}
+                                 + {4'd0, copy_a8_skew_q};
+                        for (int k = 0; k < 8; k++) begin
+                            a8_widx = a8_wbase + 7'(k);
+                            a8_a    = ddram_dout_i[k*8 +: 8];
+                            if ((a8_widx >= {4'd0, copy_a8_skew_q})
+                                && (a8_widx < a8_lim)) begin
+                                src_buf[4'(a8_widx - {4'd0, copy_a8_skew_q})]
+                                    <= pack_pixel(
+                                        mul8(ch_r(tint_color_q), a8_a),
+                                        mul8(ch_g(tint_color_q), a8_a),
+                                        mul8(ch_b(tint_color_q), a8_a),
+                                        a8_a
+                                    );
+                                next_alpha_or  = next_alpha_or  | a8_a;
+                                next_alpha_and = next_alpha_and & a8_a;
+                            end
+                        end
+                    end else begin
                     src_lo = ddram_dout_i[31:0];
                     src_hi = ddram_dout_i[63:32];
                     if (tint_en_q) begin
@@ -1480,12 +1530,13 @@ module blit_engine (
 
                     alpha_lo = ch_a(computed_lo);
                     alpha_hi = ch_a(computed_hi);
-                    next_alpha_or  = alpha_or_q
+                    next_alpha_or  = next_alpha_or
                                    | (take_lo ? alpha_lo : 8'h00)
                                    | (take_hi ? alpha_hi : 8'h00);
-                    next_alpha_and = alpha_and_q
+                    next_alpha_and = next_alpha_and
                                    & (take_lo ? alpha_lo : 8'hFF)
                                    & (take_hi ? alpha_hi : 8'hFF);
+                    end
                     alpha_or_q  <= next_alpha_or;
                     alpha_and_q <= next_alpha_and;
 
