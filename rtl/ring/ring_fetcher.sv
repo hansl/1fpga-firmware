@@ -25,7 +25,10 @@
 //  Address mapping for DDRAM_*:
 //    DDRAM_ADDR = byte_addr >> 3  (29-bit word-address, 8-byte beats)
 //    DDRAM_BE   selects upper or lower 4 bytes of the 64-bit beat
-//    one 4-byte command word per DDR3 transaction (no bursting yet)
+//    burst command fetch: header + all args in one CMD_BEATS-beat
+//    burst, descriptor in one aligned 2-beat burst (was one 4-byte
+//    word per single-beat transaction — ~10 serial round-trips per
+//    COPY_RECT before the blit even started)
 //
 //============================================================================
 
@@ -134,12 +137,10 @@ module ring_fetcher (
 
     typedef enum logic [3:0] {
         S_IDLE,
-        S_FETCH_HEADER,
-        S_WAIT_HEADER,
+        S_FETCH_CMD,     // one burst: header + all args (CMD_BEATS beats)
+        S_WAIT_CMD,      // collect the burst into cmd_buf
         S_DECODE,
-        S_FETCH_ARG,
-        S_WAIT_ARG,
-        S_FETCH_DESC,
+        S_FETCH_DESC,    // one 2-beat burst: whole 16-B descriptor
         S_WAIT_DESC,
         S_BLIT_DISPATCH,
         S_BLIT_WAIT,
@@ -147,15 +148,26 @@ module ring_fetcher (
         S_HALT
     } state_e;
 
+    // Command fetch burst geometry. The largest command is BLIT_AFFINE
+    // (1 header + 11 args = 12 words); the header may sit in the high
+    // half of its 64-bit beat, so 7 beats (14 words) always cover it.
+    // Commands never straddle the ring wrap (the host writer NOP-pads
+    // to the end — ring.rs), so a linear burst is safe; the tail of
+    // the burst may over-read past the command (next command, NOP pad,
+    // or the region after the ring) — those words are simply ignored.
+    // This replaces the old word-at-a-time fetch: a COPY_RECT cost 10
+    // serial single-beat round-trips (header + 5 args + 4 descriptor
+    // words) before the blit even started; it is now 2 bursts.
+    localparam int CMD_BEATS = 7;
+
     state_e      state;
     logic        active_engine_q;        // 0 = blit_engine_0 (ram1), 1 = blit_engine_1 (ram2)
     logic [31:0] head_q;
     logic [31:0] header_q;
     logic [31:0] arg_q  [0:10];      // up to 11 arg words (BLIT_AFFINE)
     logic [31:0] desc_q [0:3];       // 4 descriptor words for COPY_RECT
-    logic [3:0]  arg_idx;
-    logic [3:0]  arg_total;
-    logic [1:0]  desc_idx;
+    logic [31:0] cmd_buf [0:2*CMD_BEATS-1]; // command-burst landing buffer
+    logic [2:0]  beat_cnt;           // beats received in the current burst
     logic [31:0] fetch_addr;
     logic [31:0] retire_advance;
     logic [31:0] fence_value_q;
@@ -176,15 +188,6 @@ module ring_fetcher (
     logic [15:0] target_height_q;
 
     wire [31:0] head_mask = ring_size_i - 32'd1;
-
-    function automatic logic [31:0] pick_word(input logic [63:0] beat,
-                                              input logic        upper);
-        return upper ? beat[63:32] : beat[31:0];
-    endfunction
-
-    function automatic logic [7:0] be_for(input logic upper);
-        return upper ? 8'b1111_0000 : 8'b0000_1111;
-    endfunction
 
     // ---- Combinational outputs ---------------------------------------
     assign ring_head_o     = head_q;
@@ -275,9 +278,7 @@ module ring_fetcher (
             header_q       <= 32'd0;
             for (i = 0; i < 11; i = i + 1) arg_q[i]  <= 32'd0;
             for (i = 0; i < 4; i = i + 1) desc_q[i] <= 32'd0;
-            arg_idx        <= 4'd0;
-            arg_total      <= 4'd0;
-            desc_idx       <= 2'd0;
+            beat_cnt       <= 3'd0;
             fetch_addr     <= 32'd0;
             retire_advance <= 32'd0;
             fence_value_q  <= 32'd0;
@@ -305,75 +306,85 @@ module ring_fetcher (
                 S_IDLE: begin
                     if (enable_i & (head_q != ring_tail_i)) begin
                         fetch_addr <= ring_base_i + head_q;
-                        state      <= S_FETCH_HEADER;
+                        state      <= S_FETCH_CMD;
                     end
                 end
 
-                S_FETCH_HEADER: begin
+                S_FETCH_CMD: begin
+                    // One burst covers the header and every possible
+                    // arg word (see CMD_BEATS). be is full — reads
+                    // ignore it; word selection happens in S_DECODE.
                     ddram_addr_o     <= fetch_addr[31:3];
-                    ddram_burstcnt_o <= 8'd1;
-                    ddram_be_o       <= be_for(fetch_addr[2]);
+                    ddram_burstcnt_o <= 8'(CMD_BEATS);
+                    ddram_be_o       <= 8'hFF;
                     ddram_rd_o       <= 1'b1;
-                    if (~ddram_busy_i) state <= S_WAIT_HEADER;
+                    beat_cnt         <= 3'd0;
+                    if (~ddram_busy_i) state <= S_WAIT_CMD;
                 end
 
-                S_WAIT_HEADER: if (ddram_dout_valid_i) begin
-                    header_q <= pick_word(ddram_dout_i, fetch_addr[2]);
-                    state    <= S_DECODE;
+                S_WAIT_CMD: if (ddram_dout_valid_i) begin
+                    cmd_buf[{beat_cnt, 1'b0}] <= ddram_dout_i[31:0];
+                    cmd_buf[{beat_cnt, 1'b1}] <= ddram_dout_i[63:32];
+                    if (beat_cnt == 3'(CMD_BEATS - 1)) begin
+                        state <= S_DECODE;
+                    end else begin
+                        beat_cnt <= beat_cnt + 3'd1;
+                    end
                 end
 
                 S_DECODE: begin
-                    automatic logic [7:0] opcode = header_q[31:24];
-                    automatic logic [7:0] len_w  = header_q[23:16];
+                    // Header is the command's word 0; fetch_addr[2]
+                    // says whether that word landed in the low or
+                    // high half of beat 0.
+                    automatic logic [31:0] hdr;
+                    automatic logic [7:0]  opcode;
+                    automatic logic [7:0]  len_w;
+                    automatic int          a0;      // buffer index of arg 0
+                    hdr    = cmd_buf[fetch_addr[2] ? 1 : 0];
+                    opcode = hdr[31:24];
+                    len_w  = hdr[23:16];
+                    a0     = fetch_addr[2] ? 2 : 1;
+
+                    header_q       <= hdr;
                     retire_advance <= 32'd4 + (32'(len_w) <<< 2);
                     pending_opcode <= opcode;
-                    arg_idx        <= 4'd0;
-                    desc_idx       <= 2'd0;
+                    // Latch every possible arg unconditionally — the
+                    // dispatch muxes only consume the ones the opcode
+                    // defines; the rest are over-read garbage that is
+                    // never looked at.
+                    for (int k = 0; k < 11; k++) begin
+                        arg_q[k] <= cmd_buf[a0 + k];
+                    end
 
                     unique case (opcode)
-                        OP_NOP, OP_PRESENT, OP_CLEAR_CLIP: begin
-                            arg_total <= 4'd0;
-                            state     <= S_RETIRE;
-                        end
-                        OP_FENCE: begin
-                            arg_total  <= 4'd1;
-                            fetch_addr <= fetch_addr + 32'd4;
-                            state      <= S_FETCH_ARG;
-                        end
-                        OP_SET_CLIP: begin
-                            arg_total  <= 4'd2;
-                            fetch_addr <= fetch_addr + 32'd4;
-                            state      <= S_FETCH_ARG;
+                        OP_NOP, OP_PRESENT, OP_CLEAR_CLIP,
+                        OP_FENCE, OP_SET_CLIP: begin
+                            // No descriptor and no blit: args (if any)
+                            // are latched above; S_RETIRE consumes
+                            // them next cycle.
+                            state <= S_RETIRE;
                         end
                         OP_SET_TARGET: begin
-                            arg_total  <= 4'd1;
-                            fetch_addr <= fetch_addr + 32'd4;
-                            state      <= S_FETCH_ARG;
+                            // FB sentinel needs no descriptor fetch.
+                            if (cmd_buf[a0][15:0] == TARGET_FB) begin
+                                state <= S_RETIRE;
+                            end else begin
+                                state <= S_FETCH_DESC;
+                            end
                         end
                         OP_FILL_RECT: begin
-                            arg_total  <= 4'd3;
-                            fetch_addr <= fetch_addr + 32'd4;
-                            state      <= S_FETCH_ARG;
+                            state <= S_BLIT_DISPATCH;
                         end
                         OP_COPY_RECT: begin
-                            // length_w distinguishes 5 (no tint) vs 6
-                            // (tint_en) per PROTOCOL.md §5.3.
-                            arg_total  <= (header_q[23:16] == 8'd6) ? 4'd6 : 4'd5;
-                            fetch_addr <= fetch_addr + 32'd4;
-                            state      <= S_FETCH_ARG;
+                            state <= S_FETCH_DESC;
                         end
                         OP_BLIT_AFFINE: begin
-                            // Fixed 11-word layout (PROTOCOL.md §5.3).
-                            // Strictly validate length_w — this is the
-                            // first command with required length checking
-                            // (§5.4). Detail packs (expected<<8)|got.
+                            // Strictly validate length_w (§5.4).
                             if (len_w != 8'd11) begin
                                 error_info_q <= {8'd0, 8'd11, len_w, ERR_BAD_LENGTH};
                                 state        <= S_HALT;
                             end else begin
-                                arg_total  <= 4'd11;
-                                fetch_addr <= fetch_addr + 32'd4;
-                                state      <= S_FETCH_ARG;
+                                state <= S_FETCH_DESC;
                             end
                         end
                         default: begin
@@ -383,80 +394,44 @@ module ring_fetcher (
                     endcase
                 end
 
-                S_FETCH_ARG: begin
-                    ddram_addr_o     <= fetch_addr[31:3];
-                    ddram_burstcnt_o <= 8'd1;
-                    ddram_be_o       <= be_for(fetch_addr[2]);
-                    ddram_rd_o       <= 1'b1;
-                    if (~ddram_busy_i) state <= S_WAIT_ARG;
-                end
-
-                S_WAIT_ARG: if (ddram_dout_valid_i) begin
-                    automatic logic [31:0] arg_word;
-                    arg_word = pick_word(ddram_dout_i, fetch_addr[2]);
-                    arg_q[arg_idx] <= arg_word;
-                    if (arg_idx + 4'd1 == arg_total) begin
-                        // All args fetched. COPY_RECT, BLIT_AFFINE, and
-                        // the texture-id form of SET_RENDER_TARGET also
-                        // need the descriptor; FB-sentinel
-                        // SET_RENDER_TARGET, FILL_RECT, etc. dispatch
-                        // straight to retire / blit.
-                        unique case (pending_opcode)
-                            OP_FILL_RECT: state <= S_BLIT_DISPATCH;
-                            OP_COPY_RECT, OP_BLIT_AFFINE: begin
-                                // desc_base uses arg_q[0] = tex_id.
-                                state <= S_FETCH_DESC;
-                            end
-                            OP_SET_TARGET: begin
-                                // Just-fetched arg word holds tex_id
-                                // in the low 16 bits.
-                                if (arg_word[15:0] == TARGET_FB) begin
-                                    state <= S_RETIRE;
-                                end else begin
-                                    state <= S_FETCH_DESC;
-                                end
-                            end
-                            default: state <= S_RETIRE;
-                        endcase
-                    end else begin
-                        arg_idx    <= arg_idx + 4'd1;
-                        fetch_addr <= fetch_addr + 32'd4;
-                        state      <= S_FETCH_ARG;
-                    end
-                end
-
                 S_FETCH_DESC: begin
-                    automatic logic [31:0] desc_word_addr =
-                        desc_base + ({30'd0, desc_idx} <<< 2);
-                    fetch_addr       <= desc_word_addr;
-                    ddram_addr_o     <= desc_word_addr[31:3];
-                    ddram_burstcnt_o <= 8'd1;
-                    ddram_be_o       <= be_for(desc_word_addr[2]);
+                    // Descriptors are 16 B at a 32-B-aligned address
+                    // (tex_table + tex_id*32), so one aligned 2-beat
+                    // burst fetches the whole thing with the word
+                    // order fixed (bit [2] of the address is 0).
+                    ddram_addr_o     <= desc_base[31:3];
+                    ddram_burstcnt_o <= 8'd2;
+                    ddram_be_o       <= 8'hFF;
                     ddram_rd_o       <= 1'b1;
+                    beat_cnt         <= 3'd0;
                     if (~ddram_busy_i) state <= S_WAIT_DESC;
                 end
 
                 S_WAIT_DESC: if (ddram_dout_valid_i) begin
                     // All automatics declared up front (Quartus 17).
-                    automatic logic [31:0] dword;
                     automatic logic [15:0] sw_a;
                     automatic logic [15:0] sh_a;
-                    dword = pick_word(ddram_dout_i, fetch_addr[2]);
-                    sw_a  = arg_q[2][31:16];
-                    sh_a  = arg_q[2][15:0];
-                    desc_q[desc_idx] <= dword;
-                    if (desc_idx == 2'd3) begin
-                        // dword is descriptor word 3 (format in bit 0).
-                        // COPY_RECT continues into the blit pipeline;
-                        // SET_RENDER_TARGET just retires (descriptor is
-                        // latched in S_RETIRE); BLIT_AFFINE is guarded
-                        // for source size (§5.7) and RGBA-only format.
+                    sw_a = arg_q[2][31:16];
+                    sh_a = arg_q[2][15:0];
+                    if (beat_cnt == 3'd0) begin
+                        desc_q[0] <= ddram_dout_i[31:0];
+                        desc_q[1] <= ddram_dout_i[63:32];
+                        beat_cnt  <= 3'd1;
+                    end else begin
+                        desc_q[2] <= ddram_dout_i[31:0];
+                        desc_q[3] <= ddram_dout_i[63:32];
+                        // Descriptor complete. COPY_RECT continues into
+                        // the blit pipeline; SET_RENDER_TARGET just
+                        // retires (descriptor is latched in S_RETIRE);
+                        // BLIT_AFFINE is guarded for source size (§5.7)
+                        // and RGBA-only format. Word 3 (format in bit 0)
+                        // is the high half of this beat.
                         if (pending_opcode == OP_SET_TARGET) begin
                             state <= S_RETIRE;
                         end else if (is_affine) begin
-                            if (dword[0] != 1'b0) begin
+                            if (ddram_dout_i[32] != 1'b0) begin
                                 // A8 source unsupported for affine.
-                                error_info_q <= {16'd0, dword[7:0], ERR_BAD_FORMAT};
+                                error_info_q <= {16'd0, ddram_dout_i[39:32], ERR_BAD_FORMAT};
                                 state        <= S_HALT;
                             end else if ((sw_a > 16'd128) || (sh_a > 16'd128)) begin
                                 error_info_q <= {sw_a[11:0], sh_a[11:0], ERR_AFFINE_TOO_LARGE};
@@ -467,9 +442,6 @@ module ring_fetcher (
                         end else begin
                             state <= S_BLIT_DISPATCH;
                         end
-                    end else begin
-                        desc_idx <= desc_idx + 2'd1;
-                        state    <= S_FETCH_DESC;
                     end
                 end
 
