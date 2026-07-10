@@ -21,8 +21,10 @@ const CARD_W = s(280);
 const CARD_H = s(340);
 const GAP = s(44);
 const SLOT = CARD_W + GAP;
-/** Scale headroom so the selected card's ring isn't clipped. */
+/** Lift + ring headroom so the selected card isn't clipped. */
 const FRAME_PAD = s(28);
+/** Selected-card lift (translateY, paint-only). */
+const LIFT = s(16);
 const FRAME_TOP = s(392);
 /** Cards mounted on each side of the selection. */
 const WINDOW = 5;
@@ -89,9 +91,16 @@ const Card = memo(function Card({
   selected: boolean;
 }) {
   const ref = useRef<gui.NodeId | null>(null);
+  // Selection emphasis is a translateY lift + opacity + ring — NOT a
+  // scale. A scale tween puts every texture and text inside the card
+  // through the FPGA's scale-mode copy path (per-pixel round trips,
+  // the one path the burst blitter doesn't cover) on EVERY tween
+  // frame; measured at ~340 ms/frame across a 7-card band. Translate
+  // keeps all copies 1:1 on the burst path. Scale can return when
+  // scaled blits ride the affine engine's staged path.
   useTween(
     ref,
-    { scale: selected ? 1.1 : 1.0, opacity: selected ? 1.0 : 0.55 },
+    { translateY: selected ? -LIFT : 0, opacity: selected ? 1.0 : 0.55 },
     { duration: 200, easing: 'easeOut' },
   );
   const art = artFor(system.uniqueName);
@@ -104,7 +113,7 @@ const Card = memo(function Card({
         top: FRAME_PAD,
         width: CARD_W,
         height: CARD_H,
-        scale: selected ? 1.1 : 1.0,
+        translateY: selected ? -LIFT : 0,
         opacity: selected ? 1.0 : 0.55,
       }}
     >

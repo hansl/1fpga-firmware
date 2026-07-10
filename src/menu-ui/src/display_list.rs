@@ -31,7 +31,7 @@ use menu_core_host::texture::TextureHandle;
 use crate::image::{CachedImage, ImageRegistry};
 use crate::layout::ComputedLayout;
 use crate::runtime::damage::{PaintedItem, PaintedScene, PixelRect};
-use crate::style::Transform;
+use crate::style::{Overflow, Transform};
 use crate::text::{CacheKey, ResolvedTextStyle, TextCache};
 use crate::vdom::{NodeId, NodeKind, Tree};
 
@@ -61,16 +61,20 @@ pub enum DrawOp {
     /// instead left a one-frame blank blink during animations (the
     /// damage system repainted the region with background while the
     /// RT was still a cache miss, and the glyphs arrived a tick
-    /// later). `x`/`y` are the transformed origin; dst dims are the
+    /// later). `x`/`y` are the transformed origin — SIGNED, because a
+    /// line sliding off the left/top edge keeps its true origin here
+    /// and replay trims the copy to `clip` (the accumulated viewport
+    /// ∩ overflow clip) with a matching src offset; dst dims are the
     /// cached RT dims scaled by `sx`/`sy` (identity = exact).
     Text {
         key: CacheKey,
-        x: u16,
-        y: u16,
+        x: i32,
+        y: i32,
         sx: f32,
         sy: f32,
         blend: BlendMode,
         tint: Option<Rgba>,
+        clip: Rect,
     },
     /// Rotated + scaled image via the affine engine.
     AffineRotate {
@@ -186,6 +190,9 @@ pub fn build(
         // read). A root bg fill is NOT transparent-pristine.
         compositing,
         /* skip_root_bg */ true,
+        // Nothing outside the viewport is painted OR damage-tracked;
+        // overflow:hidden ancestors shrink this as the walk descends.
+        ClipF::new(fb.width as f32, fb.height as f32),
         &mut entries,
     );
 
@@ -204,6 +211,7 @@ fn walk(
     transforms: &HashMap<NodeId, Transform>,
     dst_clear: bool,
     skip_root_bg: bool,
+    clip: ClipF,
     out: &mut Vec<Entry>,
 ) {
     let Some(node) = tree.get(id) else {
@@ -241,24 +249,30 @@ fn walk(
                 && lay.h > 0.5
             {
                 let (tx, ty, tw, th) = xf.apply_to_rect(lay.x, lay.y, lay.w, lay.h);
-                let rect = Rect::new(clamp_u16(tx), clamp_u16(ty), clamp_u16(tw), clamp_u16(th));
-                if rect.w > 0 && rect.h > 0 {
-                    let bbox = PixelRect { x: rect.x, y: rect.y, w: rect.w, h: rect.h };
+                if let Some(bbox) = clip.visible(tx, ty, tw, th) {
+                    // Fills clip EXACTLY: the painted rect is the
+                    // visible rect (no src to adjust).
+                    let rect = Rect::new(bbox.x, bbox.y, bbox.w, bbox.h);
                     let mut h = DefaultHasher::new();
                     0u8.hash(&mut h); // tag
                     color.to_u32().hash(&mut h);
                     bbox.hash(&mut h);
                     opacity_u8.hash(&mut h);
-                    // Skip the fill op (not the damage item) when an
-                    // opaque child covers this div — the fill would
-                    // be overwritten, so it's a wasted write.
-                    let op = if has_opaque_covering_child(
-                        tree, id, layouts, images, opacities, transforms,
-                    ) {
+                    let (effective_color, blend) = apply_opacity_to_color(color, opacity_u8);
+                    // Skip the fill op (not the damage item) when it
+                    // cannot change pixels: effective alpha 0 (CSS
+                    // transparent paints NOTHING — an Opaque fill of
+                    // zeros would punch a hole through the content
+                    // layer to the wallpaper, and a SrcAlpha a=0 fill
+                    // is a pure read+write of every pixel for no
+                    // visual change), or an opaque child covering the
+                    // whole div (the fill would be overwritten).
+                    let op = if effective_color.a == 0
+                        || has_opaque_covering_child(
+                            tree, id, layouts, images, opacities, transforms,
+                        ) {
                         None
                     } else {
-                        let (effective_color, blend) =
-                            apply_opacity_to_color(color, opacity_u8);
                         Some(DrawOp::Fill { rect, color: effective_color, blend })
                     };
                     out.push(Entry {
@@ -276,47 +290,44 @@ fn walk(
                     px_size: rs.px_size.round() as u16,
                     color: rs.color.to_u32(),
                 };
-                // Damage bbox: sized from the CACHED RT dims when
-                // available (that is exactly what replay blits); the
-                // layout box otherwise. The two agree in practice —
-                // Taffy measures text through the same atlas — so a
+                // Dst rect from the CACHED RT dims when available
+                // (that is exactly what replay blits); the layout box
+                // otherwise. The two agree in practice — Taffy
+                // measures text through the same atlas — so a
                 // first-frame miss doesn't misplace damage.
-                let bbox = match text_cache.lookup(&key) {
-                    Some(cached) if cached.width > 0 && cached.height > 0 => {
-                        let (tx, ty, tw, th) = xf.apply_to_rect(
-                            lay.x,
-                            lay.y,
-                            cached.width as f32,
-                            cached.height as f32,
-                        );
-                        PixelRect {
-                            x: clamp_u16(tx),
-                            y: clamp_u16(ty),
-                            w: clamp_u16(tw).max(1),
-                            h: clamp_u16(th).max(1),
-                        }
-                    }
-                    _ => transformed_bbox(lay, xf),
+                let (tx, ty, tw, th) = match text_cache.lookup(&key) {
+                    Some(cached) if cached.width > 0 && cached.height > 0 => xf.apply_to_rect(
+                        lay.x,
+                        lay.y,
+                        cached.width as f32,
+                        cached.height as f32,
+                    ),
+                    _ => xf.apply_to_aabb(lay.x, lay.y, lay.w, lay.h),
                 };
-                let (tx, ty, _, _) = xf.apply_to_rect(lay.x, lay.y, lay.w, lay.h);
-                let op = Some(DrawOp::Text {
-                    key: key.clone(),
-                    x: clamp_u16(tx),
-                    y: clamp_u16(ty),
-                    sx: xf.scale_x,
-                    sy: xf.scale_y,
-                    // Color is baked into the RT. Over the pristine
-                    // transparent clear an Opaque copy is pixel-
-                    // identical to SrcAlpha (premultiplied src over
-                    // transparent) and skips the per-pixel dst read.
-                    blend: if dst_clear && opacity_u8 == 0xFF {
-                        BlendMode::Opaque
-                    } else {
-                        BlendMode::SrcAlpha
-                    },
-                    tint: opacity_tint(opacity_u8),
-                });
-                if bbox.w > 0 && bbox.h > 0 {
+                if let Some(bbox) = clip.visible(tx, ty, tw, th) {
+                    let op = Some(DrawOp::Text {
+                        key: key.clone(),
+                        // True (possibly negative) origin; replay
+                        // trims the blit to `clip` with a matching
+                        // src offset, so a line sliding off an edge
+                        // keeps its glyphs pinned in place instead of
+                        // shifting.
+                        x: tx.round() as i32,
+                        y: ty.round() as i32,
+                        sx: xf.scale_x,
+                        sy: xf.scale_y,
+                        // Color is baked into the RT. Over the pristine
+                        // transparent clear an Opaque copy is pixel-
+                        // identical to SrcAlpha (premultiplied src over
+                        // transparent) and skips the per-pixel dst read.
+                        blend: if dst_clear && opacity_u8 == 0xFF {
+                            BlendMode::Opaque
+                        } else {
+                            BlendMode::SrcAlpha
+                        },
+                        tint: opacity_tint(opacity_u8),
+                        clip: Rect::new(bbox.x, bbox.y, bbox.w, bbox.h),
+                    });
                     let mut h = DefaultHasher::new();
                     1u8.hash(&mut h);
                     content.hash(&mut h);
@@ -335,8 +346,8 @@ fn walk(
             }
         }
         NodeKind::Img { src } => {
-            let bbox = transformed_bbox(lay, xf);
-            if bbox.w > 0 && bbox.h > 0 {
+            let (ax, ay, aw, ah) = xf.apply_to_aabb(lay.x, lay.y, lay.w, lay.h);
+            if let Some(bbox) = clip.visible(ax, ay, aw, ah) {
                 let mut h = DefaultHasher::new();
                 2u8.hash(&mut h);
                 src.hash(&mut h);
@@ -345,7 +356,7 @@ fn walk(
                 sx_q.hash(&mut h);
                 sy_q.hash(&mut h);
                 rot_q.hash(&mut h);
-                let op = build_img_op(src, lay, images, opacity_u8, xf, dst_clear);
+                let op = build_img_op(src, lay, images, opacity_u8, xf, dst_clear, bbox);
                 out.push(Entry {
                     item: PaintedItem { node_id: id, bbox, content_hash: h.finish() },
                     op,
@@ -357,10 +368,22 @@ fn walk(
     // Children painted over this node's own background must blend,
     // not copy — the pristine-clear guarantee ends here.
     let child_dst_clear = dst_clear && node.style.background_color.is_none();
+    // overflow:hidden shrinks the clip for the subtree; an empty
+    // result prunes the whole subtree (the carousel's off-window
+    // cards never even get walked).
+    let child_clip = if node.style.overflow == Some(Overflow::Hidden) {
+        let (tx, ty, tw, th) = xf.apply_to_rect(lay.x, lay.y, lay.w, lay.h);
+        clip.intersect(tx, ty, tw, th)
+    } else {
+        clip
+    };
+    if child_clip.is_empty() {
+        return;
+    }
     for &child in &node.children {
         walk(
             tree, child, layouts, text_styles, text_cache, images, opacities, transforms,
-            child_dst_clear, false, out,
+            child_dst_clear, false, child_clip, out,
         );
     }
 }
@@ -376,6 +399,11 @@ fn build_img_op(
     opacity_u8: u8,
     xf: Transform,
     dst_clear: bool,
+    // `visible`: the transformed AABB's visible portion (already
+    // viewport- and overflow-clipped by the caller). The Copy dst is
+    // trimmed to it with a proportional src trim; the affine path
+    // only culls (its dst is an engine-computed AABB).
+    visible: PixelRect,
 ) -> Option<DrawOp> {
     let base_w = clamp_u16(lay.w);
     let base_h = clamp_u16(lay.h);
@@ -410,7 +438,20 @@ fn build_img_op(
         });
     }
 
-    let dst = Rect::new(clamp_u16(tx), clamp_u16(ty), clamp_u16(tw), clamp_u16(th));
+    if tw < 0.5 || th < 0.5 {
+        return None;
+    }
+    // Trim dst to the visible rect and map the trim back into src
+    // space. 1:1 copies (the common case — the registry pre-sizes
+    // images to their layout box) map exactly; scaled copies land
+    // within a pixel, invisible on a moving edge.
+    let rx = src_w as f32 / tw;
+    let ry = src_h as f32 / th;
+    let sx0 = (((visible.x as f32 - tx) * rx).round().max(0.0) as u16).min(src_w - 1);
+    let sy0 = (((visible.y as f32 - ty) * ry).round().max(0.0) as u16).min(src_h - 1);
+    let sw = ((visible.w as f32 * rx).round().max(1.0) as u16).min(src_w - sx0);
+    let sh = ((visible.h as f32 * ry).round().max(1.0) as u16).min(src_h - sy0);
+    let dst = Rect::new(visible.x, visible.y, visible.w, visible.h);
     let blend = if (dst_clear || fully_opaque) && opacity_u8 == 0xFF {
         BlendMode::Opaque
     } else {
@@ -418,7 +459,7 @@ fn build_img_op(
     };
     Some(DrawOp::Copy {
         texture,
-        src: Rect::new(0, 0, src_w, src_h),
+        src: Rect::new(sx0, sy0, sw, sh),
         dst,
         blend,
         tint: opacity_tint(opacity_u8),
@@ -455,17 +496,44 @@ pub fn replay<'a>(
                 *dst,
                 CopyOpts { blend: *blend, filter: Filter::Nearest, tint: *tint },
             )?,
-            DrawOp::Text { key, x, y, sx, sy, blend, tint } => {
+            DrawOp::Text { key, x, y, sx, sy, blend, tint, clip: tclip } => {
                 match text_cache.lookup(key) {
                     Some(cached) if cached.width > 0 && cached.height > 0 => {
-                        let dw = ((cached.width as f32) * sx).round();
-                        let dh = ((cached.height as f32) * sy).round();
-                        frame.copy_rect(
-                            &cached.texture,
-                            Rect::new(0, 0, cached.width, cached.height),
-                            Rect::new(*x, *y, clamp_u16(dw).max(1), clamp_u16(dh).max(1)),
-                            CopyOpts { blend: *blend, filter: Filter::Nearest, tint: *tint },
-                        )?
+                        let dw = ((cached.width as f32) * sx).max(1.0);
+                        let dh = ((cached.height as f32) * sy).max(1.0);
+                        // Trim the dst rect (true, possibly negative
+                        // origin) to the build-time clip, mapping the
+                        // trim back into src space so partially
+                        // visible lines keep their glyphs in place.
+                        let dx0 = (*x).max(tclip.x as i32);
+                        let dy0 = (*y).max(tclip.y as i32);
+                        let dx1 = (*x + dw.round() as i32).min(tclip.x as i32 + tclip.w as i32);
+                        let dy1 = (*y + dh.round() as i32).min(tclip.y as i32 + tclip.h as i32);
+                        if dx1 <= dx0 || dy1 <= dy0 {
+                            frame
+                        } else {
+                            let rx = cached.width as f32 / dw;
+                            let ry = cached.height as f32 / dh;
+                            let sx0 = ((((dx0 - x) as f32) * rx).round().max(0.0) as u16)
+                                .min(cached.width - 1);
+                            let sy0 = ((((dy0 - y) as f32) * ry).round().max(0.0) as u16)
+                                .min(cached.height - 1);
+                            let sw = ((((dx1 - dx0) as f32) * rx).round().max(1.0) as u16)
+                                .min(cached.width - sx0);
+                            let sh = ((((dy1 - dy0) as f32) * ry).round().max(1.0) as u16)
+                                .min(cached.height - sy0);
+                            frame.copy_rect(
+                                &cached.texture,
+                                Rect::new(sx0, sy0, sw, sh),
+                                Rect::new(
+                                    dx0 as u16,
+                                    dy0 as u16,
+                                    (dx1 - dx0) as u16,
+                                    (dy1 - dy0) as u16,
+                                ),
+                                CopyOpts { blend: *blend, filter: Filter::Nearest, tint: *tint },
+                            )?
+                        }
                     }
                     // RT not cached (atlas missing / zero extent):
                     // skip silently, same as the old painter; the
@@ -493,15 +561,65 @@ fn bbox_intersects_clip(b: &PixelRect, clip: Option<Rect>) -> bool {
         && (c.y as u32 + c.h as u32) > b.y as u32
 }
 
-/// Layout rect under `xf`, as a rotation-aware AABB (collapses to the
-/// scale box when unrotated, to the layout rect when identity).
-fn transformed_bbox(lay: &ComputedLayout, xf: Transform) -> PixelRect {
-    let (tx, ty, tw, th) = xf.apply_to_aabb(lay.x, lay.y, lay.w, lay.h);
-    PixelRect {
-        x: clamp_u16(tx),
-        y: clamp_u16(ty),
-        w: clamp_u16(tw),
-        h: clamp_u16(th),
+/// Accumulated paint clip in f32 screen space: the viewport
+/// intersected with every `overflow: hidden` ancestor's transformed
+/// rect.
+///
+/// All culling and clipping happens HERE, in f32, before any u16
+/// clamp. The old path clamped raw transformed coordinates, which (a)
+/// pinned off-left geometry to x = 0 — carousel cards sliding out the
+/// left edge stacked at the screen corner, blending over each other
+/// and churning damage every tween frame — (b) let off-right
+/// geometry reach the blitter at x beyond the framebuffer width,
+/// where `y*stride + x*bpp` addressing wraps it into the wrong rows,
+/// and (c) painted and damage-tracked everything regardless of
+/// visibility, so offscreen nodes cost real FPGA bandwidth.
+#[derive(Clone, Copy, Debug)]
+struct ClipF {
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+}
+
+impl ClipF {
+    fn new(w: f32, h: f32) -> Self {
+        ClipF { x0: 0.0, y0: 0.0, x1: w, y1: h }
+    }
+
+    fn intersect(self, x: f32, y: f32, w: f32, h: f32) -> Self {
+        ClipF {
+            x0: self.x0.max(x),
+            y0: self.y0.max(y),
+            x1: self.x1.min(x + w),
+            y1: self.y1.min(y + h),
+        }
+    }
+
+    fn is_empty(self) -> bool {
+        self.x1 - self.x0 < 0.5 || self.y1 - self.y0 < 0.5
+    }
+
+    /// The visible pixel rect of `(x, y, w, h)` under this clip;
+    /// `None` when nothing survives. The result is always inside the
+    /// framebuffer (the root clip is the viewport), so the u16
+    /// conversions cannot distort.
+    fn visible(self, x: f32, y: f32, w: f32, h: f32) -> Option<PixelRect> {
+        if w < 0.5 || h < 0.5 {
+            return None;
+        }
+        let c = self.intersect(x, y, w, h);
+        if c.is_empty() {
+            return None;
+        }
+        let x0 = c.x0.round().max(0.0);
+        let y0 = c.y0.round().max(0.0);
+        let pw = (c.x1.round() - x0).max(0.0) as u16;
+        let ph = (c.y1.round() - y0).max(0.0) as u16;
+        if pw == 0 || ph == 0 {
+            return None;
+        }
+        Some(PixelRect { x: x0 as u16, y: y0 as u16, w: pw, h: ph })
     }
 }
 
@@ -725,5 +843,115 @@ mod tests {
         // divergence this module exists to prevent).
         assert_eq!(label_e.item.bbox.x, 107);
         assert_eq!(label_e.item.bbox.w, 120);
+    }
+
+    /// Offscreen nodes vanish (no op, no damage); nodes straddling
+    /// the left edge are trimmed to the visible part instead of being
+    /// pinned to x = 0 (which used to stack off-left carousel cards
+    /// at the screen corner); zero-alpha fills keep their damage item
+    /// but paint nothing.
+    #[test]
+    fn viewport_culls_and_clips() {
+        let mut tree = Tree::new();
+        let root = tree.create(NodeKind::Div, Style::default());
+        let solid = |r, g, b, a| Style {
+            background_color: Some(Rgba::new(r, g, b, a)),
+            ..Default::default()
+        };
+        let off_left = tree.create(NodeKind::Div, solid(1, 1, 1, 255));
+        let straddle = tree.create(NodeKind::Div, solid(2, 2, 2, 255));
+        let off_right = tree.create(NodeKind::Div, solid(3, 3, 3, 255));
+        let ghost_bg = tree.create(NodeKind::Div, solid(9, 9, 9, 0)); // transparent bg
+        tree.append_child(root, off_left);
+        tree.append_child(root, straddle);
+        tree.append_child(root, off_right);
+        tree.append_child(root, ghost_bg);
+
+        let mut layouts = HashMap::new();
+        let lay = |x, y, w, h| ComputedLayout { x, y, w, h };
+        layouts.insert(root, lay(0.0, 0.0, 1920.0, 1080.0));
+        layouts.insert(off_left, lay(-500.0, 100.0, 300.0, 100.0)); // fully out
+        layouts.insert(straddle, lay(-100.0, 100.0, 300.0, 100.0)); // 200 px visible
+        layouts.insert(off_right, lay(30000.0, 100.0, 300.0, 100.0)); // fully out
+        layouts.insert(ghost_bg, lay(10.0, 10.0, 50.0, 50.0));
+
+        let dl = build(
+            &tree,
+            root,
+            &fb(),
+            &layouts,
+            &HashMap::new(),
+            &TextCache::new(),
+            &ImageRegistry::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            true,
+        );
+
+        // off_left and off_right are gone entirely; straddle + ghost remain.
+        assert_eq!(dl.entries.len(), 2);
+        let s = &dl.entries[0];
+        assert_eq!((s.item.bbox.x, s.item.bbox.w), (0, 200), "trimmed, not shifted");
+        match s.op.as_ref().expect("straddle paints") {
+            DrawOp::Fill { rect, .. } => assert_eq!((rect.x, rect.w), (0, 200)),
+            other => panic!("expected Fill, got {other:?}"),
+        }
+        let g = &dl.entries[1];
+        assert!(g.op.is_none(), "zero-alpha fill paints nothing");
+        assert_eq!(g.item.bbox.w, 50, "…but still damages (visibility toggles)");
+    }
+
+    /// overflow:hidden clips children at paint time and prunes
+    /// subtrees that fall fully outside the window.
+    #[test]
+    fn overflow_hidden_clips_children() {
+        let mut tree = Tree::new();
+        let root = tree.create(NodeKind::Div, Style::default());
+        let frame_style = Style {
+            overflow: Some(Overflow::Hidden),
+            ..Default::default()
+        };
+        let window = tree.create(NodeKind::Div, frame_style);
+        let solid = Style {
+            background_color: Some(Rgba::new(5, 5, 5, 255)),
+            ..Default::default()
+        };
+        let inside = tree.create(NodeKind::Div, solid.clone());
+        let poking = tree.create(NodeKind::Div, solid.clone());
+        let outside = tree.create(NodeKind::Div, solid);
+        tree.append_child(root, window);
+        tree.append_child(window, inside);
+        tree.append_child(window, poking);
+        tree.append_child(window, outside);
+
+        let mut layouts = HashMap::new();
+        let lay = |x, y, w, h| ComputedLayout { x, y, w, h };
+        layouts.insert(root, lay(0.0, 0.0, 1920.0, 1080.0));
+        layouts.insert(window, lay(100.0, 100.0, 400.0, 200.0));
+        layouts.insert(inside, lay(150.0, 150.0, 100.0, 50.0));
+        layouts.insert(poking, lay(450.0, 150.0, 100.0, 50.0)); // 50 px inside
+        layouts.insert(outside, lay(600.0, 150.0, 100.0, 50.0)); // beyond window
+
+        let dl = build(
+            &tree,
+            root,
+            &fb(),
+            &layouts,
+            &HashMap::new(),
+            &TextCache::new(),
+            &ImageRegistry::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            true,
+        );
+
+        assert_eq!(dl.entries.len(), 2, "outside child culled");
+        assert_eq!(dl.entries[0].item.bbox.w, 100);
+        let p = &dl.entries[1];
+        assert_eq!(
+            (p.item.bbox.x, p.item.bbox.w),
+            (450, 50),
+            "poking child trimmed at the window edge"
+        );
     }
 }
