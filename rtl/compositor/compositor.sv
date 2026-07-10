@@ -671,10 +671,23 @@ module compositor #(
     wire [31:0] cur_line_base = (prod_layer == 2'd0) ? wp_line_base
                               : (prod_layer == 2'd1) ? ct_line_base
                               :                        bx_line_base;
+
+    // Registered burst request, latched on the P_DECIDE → P_REQ
+    // transition. The run_tiles coalescing scan (a BURST_TILES-deep
+    // chained priority loop with dynamic mask indexing) plus the
+    // line-base add is the design's deepest combinational chain;
+    // driving the f2sdram interface FFs straight from it missed
+    // h2f_user0_clk setup by ~0.7 ns. P_REQ instead presents these
+    // registered values, held stable across the whole waitrequest
+    // window. The scan itself now only has to make timing into a
+    // local register.
+    logic [7:0]       req_burst_q;
+    logic [N_AW-1:0]  req_addr_q;
+
     assign avl_address    = (pstate == P_MREQ)
                             ? mask_base_l[N_AW+3:4]
-                            : cur_line_base[N_AW+3:4] + {{(N_AW-LBW){1'b0}}, prod_word[LBW-1:0]};
-    assign avl_burstcount = (pstate == P_REQ)  ? this_burst
+                            : req_addr_q;
+    assign avl_burstcount = (pstate == P_REQ)  ? req_burst_q
                           : (pstate == P_MREQ) ? MASK_BEATS[7:0] : 8'd0;
     assign avl_read       = (pstate == P_REQ) || (pstate == P_MREQ);
 
@@ -702,6 +715,8 @@ module compositor #(
             burst_left   <= '0;
             mask_beat    <= '0;
             mask_row_p   <= '0;
+            req_burst_q  <= '0;
+            req_addr_q   <= '0;
             bx_base_l    <= '0;
             bx_line_base <= '0;
             bx_y_l       <= '0;
@@ -793,7 +808,12 @@ module compositor #(
                         end else if (is_mct && !cur_tile_set) begin
                             prod_word <= prod_word + WORDS_PER_TILE[LBW:0]; // skip empty tile
                         end else begin
-                            pstate <= P_REQ;            // issue a burst
+                            // Latch the burst request; P_REQ presents
+                            // the registered values to the interface.
+                            req_burst_q <= this_burst;
+                            req_addr_q  <= cur_line_base[N_AW+3:4]
+                                         + {{(N_AW-LBW){1'b0}}, prod_word[LBW-1:0]};
+                            pstate      <= P_REQ;       // issue a burst
                         end
                     end
                     P_REQ: begin
