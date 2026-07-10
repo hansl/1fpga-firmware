@@ -16,9 +16,10 @@
 //  Derived from MiSTer-devel/Template_MiSTer/Template.sv
 //  (commit cce023f4ea34a5088a5ce5b45c90ad2a4493c6ac).
 //
-//  Licensed under GPLv2 — see ../../LICENSE (this subtree only, because
-//  the vendored sys/ framework is GPLv2). The Rust host in src/menu-core
-//  remains Apache-2.0 as the overall project.
+//  Licensed under GPLv2 — see ./LICENSE in this directory (this subtree
+//  only, because
+//  the vendored sys/ framework is GPLv2). The Rust host in src/ remains
+//  Apache-2.0 as the overall project.
 //
 //============================================================================
 

@@ -135,4 +135,7 @@ Frontend deployed via `make deploy-frontend` (rsync to `/root/frontend`).
 
 ## License
 
-Apache 2.0
+Apache 2.0 — EXCEPT `cores/menu-core-fpga/`, which is GPLv2 (it vendors
+the MiSTer `sys/` framework); see the LICENSE file in that directory.
+The FPGA bitstream is a separate build artifact from the Apache-2.0
+firmware binary.

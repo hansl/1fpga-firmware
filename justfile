@@ -74,11 +74,10 @@ menu-host-image:
 _ensure-menu-host-image:
     @docker image inspect one-fpga-musl:1.95.0 > /dev/null 2>&1 || just menu-host-image
 
-# Compile the menu-core FPGA bitstream (requires cores/menu-core-fpga submodule)
+# Compile the menu-core FPGA bitstream (cores/menu-core-fpga, in-repo)
 build-menu-core: _ensure-menu-core-image
     @test -f cores/menu-core-fpga/menu_core.qpf || \
-        (echo "ERROR: cores/menu-core-fpga submodule not initialized. Run:" && \
-         echo "  git submodule update --init --recursive" && \
+        (echo "ERROR: cores/menu-core-fpga/menu_core.qpf missing — corrupt checkout?" && \
          exit 1)
     docker run --rm -t \
         --platform linux/amd64 \
