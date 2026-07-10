@@ -304,6 +304,14 @@ module blit_engine (
     logic [7:0]  alpha_and_q;
     // Active burst length in beats (1..BURST_BEATS_MAX).
     logic [3:0]  copy_burst_len_q;
+    // Src realignment skid: pixels are 32-bit, beats 64-bit, so any
+    // src-vs-dst misalignment is exactly one WORD or none. skew=1
+    // means the src pixel run starts in the HIGH half of its first
+    // beat: fetch one extra beat and have the capture path drop the
+    // leading word (and the trailing one on the last beat). Constant
+    // along a row (src and dst x advance together).
+    logic        copy_src_skew_q;
+    logic [3:0]  copy_fetch_beats_q;   // burst_len + skew (1..9)
     // Per-burst beat / pixel cursors.
     logic [3:0]  copy_beat_idx_q;
     logic [4:0]  copy_pixel_idx_q;
@@ -615,12 +623,13 @@ module blit_engine (
                 ddram_we_o       = 1'b1;
             end
             S_FETCH_SRC_BURST: begin
-                // Multi-beat aligned read. Slave latches addr+burstcnt
-                // on the first cycle (beat_idx == 0) and streams beats
-                // back via dout_valid. We hold rd=1 until the slave
-                // accepts it (~busy), then move to wait.
+                // Multi-beat read from the src's beat-aligned base —
+                // [31:3] drops the word offset, and copy_fetch_beats_q
+                // carries the extra skid beat when the src starts in
+                // the high half. Slave latches addr+burstcnt on the
+                // first cycle and streams beats back via dout_valid.
                 ddram_addr_o     = src_pixel_byte_addr[31:3];
-                ddram_burstcnt_o = {4'd0, copy_burst_len_q};
+                ddram_burstcnt_o = {4'd0, copy_fetch_beats_q};
                 ddram_be_o       = 8'hFF;
                 ddram_rd_o       = 1'b1;
             end
@@ -644,10 +653,12 @@ module blit_engine (
                 ddram_we_o       = 1'b1;
             end
             S_ISSUE_PREFETCH: begin
-                // Issue the next-burst src read. Fixed 8-beat burst:
-                // prefetch only ever runs for the 16-pixel tier.
+                // Issue the next-burst src read (16-pixel tier only).
+                // Same skid rules as S_FETCH_SRC_BURST: the [31:3]
+                // slice is the aligned base, +1 beat when skewed —
+                // skew is row-constant so copy_src_skew_q still holds.
                 ddram_addr_o     = prefetch_src_addr_q[31:3];
-                ddram_burstcnt_o = 8'd8;
+                ddram_burstcnt_o = 8'd8 + {7'd0, copy_src_skew_q};
                 ddram_be_o       = 8'hFF;
                 ddram_rd_o       = 1'b1;
             end
@@ -783,6 +794,8 @@ module blit_engine (
             alpha_or_q           <= '0;
             alpha_and_q          <= '0;
             copy_burst_len_q     <= 4'd0;
+            copy_src_skew_q      <= 1'b0;
+            copy_fetch_beats_q   <= 4'd0;
             copy_beat_idx_q      <= 4'd0;
             copy_pixel_idx_q     <= 5'd0;
             prefetch_alpha_or_q  <= 8'd0;
@@ -836,6 +849,8 @@ module blit_engine (
                 automatic logic [31:0] tinted_hi;
                 automatic logic [4:0]  p_lo_idx;
                 automatic logic [4:0]  p_hi_idx;
+                automatic logic        p_take_lo;
+                automatic logic        p_take_hi;
                 automatic logic [7:0]  al;
                 automatic logic [7:0]  ah;
                 automatic logic        prefetch_last;
@@ -858,15 +873,28 @@ module blit_engine (
                     tinted_lo = p_lo;
                     tinted_hi = p_hi;
                 end
-                p_lo_idx = {prefetch_beat_idx_q, 1'b0};
-                p_hi_idx = {prefetch_beat_idx_q, 1'b1};
-                prefetch_buf[p_lo_idx] <= tinted_lo;
-                prefetch_buf[p_hi_idx] <= tinted_hi;
+                // Same skid take/drop rules as S_WAIT_SRC_BURST —
+                // prefetch always covers a full 16-px burst, and the
+                // skew is row-constant so copy_src_skew_q applies.
+                p_take_lo = ({prefetch_beat_idx_q, 1'b0} >= {4'd0, copy_src_skew_q})
+                          & ({prefetch_beat_idx_q, 1'b0} <
+                             (5'd16 + {4'd0, copy_src_skew_q}));
+                p_take_hi = ({prefetch_beat_idx_q, 1'b1} <
+                             (5'd16 + {4'd0, copy_src_skew_q}));
+                p_lo_idx = {prefetch_beat_idx_q, 1'b0} - {4'd0, copy_src_skew_q};
+                p_hi_idx = {prefetch_beat_idx_q, 1'b1} - {4'd0, copy_src_skew_q};
+                if (p_take_lo) prefetch_buf[p_lo_idx[3:0]] <= tinted_lo;
+                if (p_take_hi) prefetch_buf[p_hi_idx[3:0]] <= tinted_hi;
                 al = ch_a(tinted_lo);
                 ah = ch_a(tinted_hi);
-                prefetch_alpha_or_q  <= prefetch_alpha_or_q  | al | ah;
-                prefetch_alpha_and_q <= prefetch_alpha_and_q & al & ah;
-                prefetch_last = (prefetch_beat_idx_q + 4'd1 == 4'd8);
+                prefetch_alpha_or_q  <= prefetch_alpha_or_q
+                                      | (p_take_lo ? al : 8'h00)
+                                      | (p_take_hi ? ah : 8'h00);
+                prefetch_alpha_and_q <= prefetch_alpha_and_q
+                                      & (p_take_lo ? al : 8'hFF)
+                                      & (p_take_hi ? ah : 8'hFF);
+                prefetch_last = (prefetch_beat_idx_q + 4'd1
+                                 == 4'd8 + {3'd0, copy_src_skew_q});
                 if (prefetch_last) begin
                     prefetch_active_q   <= 1'b0;
                     prefetch_ready_q    <= 1'b1;
@@ -1142,19 +1170,26 @@ module blit_engine (
                         // — saving the L1 cycles a fresh fetch would
                         // pay.
                         automatic logic [15:0] remaining_copy;
-                        automatic logic [5:0]  src_lo;
-                        automatic logic [5:0]  dst_lo;
                         automatic logic        rgba;
+                        automatic logic        dst_al;
+                        automatic logic        s_skew;
+                        automatic logic [3:0]  blen;
                         automatic logic        prefetch_hit;
                         remaining_copy = dst_w_q - cur_x;
-                        src_lo = src_pixel_byte_addr[5:0];
-                        dst_lo = dst_pixel_byte_addr[5:0];
-                        rgba = (format_q == FMT_RGBA);
+                        rgba   = (format_q == FMT_RGBA);
+                        // dst needs only 8-byte (even-pixel) alignment
+                        // for full-BE write beats; src can start on
+                        // ANY pixel thanks to the one-word skid (see
+                        // copy_src_skew_q). Odd dst starts self-align
+                        // after one per-pixel iteration.
+                        dst_al = (dst_pixel_byte_addr[2:0] == 3'd0);
+                        s_skew = src_pixel_byte_addr[2];
+                        blen   = (remaining_copy >= 16'd16) ? 4'd8
+                                                            : remaining_copy[4:1];
                         prefetch_hit = prefetch_ready_q
                                      & (prefetch_src_addr_q == src_pixel_byte_addr);
                         if (rgba && (remaining_copy >= 16'd16)
-                            && (src_lo == 6'd0) && (dst_lo == 6'd0)
-                            && prefetch_hit) begin
+                            && dst_al && prefetch_hit) begin
                             // Use prefetch_buf as src_buf. Replicates
                             // the alpha-summary branch from
                             // S_WAIT_SRC_BURST's last-beat handler.
@@ -1181,6 +1216,8 @@ module blit_engine (
                             alpha_and_q      <= prefetch_alpha_and_q;
                             prefetch_ready_q <= 1'b0;
                             copy_burst_len_q <= 4'd8;
+                            copy_src_skew_q    <= s_skew;
+                            copy_fetch_beats_q <= 4'd8 + {3'd0, s_skew};
                             copy_beat_idx_q  <= 4'd0;
                             copy_pixel_idx_q <= 5'd0;
                             if ((blend_q == BLEND_OPAQUE)
@@ -1194,37 +1231,20 @@ module blit_engine (
                             end else begin
                                 state <= S_FETCH_DST_BURST;
                             end
-                        end else if (rgba && (remaining_copy >= 16'd16)
-                            && (src_lo == 6'd0) && (dst_lo == 6'd0)) begin
-                            // 16 px / 8 beats / 64-byte aligned.
-                            copy_burst_len_q <= 4'd8;
-                            copy_beat_idx_q  <= 4'd0;
-                            copy_pixel_idx_q <= 5'd0;
-                            alpha_or_q       <= 8'd0;
-                            alpha_and_q      <= 8'hFF;
-                            state            <= S_FETCH_SRC_BURST;
-                        end else if (rgba && (remaining_copy >= 16'd8)
-                                     && (src_lo[4:0] == 5'd0)
-                                     && (dst_lo[4:0] == 5'd0)) begin
-                            copy_burst_len_q <= 4'd4;
-                            copy_beat_idx_q  <= 4'd0;
-                            copy_pixel_idx_q <= 5'd0;
-                            alpha_or_q       <= 8'd0;
-                            alpha_and_q      <= 8'hFF;
-                            state            <= S_FETCH_SRC_BURST;
-                        end else if (rgba && (remaining_copy >= 16'd4)
-                                     && (src_lo[3:0] == 4'd0)
-                                     && (dst_lo[3:0] == 4'd0)) begin
-                            copy_burst_len_q <= 4'd2;
-                            copy_beat_idx_q  <= 4'd0;
-                            copy_pixel_idx_q <= 5'd0;
-                            alpha_or_q       <= 8'd0;
-                            alpha_and_q      <= 8'hFF;
-                            state            <= S_FETCH_SRC_BURST;
-                        end else if (rgba && (remaining_copy >= 16'd2)
-                                     && (src_lo[2:0] == 3'd0)
-                                     && (dst_lo[2:0] == 3'd0)) begin
-                            copy_burst_len_q <= 4'd1;
+                        end else if (rgba && dst_al
+                                     && (remaining_copy >= 16'd2)) begin
+                            // Generalized burst: 1..8 dst beats
+                            // (2..16 px), src at any pixel offset via
+                            // the skid. Replaces the old ladder that
+                            // required src and dst to share (burst*4)-
+                            // byte alignment — which any 1-px relative
+                            // offset (e.g. a sliding dst) broke for the
+                            // whole row, collapsing to the per-pixel
+                            // path and forcing the host's 16-px text
+                            // snapping.
+                            copy_burst_len_q   <= blen;
+                            copy_src_skew_q    <= s_skew;
+                            copy_fetch_beats_q <= blen + {3'd0, s_skew};
                             copy_beat_idx_q  <= 4'd0;
                             copy_pixel_idx_q <= 5'd0;
                             alpha_or_q       <= 8'd0;
@@ -1417,6 +1437,8 @@ module blit_engine (
                     automatic logic [31:0] computed_hi;
                     automatic logic [4:0]  pix_lo_idx;
                     automatic logic [4:0]  pix_hi_idx;
+                    automatic logic        take_lo;
+                    automatic logic        take_hi;
                     automatic logic [7:0]  alpha_lo;
                     automatic logic [7:0]  alpha_hi;
                     automatic logic [7:0]  next_alpha_or;
@@ -1441,19 +1463,33 @@ module blit_engine (
                         computed_lo = src_lo;
                         computed_hi = src_hi;
                     end
-                    pix_lo_idx = {copy_beat_idx_q, 1'b0};
-                    pix_hi_idx = {copy_beat_idx_q, 1'b1};
-                    src_buf[pix_lo_idx] <= computed_lo;
-                    src_buf[pix_hi_idx] <= computed_hi;
+                    // Skid mapping: arriving word w (= beat*2 + half)
+                    // carries pixel (w - skew). The leading word of a
+                    // skewed burst and the trailing word of its last
+                    // beat are over-read padding — not written, and
+                    // excluded from the alpha summaries.
+                    take_lo = ({copy_beat_idx_q, 1'b0} >= {4'd0, copy_src_skew_q})
+                            & ({copy_beat_idx_q, 1'b0} <
+                               ({copy_burst_len_q, 1'b0} + {4'd0, copy_src_skew_q}));
+                    take_hi = ({copy_beat_idx_q, 1'b1} <
+                               ({copy_burst_len_q, 1'b0} + {4'd0, copy_src_skew_q}));
+                    pix_lo_idx = {copy_beat_idx_q, 1'b0} - {4'd0, copy_src_skew_q};
+                    pix_hi_idx = {copy_beat_idx_q, 1'b1} - {4'd0, copy_src_skew_q};
+                    if (take_lo) src_buf[pix_lo_idx[3:0]] <= computed_lo;
+                    if (take_hi) src_buf[pix_hi_idx[3:0]] <= computed_hi;
 
                     alpha_lo = ch_a(computed_lo);
                     alpha_hi = ch_a(computed_hi);
-                    next_alpha_or  = alpha_or_q  | alpha_lo | alpha_hi;
-                    next_alpha_and = alpha_and_q & alpha_lo & alpha_hi;
+                    next_alpha_or  = alpha_or_q
+                                   | (take_lo ? alpha_lo : 8'h00)
+                                   | (take_hi ? alpha_hi : 8'h00);
+                    next_alpha_and = alpha_and_q
+                                   & (take_lo ? alpha_lo : 8'hFF)
+                                   & (take_hi ? alpha_hi : 8'hFF);
                     alpha_or_q  <= next_alpha_or;
                     alpha_and_q <= next_alpha_and;
 
-                    is_last_beat = (copy_beat_idx_q + 4'd1 == copy_burst_len_q);
+                    is_last_beat = (copy_beat_idx_q + 4'd1 == copy_fetch_beats_q);
                     if (is_last_beat) begin
                         // Whole burst captured. Burst-level fast paths:
                         //   Opaque blend OR every alpha == 0xFF → write
