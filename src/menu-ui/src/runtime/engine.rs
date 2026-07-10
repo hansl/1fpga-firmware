@@ -315,6 +315,32 @@ fn engine_main(
                         None => hw.front,
                     };
                     plane_render = hw.hash[plane_back] != Some(p.scene_hash);
+                    // New content while a flip is pending: COMPLETE the
+                    // pending flip first (bounded wait — its frame was
+                    // already submitted) and render into the freed
+                    // surface. Stacking renders onto the pending back
+                    // instead replaces the fence every packet, so under
+                    // a sustained tween the loop-top check never sees a
+                    // landed fence — flips starve, the front freezes on
+                    // stale content (HW test 3: ring on the wrong card,
+                    // animation 'not running' until input stopped).
+                    if plane_render && hw.flip_after.is_some() {
+                        let fl = hw.flip_after.take().expect("just checked");
+                        device.wait_fence(fl.fence, cfg.timeout)?;
+                        plane_pos_regs(&mut device, fl.x, fl.y);
+                        if let Err(e) = device.set_plane_surface(&hw.tex[fl.idx]) {
+                            tracing::error!("plane flip failed: {e}");
+                        }
+                        hw.x = fl.x;
+                        hw.y = fl.y;
+                        hw.front = fl.idx;
+                        if !hw.enabled {
+                            device.set_plane_enabled(true);
+                            hw.enabled = true;
+                        }
+                        plane_back = 1 - hw.front;
+                        plane_render = hw.hash[plane_back] != Some(p.scene_hash);
+                    }
                     if let Some(fl) = hw.flip_after.as_mut() {
                         // Content is in flight: geometry rides the
                         // flip so front never shows mismatched pos.
