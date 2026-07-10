@@ -852,8 +852,10 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         // NOW wait for the previous frame's fence (= sync barrier for
         // reading FB_STATE.render). Wait happens AFTER scene compute
         // so the FPGA's blit work overlaps with the host's CPU work.
-        // The MAX_INFLIGHT_FRAMES=2 bound is here so the host can be
-        // up to 1 frame ahead of the FPGA's PRESENT processing.
+        // MAX_INFLIGHT_FRAMES=1 keeps FB_STATE.render always
+        // trustworthy after this wait; a deeper bound trades that for
+        // more overlap and falls back to full paints whenever a
+        // PRESENT is still in flight (see render_trusted below).
         let fence_wait_start = Instant::now();
         // submit -> retire of the frame we block on = the FPGA's true
         // render time for that frame (it started rendering at submit and
@@ -866,15 +868,35 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
             device.wait_fence(oldest_fence, timeout)?;
             frame_fpga_dt = oldest_submit.elapsed();
         }
+        // Opportunistically drain any further already-retired fences
+        // (single non-blocking register read each). FENCE_VALUE is
+        // monotonic, so front-to-back is correct.
+        while let Some(&(f, _)) = pending_fences.front() {
+            if device.fence_reached(f) {
+                pending_fences.pop_front();
+            } else {
+                break;
+            }
+        }
         let fence_dt = fence_wait_start.elapsed();
 
-        // render_idx is fresh now: the wait above ensures the FPGA
-        // has processed our most-recently-committed PRESENT and
-        // fb_swapper has rotated. Damage diff is against the scene
-        // we last painted INTO THIS SAME PHYSICAL SLOT, which is the
-        // current content.
+        // render_idx is TRUSTWORTHY only when no PRESENT is still in
+        // flight: each submission's FENCE sits after its PRESENT in
+        // the ring, so an empty queue proves fb_swapper has rotated
+        // past our last PRESENT. With MAX_INFLIGHT_FRAMES=1 the wait
+        // above always empties the queue; at deeper pipelining the
+        // FPGA may still owe a PRESENT, in which case FB_STATE.render
+        // is stale — the blits themselves still land in the right
+        // slot (the FPGA resolves the target after the in-ring
+        // PRESENT), but our per-slot damage bookkeeping would key off
+        // the wrong slot, silently underpainting whatever changed
+        // between the mixed-up frames (stale-texture flicker during
+        // animation). When untrusted: no skip, full paint (correct
+        // for any target slot), no record updates (stale records are
+        // conservative — future diffs only overpaint).
+        let render_trusted = pending_fences.is_empty();
         let render_idx = (device.fb_state().render as usize).min(2);
-        if scene_hash_per_fb[render_idx] == Some(current_hash) {
+        if render_trusted && scene_hash_per_fb[render_idx] == Some(current_hash) {
             // This FB slot already has the desired content. Sleep
             // ~one vsync to bound the loop and continue.
             fps_counter.record_frame();
@@ -908,7 +930,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
 
         let damage_paint_plan: Option<Vec<damage::PixelRect>> =
             match &scene_per_fb[render_idx] {
-                Some(prev) => {
+                Some(prev) if render_trusted => {
                     let d = damage::compute_damage(prev, &current_scene);
                     let area = damage::total_area(&d);
                     if d.is_empty() || area > full_paint_threshold {
@@ -917,7 +939,8 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                         Some(d)
                     }
                 }
-                None => None,
+                // Untrusted render_idx → full paint (slot-agnostic).
+                _ => None,
             };
         let frame = match damage_paint_plan {
             Some(rects) => {
@@ -1012,8 +1035,14 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
             }
         }
 
-        scene_hash_per_fb[render_idx] = Some(current_hash);
-        scene_per_fb[render_idx] = Some(current_scene);
+        if render_trusted {
+            scene_hash_per_fb[render_idx] = Some(current_hash);
+            scene_per_fb[render_idx] = Some(current_scene);
+        }
+        // else: target slot unknown — leave all records untouched.
+        // They stay conservative (diffs against them cover at least
+        // the real difference), and the stale hash prevents a false
+        // skip next iteration.
         ui_state.with_tree_mut(|t| t.clear_dirty());
         fps_counter.record_frame();
 

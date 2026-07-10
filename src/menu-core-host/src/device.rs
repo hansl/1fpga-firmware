@@ -1020,6 +1020,15 @@ impl Device {
         HardwareError::from_register(self.regs.read32(registers::ERROR_INFO))
     }
 
+    /// Non-blocking check: has fence `target` retired? Same wrap-safe
+    /// "at or past" comparison as [`Self::wait_fence`], single register
+    /// read. Used to opportunistically drain the pipelined-fence queue
+    /// so `FB_STATE.render` can be trusted without blocking.
+    pub fn fence_reached(&self, target: u32) -> bool {
+        let current = self.regs.read32(registers::FENCE_VALUE);
+        (current.wrapping_sub(target) as i32) >= 0
+    }
+
     /// Spin-wait until `FENCE_VALUE` reaches `target`, or the device
     /// reports an error, or `timeout` elapses.
     pub fn wait_fence(&self, target: u32, timeout: Duration) -> Result<(), DeviceError> {
