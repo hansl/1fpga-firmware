@@ -305,6 +305,16 @@ module blit_engine (
     logic [7:0]  alpha_and_q;
     // Active burst length in beats (1..BURST_BEATS_MAX).
     logic [3:0]  copy_burst_len_q;
+    // Blended-FILL burst: reuse the COPY RMW machinery
+    // (S_FETCH_DST_BURST → S_BLEND_BURST → S_WRITE_BURST) with the
+    // constant fill colour as the blend source. The colour is
+    // pre-loaded into src_buf during S_WAIT_DST_BURST (whose src_buf
+    // write port is otherwise idle), so the blend and write stages
+    // run completely unchanged — no new logic on the blend critical
+    // path. Without this tier a translucent fill was one DDR read
+    // round-trip PER PIXEL (~300 ns/px); menu-ui's card fills alone
+    // were ~200 ms/frame.
+    logic        fill_blend_q;
     // Src realignment skid: pixels are 32-bit, beats 64-bit, so any
     // src-vs-dst misalignment is exactly one WORD or none. skew=1
     // means the src pixel run starts in the HIGH half of its first
@@ -749,6 +759,7 @@ module blit_engine (
             state             <= S_IDLE;
             mode_q            <= MODE_FILL;
             blend_q           <= BLEND_OPAQUE;
+            fill_blend_q      <= 1'b0;
             format_q          <= FMT_RGBA;
             tint_en_q         <= 1'b0;
             tint_color_q      <= '0;
@@ -961,6 +972,10 @@ module blit_engine (
 
                     mode_q       <= mode_i;
                     blend_q      <= blend_i;
+                    // Cleared at op accept; only the blended-FILL
+                    // burst dispatch sets it (COPY ops share the RMW
+                    // states and must see it low).
+                    fill_blend_q <= 1'b0;
                     format_q     <= format_i;
                     tint_en_q    <= tint_en_i;
                     tint_color_q <= tint_color_i;
@@ -1301,9 +1316,31 @@ module blit_engine (
                             state      <= S_WRITE;
                         end
                     end else begin
-                        // FILL non-Opaque needs RMW.
-                        src_pixel_q <= color_q;
-                        state       <= S_FETCH_DST;
+                        // FILL non-Opaque needs RMW. Burst tier when
+                        // the dst run is 2-px (beat) aligned: ride the
+                        // COPY RMW states with the constant colour as
+                        // the blend source (fill_blend_q pre-loads it
+                        // into src_buf during the dst capture). Odd
+                        // lead/trail pixels fall back to the per-pixel
+                        // path; the dispatch re-evaluates per burst.
+                        automatic logic [15:0] remaining_f;
+                        automatic logic        aligned_f;
+                        automatic logic [15:0] beats_f;
+                        remaining_f = dst_w_q - cur_x;
+                        aligned_f   = ~(dst_x_q[0] ^ cur_x[0]);
+                        beats_f     = remaining_f >> 1;
+                        if (aligned_f && (remaining_f >= 16'd2)) begin
+                            copy_burst_len_q <= (beats_f > 16'd8)
+                                                    ? 4'd8
+                                                    : beats_f[3:0];
+                            copy_beat_idx_q  <= 4'd0;
+                            copy_pixel_idx_q <= 5'd0;
+                            fill_blend_q     <= 1'b1;
+                            state            <= S_FETCH_DST_BURST;
+                        end else begin
+                            src_pixel_q <= color_q;
+                            state       <= S_FETCH_DST;
+                        end
                     end
                 end
 
@@ -1583,6 +1620,13 @@ module blit_engine (
                     pix_hi_idx = {copy_beat_idx_q, 1'b1};
                     dst_buf[pix_lo_idx] <= ddram_dout_i[31:0];
                     dst_buf[pix_hi_idx] <= ddram_dout_i[63:32];
+                    // Blended FILL rides these states without a src
+                    // fetch: stage the constant colour as the blend
+                    // source while the port is idle (see fill_blend_q).
+                    if (fill_blend_q) begin
+                        src_buf[pix_lo_idx[3:0]] <= color_q;
+                        src_buf[pix_hi_idx[3:0]] <= color_q;
+                    end
 
                     is_last_beat = (copy_beat_idx_q + 4'd1 == copy_burst_len_q);
                     if (is_last_beat) begin
@@ -1598,6 +1642,10 @@ module blit_engine (
                         remaining_after = dst_w_q - cur_x - 16'd16;
                         prefetch_eligible = (copy_burst_len_q == 4'd8)
                                           & (format_q == FMT_RGBA)
+                                          // Prefetch reads SRC for the
+                                          // next COPY burst — a fill
+                                          // has no src to prefetch.
+                                          & ~fill_blend_q
                                           & (remaining_after >= 16'd16)
                                           & ~prefetch_active_q
                                           & ~prefetch_ready_q;
