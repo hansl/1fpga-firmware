@@ -1,0 +1,2 @@
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) compositor.sv]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) scanline_filter.sv]
