@@ -114,21 +114,54 @@ fn engine_main(
     let mut boxart_anim: u64 = 0;
 
     /// Hardware overlay plane state (v1: the single scanout plane).
-    /// The surface is a blitter-renderable texture; `scene`/`hash`
-    /// mirror the per-FB damage records but for the plane's own
-    /// (single-buffered) surface. `enable_after` defers the CONTROL
-    /// enable until the first content render's fence lands, so the
-    /// scanout never displays uninitialised DDR3.
+    ///
+    /// DOUBLE-BUFFERED: renders target the back surface while the
+    /// scanout reads the front; the base-register flip is deferred
+    /// until the render's fence lands (`flip_after`), so the beam
+    /// never sees a mid-render surface. The first HW test showed why
+    /// this is required, not a nicety: the tween re-renders two cards
+    /// every frame and a window recenter redraws the whole strip
+    /// (~40 ms) — single-buffered, the beam caught the punched-
+    /// transparent-but-not-yet-redrawn state as card-body flicker.
+    ///
+    /// `scene`/`hash` are PER SURFACE (same pattern as the per-FB-slot
+    /// records): each buffer diffs against what IT last held, so
+    /// damage accumulated while it was front replays correctly when
+    /// it becomes back. The first flip doubles as the enable (the
+    /// scanout never reads uninitialised DDR3).
+    /// A flip waiting on its render fence. Carries the position that
+    /// MATCHES the pending content: on a carousel window recenter,
+    /// content and position change together in one packet — applying
+    /// the position immediately while the front still shows the old
+    /// content would jump the cards sideways for a few frames and
+    /// snap back at the flip. Position writes while a flip is pending
+    /// therefore ride the flip.
+    struct PendingFlip {
+        fence: u32,
+        idx: usize,
+        x: i32,
+        y: i32,
+    }
     struct PlaneHw {
-        tex: menu_core_host::texture::TextureHandle,
-        scene: Option<PaintedScene>,
-        hash: Option<u64>,
+        tex: [menu_core_host::texture::TextureHandle; 2],
+        scene: [Option<PaintedScene>; 2],
+        hash: [Option<u64>; 2],
+        /// Surface the scanout reads (meaningful once `enabled`).
+        front: usize,
+        /// Last position actually written to the registers.
         x: i32,
         y: i32,
         enabled: bool,
-        enable_after: Option<u32>,
+        flip_after: Option<PendingFlip>,
     }
     let mut plane_hw: Option<PlaneHw> = None;
+
+    fn plane_pos_regs(device: &mut menu_core_host::device::Device, x: i32, y: i32) {
+        device.set_plane_pos(
+            x.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+            y.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+        );
+    }
 
     // Per-FB-slot damage bookkeeping (see run()'s original comment:
     // the three slots are distinct physical buffers; each diffs
@@ -186,17 +219,31 @@ fn engine_main(
             boxart_anim = boxart_anim.wrapping_add(1);
         }
 
-        // ---- Deferred plane enable ----------------------------------
-        // First-render fence reached → the surface has real pixels →
-        // safe to let the scanout read it. Runs every loop tick so it
-        // fires even when no further packets arrive.
+        // ---- Deferred plane flip ------------------------------------
+        // Back-surface render fence reached → flip the scanout to it
+        // (BASE/SIZE/STRIDE are frame-latched together by the
+        // compositor, so the write is tear-free) and enable on the
+        // first flip. Runs every loop tick so it fires even when no
+        // further packets arrive.
         if let Some(hw) = plane_hw.as_mut()
-            && let Some(f) = hw.enable_after
-            && device.fence_reached(f)
+            && let Some(fl) = &hw.flip_after
+            && device.fence_reached(fl.fence)
         {
-            device.set_plane_enabled(true);
-            hw.enabled = true;
-            hw.enable_after = None;
+            let (idx, fx, fy) = (fl.idx, fl.x, fl.y);
+            // Position + surface in the same compositor frame-latch
+            // generation: content and geometry stay coupled.
+            plane_pos_regs(&mut device, fx, fy);
+            if let Err(e) = device.set_plane_surface(&hw.tex[idx]) {
+                tracing::error!("plane flip failed: {e}");
+            }
+            hw.x = fx;
+            hw.y = fy;
+            hw.front = idx;
+            hw.flip_after = None;
+            if !hw.enabled {
+                device.set_plane_enabled(true);
+                hw.enabled = true;
+            }
         }
 
         // ---- Latest UI frame (or housekeeping tick) -----------------
@@ -211,37 +258,43 @@ fn engine_main(
         // down (plane surface re-render under plane-local damage).
         let plane_pkt = pkt.planes.first();
         let mut plane_render = false;
+        // Surface the render below targets: the pending flip's target
+        // (keep accumulating into it; its fence just moves forward) or
+        // the non-front buffer.
+        let mut plane_back = 0usize;
         match plane_pkt {
             Some(p) => {
                 let need_alloc = match &plane_hw {
-                    Some(hw) => hw.tex.width != p.w || hw.tex.height != p.h,
+                    Some(hw) => hw.tex[0].width != p.w || hw.tex[0].height != p.h,
                     None => true,
                 };
                 if need_alloc {
                     // The pool is a bump allocator — a size change
-                    // leaks the old surface. Fine for the intended
+                    // leaks the old surfaces. Fine for the intended
                     // use (static-size portals); log so churn is
                     // visible.
                     if plane_hw.is_some() {
                         tracing::warn!(
-                            "overlay plane resized to {}x{} (old surface leaked)",
+                            "overlay plane resized to {}x{} (old surfaces leaked)",
                             p.w,
                             p.h
                         );
+                        device.set_plane_enabled(false);
                     }
-                    match device.create_render_texture(p.w, p.h) {
+                    match device
+                        .create_render_texture(p.w, p.h)
+                        .and_then(|a| device.create_render_texture(p.w, p.h).map(|b| [a, b]))
+                    {
                         Ok(tex) => {
-                            if let Err(e) = device.set_plane_surface(&tex) {
-                                tracing::error!("plane surface config failed: {e}");
-                            }
                             plane_hw = Some(PlaneHw {
                                 tex,
-                                scene: None,
-                                hash: None,
+                                scene: [None, None],
+                                hash: [None, None],
+                                front: 0,
                                 x: i32::MIN,
                                 y: i32::MIN,
                                 enabled: false,
-                                enable_after: None,
+                                flip_after: None,
                             });
                         }
                         Err(e) => {
@@ -254,25 +307,38 @@ fn engine_main(
                     }
                 }
                 if let Some(hw) = plane_hw.as_mut() {
-                    plane_render = hw.hash != Some(p.scene_hash);
-                    if hw.x != p.x || hw.y != p.y {
-                        let cx = p.x.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-                        let cy = p.y.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-                        device.set_plane_pos(cx, cy);
+                    plane_back = match &hw.flip_after {
+                        Some(fl) => fl.idx,
+                        None if hw.enabled => 1 - hw.front,
+                        // Not yet on screen: keep filling the first
+                        // surface until its flip enables us.
+                        None => hw.front,
+                    };
+                    plane_render = hw.hash[plane_back] != Some(p.scene_hash);
+                    if let Some(fl) = hw.flip_after.as_mut() {
+                        // Content is in flight: geometry rides the
+                        // flip so front never shows mismatched pos.
+                        fl.x = p.x;
+                        fl.y = p.y;
+                    } else if !plane_render && (hw.x != p.x || hw.y != p.y) {
+                        // Pure move, nothing in flight: registers now.
+                        plane_pos_regs(&mut device, p.x, p.y);
                         hw.x = p.x;
                         hw.y = p.y;
                     }
-                    // Re-enable immediately only when the surface
-                    // already holds rendered content; a fresh surface
-                    // waits for its first render's fence (see the
-                    // deferred-enable check at the loop top).
+                    // Re-enable after a disable, when the front still
+                    // holds this exact content: registers only.
                     if !hw.enabled
-                        && hw.enable_after.is_none()
-                        && !plane_render
-                        && hw.hash.is_some()
+                        && hw.flip_after.is_none()
+                        && hw.hash[hw.front] == Some(p.scene_hash)
                     {
-                        device.set_plane_enabled(true);
-                        hw.enabled = true;
+                        plane_pos_regs(&mut device, p.x, p.y);
+                        hw.x = p.x;
+                        hw.y = p.y;
+                        if device.set_plane_surface(&hw.tex[hw.front]).is_ok() {
+                            device.set_plane_enabled(true);
+                            hw.enabled = true;
+                        }
                     }
                 }
             }
@@ -402,18 +468,18 @@ fn engine_main(
 
         // ---- Plane surface re-render (plane-local damage) -----------
         // Same damage machinery as the FB path, but the target is the
-        // plane's texture and there is exactly ONE scene record (the
-        // surface is single-buffered — a change can shear for one
-        // scanout frame; acceptable for tween-scale updates).
+        // plane's BACK surface (the scanout reads the front; the flip
+        // happens at this render's fence — see the loop top). Each
+        // surface diffs against its own last-rendered scene.
         let frame = if plane_render
             && let (Some(p), Some(hw)) = (plane_pkt, plane_hw.as_mut())
         {
             let new_scene = p.dl.to_scene();
-            let plan: Option<Vec<damage::PixelRect>> = match &hw.scene {
+            let plan: Option<Vec<damage::PixelRect>> = match &hw.scene[plane_back] {
                 Some(prev) => Some(damage::compute_damage(prev, &new_scene)),
                 None => None, // fresh surface → full render
             };
-            let mut f = frame.set_target(&hw.tex)?;
+            let mut f = frame.set_target(&hw.tex[plane_back])?;
             {
                 let text_cache_l = caches.text_cache.lock().unwrap();
                 match plan {
@@ -432,8 +498,8 @@ fn engine_main(
                     }
                 }
             }
-            hw.scene = Some(new_scene);
-            hw.hash = Some(p.scene_hash);
+            hw.scene[plane_back] = Some(new_scene);
+            hw.hash[plane_back] = Some(p.scene_hash);
             f
         } else {
             frame
@@ -493,14 +559,18 @@ fn engine_main(
         let new_token = frame.present()?.submit()?;
         pending_fences.push_back((new_token.fence_value(), Instant::now()));
 
-        // First plane render just submitted → enable once its fence
-        // lands (checked at the loop top).
+        // Plane render just submitted → flip to the back surface (with
+        // its matching position) once the fence lands (loop top).
+        // Re-renders into a still-pending back advance the fence.
         if plane_render
-            && let Some(hw) = plane_hw.as_mut()
-            && !hw.enabled
-            && hw.enable_after.is_none()
+            && let (Some(p), Some(hw)) = (plane_pkt, plane_hw.as_mut())
         {
-            hw.enable_after = Some(new_token.fence_value());
+            hw.flip_after = Some(PendingFlip {
+                fence: new_token.fence_value(),
+                idx: plane_back,
+                x: p.x,
+                y: p.y,
+            });
         }
 
         // ---- Content coverage mask (unchanged policy) ----------------
