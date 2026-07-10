@@ -3,6 +3,9 @@
 //! The binary is intentionally thin: parse CLI flags, init tracing,
 //! pin to a CPU, then hand off to [`menu_ui::run`].
 
+// Pulled in by the lib (db worker); referenced here so
+// unused_crate_dependencies stays quiet for the bin target.
+use serde_json as _;
 use std::path::PathBuf;
 
 use clap::Parser;

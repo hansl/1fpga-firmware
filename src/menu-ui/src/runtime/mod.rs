@@ -621,6 +621,12 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     while running.load(Ordering::SeqCst) {
         let t0 = Instant::now();
 
+        // 0a'. Settle any completed DB queries FIRST so their promise
+        //      continuations run inside this tick's job pump.
+        if let Some(bridge) = context.get_data::<crate::db::bridge::DbBridge>().cloned() {
+            bridge.drain(&mut context);
+        }
+
         // 0a. Drive the JS job queue forward by one tick (see
         //     boa::tick_jobs for why not run_jobs()).
         if let Err(e) = boa::tick_jobs(&executor, &mut context) {

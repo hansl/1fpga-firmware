@@ -32,6 +32,8 @@ boa_runtime = { git = "https://github.com/boa-dev/boa.git", rev = "b6e0fb4d8c142
 clap = { version = "4.3.5", features = ["derive"] }
 clap-verbosity-flag = "2.0.1"
 core_affinity = "0.8.1"
+rusqlite = { version = "0.37.0", features = ["bundled", "serde_json"] }
+serde_json = "1"
 ctrlc = "3.4"
 evdev = "0.13"
 fontdue = "0.9"

@@ -3433,6 +3433,8 @@ dependencies = [
  "image",
  "menu-core-host",
  "png 0.17.16",
+ "rusqlite",
+ "serde_json",
  "taffy",
  "thiserror 2.0.18",
  "tracing",

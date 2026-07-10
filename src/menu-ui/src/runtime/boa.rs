@@ -33,6 +33,10 @@ pub fn build_context() -> JsResult<(Context, Rc<SimpleJobExecutor>, Rc<MapModule
     boa_runtime::register(ConsoleExtension(TracingLogger), None, &mut context)?;
     boa_runtime::interval::register(&mut context)?;
     crate::host::register(&loader, &mut context)?;
+    // `1fpga:db`: async SQLite over a worker thread. The returned
+    // bridge is also stored as context data; the runtime fetches it
+    // from there for the per-tick reply drain.
+    crate::db::register(&loader, &mut context)?;
     Ok((context, executor, loader))
 }
 
