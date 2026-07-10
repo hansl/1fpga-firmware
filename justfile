@@ -245,7 +245,7 @@ deploy-fake-input mode="release-dev": (build-fake-input mode)
 # menu at 100% transition and makes every build read ~28ms regardless).
 # NOTE: just args are POSITIONAL — to set a later one pass the earlier ones,
 # e.g. mask ON: `just demo-menu-ui-autonav rl <wp> true`.
-demo-menu-ui-autonav keys="rl" wp="/media/fat/menu_ui_assets/bg.png" cm="false" iv="1200": deploy-menu-ui deploy-menu-ui-bundle deploy-menu-ui-assets deploy-fake-input
+demo-menu-ui-autonav keys="rl" wp="/media/fat/menu_ui_assets/bg.png" cm="true" iv="1200": deploy-menu-ui deploy-menu-ui-bundle deploy-menu-ui-assets deploy-fake-input
     mkdir -p {{justfile_directory()}}/_logs
     ssh -t root@{{mister_ip}} 'killall fake_input menu_ui 2>/dev/null; /media/fat/fake_input --keys {{keys}} --interval-ms {{iv}} >/tmp/fake_input.log 2>&1 & FI=$!; sleep 2; /media/fat/menu_ui --bundle /media/fat/menu_ui_app.js --wallpaper {{wp}} --content-mask {{cm}}; kill $FI 2>/dev/null; true' 2>&1 | tee {{justfile_directory()}}/_logs/menu_ui.log
 

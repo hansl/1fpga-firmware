@@ -63,14 +63,17 @@ struct Flags {
     #[clap(long, default_value = "/media/fat/menu_ui_assets/bg.png")]
     wallpaper: PathBuf,
 
-    /// Content coverage mask (task #15): when compositing, the host hands
-    /// the compositor a 64x64-tile bitmap so it skips reading the
-    /// transparent majority of the content layer. Default OFF — for the
-    /// scattered main-menu content the tile-masked read fragments the DDR
-    /// access and is net-slower than the full sequential read; it's kept
-    /// for contiguous upper layers (Phase D). Pass `--content-mask true`
-    /// to experiment.
-    #[clap(long = "content-mask", default_value_t = false, action = clap::ArgAction::Set)]
+    /// Content coverage mask: when compositing, the host hands the
+    /// compositor a 64x64-tile bitmap so it skips reading the transparent
+    /// majority of the content layer. Default ON — REQUIRED with a
+    /// hardware overlay plane (LayerPortal): the plane's band lines
+    /// otherwise fetch three full layers (~1.55 GB/s, at the vbuf
+    /// ceiling) and the scanout producer underruns — measured 10k+
+    /// underrun events showing as sheared/stale plane lines. With the
+    /// carousel band OUT of the content layer, its tiles are empty and
+    /// the masked skip is one contiguous hole, not fragmentation (the
+    /// old OFF-default rationale predates the plane).
+    #[clap(long = "content-mask", default_value_t = true, action = clap::ArgAction::Set)]
     content_mask: bool,
 
     /// Phase D bring-up: upload a test boxart panel and slide it in/out at
