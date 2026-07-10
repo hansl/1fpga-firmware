@@ -443,7 +443,9 @@ fn paint_text<'a>(
     text_cache: &TextCache,
     opacity_u8: u8,
     xf: Transform,
-    scaled: bool,
+    // Retained for call-site symmetry; scaling is conveyed through
+    // `xf`-derived tw/th (dst != src engages the FPGA's scaled path).
+    _scaled: bool,
     dst_clear: bool,
     frame: Frame<'a>,
 ) -> Result<Frame<'a>, DeviceError> {
@@ -476,16 +478,12 @@ fn paint_text<'a>(
         cached.width as f32,
         cached.height as f32,
     );
-    let dst_x = if scaled {
-        clamp_u16(tx)
-    } else {
-        // Round dst.x down to a 16-pixel multiple so the framebuffer
-        // write address is 64-byte aligned at cur_x=0 — engages the
-        // engine's 16-pixel burst tier from the start of every row.
-        // Visual shift is at most 15 px left of where Taffy placed
-        // the text; imperceptible at our typical sizes.
-        clamp_u16(tx) & !15
-    };
+    // No grid snapping: the blit engine's src realignment skid lets
+    // bursts engage at any src/dst offset (dst self-aligns within one
+    // pixel), so text can sit exactly where Taffy placed it and slide
+    // animations move at 1-px granularity. (This used to round down
+    // to a 16-px multiple to hit the old aligned-only burst tier.)
+    let dst_x = clamp_u16(tx);
     let dst = Rect::new(
         dst_x,
         clamp_u16(ty),
