@@ -54,6 +54,24 @@ pub enum DrawOp {
         blend: BlendMode,
         tint: Option<Rgba>,
     },
+    /// Text line, resolved against the shared text cache AT REPLAY
+    /// TIME (not build time). The engine ensures this frame's text
+    /// RTs immediately before replaying the same packet, so brand-new
+    /// text paints in the same engine frame — resolving at build time
+    /// instead left a one-frame blank blink during animations (the
+    /// damage system repainted the region with background while the
+    /// RT was still a cache miss, and the glyphs arrived a tick
+    /// later). `x`/`y` are the transformed origin; dst dims are the
+    /// cached RT dims scaled by `sx`/`sy` (identity = exact).
+    Text {
+        key: CacheKey,
+        x: u16,
+        y: u16,
+        sx: f32,
+        sy: f32,
+        blend: BlendMode,
+        tint: Option<Rgba>,
+    },
     /// Rotated + scaled image via the affine engine.
     AffineRotate {
         texture: TextureHandle,
@@ -258,10 +276,12 @@ fn walk(
                     px_size: rs.px_size.round() as u16,
                     color: rs.color.to_u32(),
                 };
-                // Size dst from the CACHED RT dimensions (that is what
-                // gets blitted); fall back to the layout box for the
-                // damage rect when the RT isn't rendered yet.
-                let (op, bbox) = match text_cache.lookup(&key) {
+                // Damage bbox: sized from the CACHED RT dims when
+                // available (that is exactly what replay blits); the
+                // layout box otherwise. The two agree in practice —
+                // Taffy measures text through the same atlas — so a
+                // first-frame miss doesn't misplace damage.
+                let bbox = match text_cache.lookup(&key) {
                     Some(cached) if cached.width > 0 && cached.height > 0 => {
                         let (tx, ty, tw, th) = xf.apply_to_rect(
                             lay.x,
@@ -269,33 +289,33 @@ fn walk(
                             cached.width as f32,
                             cached.height as f32,
                         );
-                        let dst = Rect::new(
-                            clamp_u16(tx),
-                            clamp_u16(ty),
-                            clamp_u16(tw).max(1),
-                            clamp_u16(th).max(1),
-                        );
-                        let bbox = PixelRect { x: dst.x, y: dst.y, w: dst.w, h: dst.h };
-                        let op = DrawOp::Copy {
-                            texture: cached.texture,
-                            src: Rect::new(0, 0, cached.width, cached.height),
-                            dst,
-                            // Color is baked into the RT. Over the
-                            // pristine transparent clear an Opaque
-                            // copy is pixel-identical to SrcAlpha
-                            // (premultiplied src over transparent)
-                            // and skips the per-pixel dst read.
-                            blend: if dst_clear && opacity_u8 == 0xFF {
-                                BlendMode::Opaque
-                            } else {
-                                BlendMode::SrcAlpha
-                            },
-                            tint: opacity_tint(opacity_u8),
-                        };
-                        (Some(op), bbox)
+                        PixelRect {
+                            x: clamp_u16(tx),
+                            y: clamp_u16(ty),
+                            w: clamp_u16(tw).max(1),
+                            h: clamp_u16(th).max(1),
+                        }
                     }
-                    _ => (None, transformed_bbox(lay, xf)),
+                    _ => transformed_bbox(lay, xf),
                 };
+                let (tx, ty, _, _) = xf.apply_to_rect(lay.x, lay.y, lay.w, lay.h);
+                let op = Some(DrawOp::Text {
+                    key: key.clone(),
+                    x: clamp_u16(tx),
+                    y: clamp_u16(ty),
+                    sx: xf.scale_x,
+                    sy: xf.scale_y,
+                    // Color is baked into the RT. Over the pristine
+                    // transparent clear an Opaque copy is pixel-
+                    // identical to SrcAlpha (premultiplied src over
+                    // transparent) and skips the per-pixel dst read.
+                    blend: if dst_clear && opacity_u8 == 0xFF {
+                        BlendMode::Opaque
+                    } else {
+                        BlendMode::SrcAlpha
+                    },
+                    tint: opacity_tint(opacity_u8),
+                });
                 if bbox.w > 0 && bbox.h > 0 {
                     let mut h = DefaultHasher::new();
                     1u8.hash(&mut h);
@@ -413,6 +433,7 @@ fn build_img_op(
 pub fn replay<'a>(
     dl: &DisplayList,
     clip: Option<Rect>,
+    text_cache: &TextCache,
     mut frame: Frame<'a>,
 ) -> Result<Frame<'a>, DeviceError> {
     if let Some(bg) = &dl.background {
@@ -434,6 +455,24 @@ pub fn replay<'a>(
                 *dst,
                 CopyOpts { blend: *blend, filter: Filter::Nearest, tint: *tint },
             )?,
+            DrawOp::Text { key, x, y, sx, sy, blend, tint } => {
+                match text_cache.lookup(key) {
+                    Some(cached) if cached.width > 0 && cached.height > 0 => {
+                        let dw = ((cached.width as f32) * sx).round();
+                        let dh = ((cached.height as f32) * sy).round();
+                        frame.copy_rect(
+                            &cached.texture,
+                            Rect::new(0, 0, cached.width, cached.height),
+                            Rect::new(*x, *y, clamp_u16(dw).max(1), clamp_u16(dh).max(1)),
+                            CopyOpts { blend: *blend, filter: Filter::Nearest, tint: *tint },
+                        )?
+                    }
+                    // RT not cached (atlas missing / zero extent):
+                    // skip silently, same as the old painter; the
+                    // damage item keeps the region tracked.
+                    _ => frame,
+                }
+            }
             DrawOp::AffineRotate { texture, src, rotation_deg, scale, cx, cy, blend } => {
                 frame.blit_affine_rotate(texture, *src, *rotation_deg, *scale, *cx, *cy, *blend)?
             }
@@ -671,7 +710,17 @@ mod tests {
         }
 
         let label_e = &dl.entries[1];
-        assert!(label_e.op.is_none(), "cache miss paints nothing");
+        // Text ops always exist and resolve at REPLAY time — a cache
+        // miss at build time must not drop the op (that produced a
+        // one-frame blank blink for brand-new text during animations).
+        match label_e.op.as_ref().expect("text op present") {
+            DrawOp::Text { key, x, y, sx, sy, .. } => {
+                assert_eq!(key.content, "hi");
+                assert_eq!((*x, *y), (107, 55));
+                assert_eq!((*sx, *sy), (1.0, 1.0));
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
         // Exact layout box — no 16-px snap anchoring (the old
         // divergence this module exists to prevent).
         assert_eq!(label_e.item.bbox.x, 107);

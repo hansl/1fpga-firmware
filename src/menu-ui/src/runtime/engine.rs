@@ -302,6 +302,11 @@ fn engine_main(
                 // Untrusted render_idx → full paint (slot-agnostic).
                 _ => None,
             };
+        // Text ops resolve against the cache AT REPLAY (the ensure
+        // above already landed this packet's RTs, so brand-new text
+        // paints in this same frame — no one-frame blank). Lock order:
+        // text_cache is last, and fonts/images are not held here.
+        let text_cache_l = caches.text_cache.lock().unwrap();
         let frame = match damage_paint_plan {
             Some(rects) => {
                 paint_rect_count = rects.len() as u32;
@@ -310,7 +315,9 @@ fn engine_main(
                 for r in &rects {
                     let clip_rect: Rect = (*r).into();
                     let f = frame.set_clip(clip_rect)?;
-                    let f = crate::display_list::replay(&pkt.dl, Some(clip_rect), f)?;
+                    let f = crate::display_list::replay(
+                        &pkt.dl, Some(clip_rect), &text_cache_l, f,
+                    )?;
                     frame = f.clear_clip()?;
                 }
                 frame
@@ -319,9 +326,10 @@ fn engine_main(
                 paint_full = true;
                 paint_rect_count = 1;
                 paint_area_px = cfg.fb_area;
-                crate::display_list::replay(&pkt.dl, None, frame)?
+                crate::display_list::replay(&pkt.dl, None, &text_cache_l, frame)?
             }
         };
+        drop(text_cache_l);
 
         let paint_dt = t_paint_start.elapsed();
 
