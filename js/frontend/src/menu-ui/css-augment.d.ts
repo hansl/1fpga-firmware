@@ -18,5 +18,7 @@ declare module 'react' {
   interface CSSProperties {
     translateX?: number;
     translateY?: number;
+    /** Hardware-layer z rank (LayerPortal) — see gui.Style.layer. */
+    layer?: number;
   }
 }

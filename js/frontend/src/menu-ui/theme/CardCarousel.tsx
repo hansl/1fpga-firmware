@@ -1,20 +1,23 @@
 // The Home carousel: a horizontal row of system cards sliding under
-// a fixed centre cursor, PS5-style. The selected card scales up
-// behind a white ring; unselected cards sit dimmed at rest.
+// a fixed centre cursor, PS5-style. The selected card lifts behind a
+// white ring; unselected cards sit dimmed at rest.
 //
-// Virtualized: only the cards within WINDOW slots of the selection
-// are mounted (the strip can hold 150+ systems). Cards are keyed by
-// uniqueName so entering/leaving the window doesn't disturb the
-// mounted ones, and the strip slides via translateX — paint-only, no
-// Taffy reflow during the glide (same trick as the old MenuBar).
+// The card strip lives in a LayerPortal — a hardware scanout plane.
+// The slide tween moves the PLANE (a position-register write per
+// frame, zero blit traffic); the plane surface holds PLANE_SLOTS
+// cards, pre-rendered past both screen edges, re-rendered only when
+// selection styling changes (two cards' damage) or when the window
+// recenters. Cards are keyed by uniqueName; the window base moves
+// with hysteresis so consecutive steps keep local positions stable.
 
-import { memo, useRef } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import * as gui from '1fpga:gui';
 
 import { useTween } from '../hooks';
 import { CENTRE_X, s } from '../scale';
 import { Icon, type IconName } from '../components/Icon';
+import { LayerPortal } from '../layer';
 import type { SystemCard } from '../services/library';
 
 const CARD_W = s(280);
@@ -26,8 +29,6 @@ const FRAME_PAD = s(28);
 /** Selected-card lift (translateY, paint-only). */
 const LIFT = s(16);
 const FRAME_TOP = s(392);
-/** Cards mounted on each side of the selection. */
-const WINDOW = 5;
 
 const ASSETS = '/media/fat/menu_ui_assets';
 
@@ -70,15 +71,6 @@ const counterStyle: CSSProperties = {
   right: s(48),
   fontSize: s(22),
   color: '#7e8ea0',
-};
-
-const frameStyle: CSSProperties = {
-  position: 'absolute',
-  top: FRAME_TOP - FRAME_PAD,
-  left: 0,
-  right: 0,
-  height: CARD_H + FRAME_PAD * 2,
-  overflow: 'hidden',
 };
 
 const Card = memo(function Card({
@@ -165,6 +157,16 @@ const Card = memo(function Card({
   );
 });
 
+/** Slots held by the plane surface. At 1080p that's 11 × s(324) =
+ *  3564 px wide — under the plane's 4095 hardware cap, and wider than
+ *  the screen: the slide reveals pre-rendered cards. */
+const PLANE_SLOTS = 11;
+/** Recenter margin: shift the window when the selection gets this
+ *  close to its edge. Between recenters, card LOCAL positions are
+ *  stable, so a nav step's plane damage is just the two cards whose
+ *  selection styling changed. */
+const RECENTER_MARGIN = 2;
+
 export const CardCarousel = memo(function CardCarousel({
   systems,
   selected,
@@ -172,42 +174,62 @@ export const CardCarousel = memo(function CardCarousel({
   systems: SystemCard[];
   selected: number;
 }) {
-  const targetLeft = CENTRE_X - (selected + 0.5) * SLOT;
+  // The plane window's first slot, moved with hysteresis (see above).
+  const [base, setBase] = useState(0);
+  useEffect(() => {
+    const maxBase = Math.max(0, systems.length - PLANE_SLOTS);
+    const clampedBase = Math.min(base, maxBase);
+    if (
+      selected < clampedBase + RECENTER_MARGIN ||
+      selected > clampedBase + PLANE_SLOTS - 1 - RECENTER_MARGIN ||
+      clampedBase !== base
+    ) {
+      const next = Math.max(
+        0,
+        Math.min(selected - Math.floor(PLANE_SLOTS / 2), maxBase),
+      );
+      if (next !== base) setBase(next);
+    }
+  }, [selected, base, systems.length]);
+
+  // The slide is the PORTAL's translate — engine-side that's a plane
+  // position-register write per tween frame, zero blit traffic. The
+  // strip-space target is CENTRE_X - (selected+0.5)*SLOT; the portal
+  // holds slots [base, base+PLANE_SLOTS), so its screen offset adds
+  // base*SLOT. On a recenter, base and the local card positions move
+  // in opposite directions — the on-screen result (and this tween
+  // target) is continuous.
+  const targetLeft = CENTRE_X - (selected + 0.5) * SLOT + base * SLOT;
   const ref = useRef<gui.NodeId | null>(null);
   useTween(ref, { translateX: targetLeft }, { duration: 260, easing: 'easeOut' });
 
-  const lo = Math.max(0, selected - WINDOW);
-  const hi = Math.min(systems.length - 1, selected + WINDOW);
+  const hi = Math.min(systems.length - 1, base + PLANE_SLOTS - 1);
   const visible: Array<{ system: SystemCard; slot: number }> = [];
-  for (let i = lo; i <= hi; i++) visible.push({ system: systems[i], slot: i });
+  for (let i = base; i <= hi; i++) visible.push({ system: systems[i], slot: i - base });
 
   const current = systems[selected];
   return (
     <>
       <div style={titleStyle}>{current?.name ?? ''}</div>
       <div style={counterStyle}>{`${selected + 1} / ${systems.length}`}</div>
-      <div style={frameStyle}>
-        <div
-          ref={ref}
-          style={{
-            position: 'absolute',
-            left: 0,
-            top: 0,
-            height: CARD_H + FRAME_PAD * 2,
-            width: SLOT * systems.length,
-            translateX: targetLeft,
-          }}
-        >
-          {visible.map(({ system, slot }) => (
-            <Card
-              key={system.uniqueName}
-              system={system}
-              slot={slot}
-              selected={slot === selected}
-            />
-          ))}
-        </div>
-      </div>
+      <LayerPortal
+        ref={ref}
+        z={1}
+        x={0}
+        y={FRAME_TOP - FRAME_PAD}
+        width={PLANE_SLOTS * SLOT}
+        height={CARD_H + FRAME_PAD * 2}
+        style={{ translateX: targetLeft }}
+      >
+        {visible.map(({ system, slot }) => (
+          <Card
+            key={system.uniqueName}
+            system={system}
+            slot={slot}
+            selected={base + slot === selected}
+          />
+        ))}
+      </LayerPortal>
     </>
   );
 });

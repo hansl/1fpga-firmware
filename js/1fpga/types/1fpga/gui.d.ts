@@ -78,6 +78,14 @@ declare module '1fpga:gui' {
     translateX?: number;
     translateY?: number;
 
+    // Hardware-layer z rank (LayerPortal). `layer: n` (n > 0) marks this
+    // node's subtree as a scanout overlay-plane candidate: its content
+    // renders into an offscreen surface and MOVING the node (translate
+    // tween) becomes a position-register write with zero blit traffic.
+    // The highest-z candidate that fits the hardware caps (w ≤ 4095,
+    // h ≤ 512) wins the single plane; others composite normally.
+    layer?: number;
+
     // ---- Text --------------------------------------------------------
     color?: string;
     fontFamily?: string;

@@ -19,7 +19,7 @@ use crate::bridge;
 use crate::devmem::{DevMemMap, volatile_copy_to_devmem, volatile_copy_within_devmem};
 use crate::error::{DeviceError, HardwareError};
 use crate::mem;
-use crate::protocol::descriptors::{DESCRIPTOR_SIZE, TextureDescriptor};
+use crate::protocol::descriptors::{DESCRIPTOR_SIZE, TextureDescriptor, TextureFormat};
 use crate::protocol::{self, registers};
 use crate::ring::RingError;
 use crate::texture::{TextureHandle, TextureSpec};
@@ -394,9 +394,28 @@ impl Device {
             volatile_copy_to_devmem(dst, &spec.data[..needed_bytes]);
         }
 
-        // Build descriptor and copy into the descriptor table.
-        let descriptor =
-            TextureDescriptor::new(phys, spec.stride, spec.width, spec.height, spec.format);
+        let id = self.write_descriptor(phys, spec.stride, spec.width, spec.height, spec.format);
+
+        Ok(TextureHandle {
+            id,
+            width: spec.width,
+            height: spec.height,
+            format: spec.format,
+            phys_addr: phys,
+        })
+    }
+
+    /// Write the next descriptor-table entry. Caller must have checked
+    /// `next_tex_id < tex_table_capacity` and mapped the table.
+    fn write_descriptor(
+        &mut self,
+        phys: u32,
+        stride: u32,
+        width: u16,
+        height: u16,
+        format: TextureFormat,
+    ) -> u16 {
+        let descriptor = TextureDescriptor::new(phys, stride, width, height, format);
         // SAFETY: TextureDescriptor is repr(C), 32 bytes, no padding holes
         // in the public layout (asserted at compile time).
         let descriptor_bytes = unsafe {
@@ -407,21 +426,52 @@ impl Device {
         };
         let id = self.next_tex_id;
         let table_offset = (id as usize) * DESCRIPTOR_SIZE;
-        let table_map = self.tex_table_map.as_mut().expect("init checked above");
+        let table_map = self.tex_table_map.as_mut().expect("table mapped by caller");
         // SAFETY: table_map is sized to TEX_TABLE_SIZE >= capacity * 32,
-        // and id < capacity (checked above).
+        // and id < capacity (checked by caller).
         unsafe {
             let dst = table_map.as_mut_ptr().add(table_offset);
             volatile_copy_to_devmem(dst, descriptor_bytes);
         }
-
         self.next_tex_id = id.wrapping_add(1);
+        id
+    }
 
+    /// Allocate an UNINITIALISED blitter-renderable RGBA8888 surface in
+    /// the texture pool (tightly packed, `w*4` bytes/row). Contents are
+    /// undefined until the blit engine writes them (`SetRenderTarget` +
+    /// fills/copies). This is the backing store for overlay planes and
+    /// any other render-to-texture use; there is no pixel upload.
+    pub fn create_render_texture(&mut self, w: u16, h: u16) -> Result<TextureHandle, DeviceError> {
+        if self.tex_pool_map.is_none() {
+            self.init_texture_storage()?;
+        }
+        if self.next_tex_id >= self.tex_table_capacity {
+            return Err(DeviceError::DescriptorTableFull {
+                capacity: self.tex_table_capacity as u32,
+            });
+        }
+        let stride = (w as u32) * 4;
+        let needed = stride * (h as u32);
+        let phys = self
+            .tex_alloc
+            .alloc(needed, TEX_BURST_ALIGN)
+            .map_err(|e| match e {
+                AllocError::OutOfMemory {
+                    requested,
+                    remaining,
+                } => DeviceError::TexturePoolExhausted {
+                    needed: requested,
+                    free: remaining,
+                },
+                AllocError::BadAlignment(_) => unreachable!("64 is power of two"),
+            })?;
+        let id = self.write_descriptor(phys, stride, w, h, TextureFormat::Rgba8888);
         Ok(TextureHandle {
             id,
-            width: spec.width,
-            height: spec.height,
-            format: spec.format,
+            width: w,
+            height: h,
+            format: TextureFormat::Rgba8888,
             phys_addr: phys,
         })
     }
@@ -637,6 +687,59 @@ impl Device {
             cur & !registers::CONTROL_BOXART
         };
         self.regs.write32(registers::CONTROL, next);
+    }
+
+    // ---- Overlay plane (generalised boxart layer) --------------------
+    //
+    // The scanout compositor's third layer, driven from any
+    // blitter-renderable texture: the blit engine composes the plane's
+    // content into the texture (SetRenderTarget), the scanout blends it
+    // over wallpaper+content at its programmed position, and MOVING the
+    // plane is a single register write — no pixel traffic. The RTL
+    // fetches only the on-screen window of each row, so the plane may
+    // be WIDER than the screen (e.g. a carousel strip that slides by
+    // position writes alone).
+
+    /// RTL cap: plane width register is 12 bits.
+    pub const PLANE_MAX_W: u16 = 4095;
+    /// RTL cap: the plane row index is 9 bits.
+    pub const PLANE_MAX_H: u16 = 512;
+
+    /// Point the scanout overlay plane at `tex` (typically from
+    /// [`Self::create_render_texture`]) and program its geometry.
+    /// Position via [`Self::set_plane_pos`]; enable via
+    /// [`Self::set_plane_enabled`]. All three are frame-latched by the
+    /// compositor, so reprogramming mid-frame is safe.
+    pub fn set_plane_surface(&mut self, tex: &TextureHandle) -> Result<(), DeviceError> {
+        if tex.width > Self::PLANE_MAX_W || tex.height > Self::PLANE_MAX_H {
+            return Err(DeviceError::BoxartTooLarge {
+                width: tex.width,
+                height: tex.height,
+                max: Self::PLANE_MAX_W,
+            });
+        }
+        self.regs.write32(registers::BOXART_BASE, tex.phys_addr);
+        self.regs.write32(
+            registers::BOXART_SIZE,
+            ((tex.height as u32) << 16) | (tex.width as u32),
+        );
+        self.regs
+            .write32(registers::BOXART_STRIDE, (tex.width as u32) * 4);
+        Ok(())
+    }
+
+    /// Move the overlay plane (signed screen coordinates; partial or
+    /// full off-screen in any direction is fine). One register write —
+    /// the per-frame animation path.
+    #[inline]
+    pub fn set_plane_pos(&mut self, x: i16, y: i16) {
+        self.set_boxart_pos(x, y);
+    }
+
+    /// Show or hide the overlay plane.
+    #[inline]
+    pub fn set_plane_enabled(&mut self, on: bool) {
+        self.set_boxart(on);
     }
 
     fn init_texture_storage(&mut self) -> Result<(), DeviceError> {

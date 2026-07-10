@@ -118,6 +118,17 @@ pub struct Style {
     pub opacity: Option<f32>,
     pub overflow: Option<Overflow>,
 
+    // ---- Hardware layer (LayerPortal) ---------------------------------
+    // `layer: n` (n > 0) marks this node's subtree as a candidate for a
+    // scanout overlay PLANE: its content renders into an offscreen
+    // surface and the scanout compositor blends it at the node's screen
+    // position — so MOVING the node (translate tween) is a register
+    // write with zero blit traffic. The value is the z rank; the
+    // highest-z candidate that fits the hardware caps wins the (single,
+    // today) plane, everything else composites into the content layer
+    // as if unmarked. Layout is unaffected.
+    pub layer: Option<u8>,
+
     // ---- Transform (axis-independent scale around layout-rect center) -
     // These are inherited multiplicatively by descendants — a parent
     // with scale_x=1.2 effectively scales every child by 1.2 too,
@@ -190,6 +201,7 @@ impl Style {
         if patch.background_color.is_some(){ self.background_color = patch.background_color; }
         if patch.opacity.is_some()         { self.opacity = patch.opacity; }
         if patch.overflow.is_some()        { self.overflow = patch.overflow; }
+        if patch.layer.is_some()           { self.layer = patch.layer; }
         if patch.scale_x.is_some()         { self.scale_x = patch.scale_x; }
         if patch.scale_y.is_some()         { self.scale_y = patch.scale_y; }
         if patch.rotate.is_some()          { self.rotate = patch.rotate; }

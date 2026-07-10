@@ -136,9 +136,79 @@ impl DisplayList {
     }
 }
 
-/// Build the display list for the current tree state. The single
+/// One hardware-plane candidate's paint plan: a display list in
+/// PLANE-LOCAL coordinates plus the plane's screen geometry. The
+/// geometry lives OUTSIDE the display list so a pure move (translate
+/// tween on the portal) changes x/y but not the content hash — the
+/// engine turns that into a position-register write with zero blits.
+#[derive(Clone, Debug)]
+pub struct PlaneDL {
+    /// z rank (the `layer` style value). Higher = closer to the viewer.
+    pub z: u8,
+    /// Content in plane-local coordinates. `background` is the
+    /// transparent clear (the scanout blends the plane by per-pixel
+    /// alpha over wallpaper+content).
+    pub dl: DisplayList,
+    /// Screen position of the plane's top-left, transform applied
+    /// (signed — planes may hang off any edge).
+    pub x: i32,
+    pub y: i32,
+    /// Surface size (untransformed layout box).
+    pub w: u16,
+    pub h: u16,
+}
+
+/// [`build`]'s output: the content-layer display list plus any
+/// partitioned hardware-plane lists (v1: at most one — the hardware
+/// has a single overlay plane; the highest-z candidate wins and the
+/// rest stay inline in the content list).
+#[derive(Clone, Debug, Default)]
+pub struct BuildOutput {
+    pub content: DisplayList,
+    pub planes: Vec<PlaneDL>,
+}
+
+/// Hardware caps for plane candidates (mirrors
+/// `Device::PLANE_MAX_W/H` — the compositor's width register is 12
+/// bits and its row index 9 bits).
+const PLANE_MAX_W: f32 = 4095.0;
+const PLANE_MAX_H: f32 = 512.0;
+
+/// Find the winning plane subtree: the highest-z `layer`-marked node
+/// whose layout box fits the hardware caps. Ties keep the first in
+/// tree order. Nodes under a winning candidate are NOT re-considered
+/// (nested layers flatten into their plane).
+fn find_plane_root(
+    tree: &Tree,
+    id: NodeId,
+    layouts: &HashMap<NodeId, ComputedLayout>,
+    best: &mut Option<(NodeId, u8)>,
+) {
+    let Some(node) = tree.get(id) else { return };
+    if let Some(z) = node.style.layer
+        && z > 0
+        && let Some(lay) = layouts.get(&id)
+        && lay.w >= 1.0
+        && lay.h >= 1.0
+        && lay.w <= PLANE_MAX_W
+        && lay.h <= PLANE_MAX_H
+    {
+        if best.map(|(_, bz)| z > bz).unwrap_or(true) {
+            *best = Some((id, z));
+        }
+        // Don't scan below a candidate — nested layers flatten.
+        return;
+    }
+    for &child in &node.children {
+        find_plane_root(tree, child, layouts, best);
+    }
+}
+
+/// Build the display list(s) for the current tree state. The single
 /// walk that replaces `damage::compute_scene` + `paint::paint`'s
-/// tree recursion.
+/// tree recursion. A `layer`-marked subtree (see [`PlaneDL`]) is
+/// partitioned out of the content list and rebuilt in plane-local
+/// coordinates.
 #[allow(clippy::too_many_arguments)]
 pub fn build(
     tree: &Tree,
@@ -151,7 +221,7 @@ pub fn build(
     opacities: &HashMap<NodeId, f32>,
     transforms: &HashMap<NodeId, Transform>,
     compositing: bool,
-) -> DisplayList {
+) -> BuildOutput {
     // Whole-frame background, same policy as the old paint() prologue:
     // compositing clears the content layer transparent (the hardware
     // wallpaper shows through and the FPGA blends at scanout);
@@ -175,6 +245,14 @@ pub fn build(
         None
     };
 
+    // Plane selection: only meaningful when compositing (the plane is
+    // blended by the scanout compositor); without it everything stays
+    // in the single framebuffer list.
+    let mut plane_pick: Option<(NodeId, u8)> = None;
+    if compositing {
+        find_plane_root(tree, root, layouts, &mut plane_pick);
+    }
+
     let mut entries = Vec::new();
     walk(
         tree,
@@ -193,10 +271,65 @@ pub fn build(
         // Nothing outside the viewport is painted OR damage-tracked;
         // overflow:hidden ancestors shrink this as the walk descends.
         ClipF::new(fb.width as f32, fb.height as f32),
+        plane_pick.map(|(id, _)| id),
+        (0.0, 0.0),
         &mut entries,
     );
+    let content = DisplayList { background, entries };
 
-    DisplayList { background, entries }
+    let mut planes = Vec::new();
+    if let Some((pid, z)) = plane_pick
+        && let Some(lay) = layouts.get(&pid)
+    {
+        let xf = transforms.get(&pid).copied().unwrap_or(Transform::IDENTITY);
+        let (tx, ty, _, _) = xf.apply_to_rect(lay.x, lay.y, lay.w, lay.h);
+        let w = lay.w.round() as u16;
+        let h = lay.h.round() as u16;
+        let mut plane_entries = Vec::new();
+        walk(
+            tree,
+            pid,
+            layouts,
+            text_styles,
+            text_cache,
+            images,
+            opacities,
+            transforms,
+            // The engine clears the plane surface transparent before
+            // replaying (via the background fill below) — pristine dst.
+            true,
+            // The portal's own background paints INTO the plane.
+            /* skip_root_bg */ false,
+            // Plane-local clip: the full surface, INCLUDING parts
+            // currently off-screen — sliding the plane must reveal
+            // pre-rendered pixels, not blanks.
+            ClipF::new(w as f32, h as f32),
+            None,
+            // Subtracting the portal's own transformed origin converts
+            // the walk to plane-local coordinates AND cancels the
+            // portal's translate (the slide lives in the position
+            // registers, not in the pixels). Portal scale/rotate are
+            // unsupported (assumed identity).
+            (tx, ty),
+            &mut plane_entries,
+        );
+        planes.push(PlaneDL {
+            z,
+            dl: DisplayList {
+                background: Some(BackgroundFill {
+                    rect: Rect::new(0, 0, w, h),
+                    color: Rgba::TRANSPARENT,
+                }),
+                entries: plane_entries,
+            },
+            x: tx.round() as i32,
+            y: ty.round() as i32,
+            w,
+            h,
+        });
+    }
+
+    BuildOutput { content, planes }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -212,8 +345,18 @@ fn walk(
     dst_clear: bool,
     skip_root_bg: bool,
     clip: ClipF,
+    // Subtree partitioned into a hardware plane — invisible to THIS
+    // walk (it renders via its own plane-local walk).
+    skip: Option<NodeId>,
+    // Coordinate origin subtracted from every produced rect. (0,0)
+    // for the framebuffer walk; the portal's transformed top-left for
+    // a plane-local walk.
+    origin: (f32, f32),
     out: &mut Vec<Entry>,
 ) {
+    if skip == Some(id) {
+        return;
+    }
     let Some(node) = tree.get(id) else {
         return;
     };
@@ -249,6 +392,7 @@ fn walk(
                 && lay.h > 0.5
             {
                 let (tx, ty, tw, th) = xf.apply_to_rect(lay.x, lay.y, lay.w, lay.h);
+                let (tx, ty) = (tx - origin.0, ty - origin.1);
                 if let Some(bbox) = clip.visible(tx, ty, tw, th) {
                     // Fills clip EXACTLY: the painted rect is the
                     // visible rect (no src to adjust).
@@ -304,6 +448,7 @@ fn walk(
                     ),
                     _ => xf.apply_to_aabb(lay.x, lay.y, lay.w, lay.h),
                 };
+                let (tx, ty) = (tx - origin.0, ty - origin.1);
                 if let Some(bbox) = clip.visible(tx, ty, tw, th) {
                     let op = Some(DrawOp::Text {
                         key: key.clone(),
@@ -347,6 +492,7 @@ fn walk(
         }
         NodeKind::Img { src } => {
             let (ax, ay, aw, ah) = xf.apply_to_aabb(lay.x, lay.y, lay.w, lay.h);
+            let (ax, ay) = (ax - origin.0, ay - origin.1);
             if let Some(bbox) = clip.visible(ax, ay, aw, ah) {
                 let mut h = DefaultHasher::new();
                 2u8.hash(&mut h);
@@ -356,7 +502,7 @@ fn walk(
                 sx_q.hash(&mut h);
                 sy_q.hash(&mut h);
                 rot_q.hash(&mut h);
-                let op = build_img_op(src, lay, images, opacity_u8, xf, dst_clear, bbox);
+                let op = build_img_op(src, lay, images, opacity_u8, xf, dst_clear, origin, bbox);
                 out.push(Entry {
                     item: PaintedItem { node_id: id, bbox, content_hash: h.finish() },
                     op,
@@ -373,7 +519,7 @@ fn walk(
     // cards never even get walked).
     let child_clip = if node.style.overflow == Some(Overflow::Hidden) {
         let (tx, ty, tw, th) = xf.apply_to_rect(lay.x, lay.y, lay.w, lay.h);
-        clip.intersect(tx, ty, tw, th)
+        clip.intersect(tx - origin.0, ty - origin.1, tw, th)
     } else {
         clip
     };
@@ -383,7 +529,7 @@ fn walk(
     for &child in &node.children {
         walk(
             tree, child, layouts, text_styles, text_cache, images, opacities, transforms,
-            child_dst_clear, false, child_clip, out,
+            child_dst_clear, false, child_clip, skip, origin, out,
         );
     }
 }
@@ -399,6 +545,9 @@ fn build_img_op(
     opacity_u8: u8,
     xf: Transform,
     dst_clear: bool,
+    // Coordinate origin (see `walk`) — subtracted so plane-local
+    // lists get plane-local dst rects.
+    origin: (f32, f32),
     // `visible`: the transformed AABB's visible portion (already
     // viewport- and overflow-clipped by the caller). The Copy dst is
     // trimmed to it with a proportional src trim; the affine path
@@ -420,6 +569,7 @@ fn build_img_op(
         return None;
     }
     let (tx, ty, tw, th) = xf.apply_to_rect(lay.x, lay.y, lay.w, lay.h);
+    let (tx, ty) = (tx - origin.0, ty - origin.1);
 
     if xf.has_rotation() && src_w <= MAX_SRC_DIM && src_h <= MAX_SRC_DIM {
         let cx = (tx + tw * 0.5).round() as i32;
@@ -790,7 +940,7 @@ mod tests {
         let mut opacities = HashMap::new();
         opacities.insert(ghost, 0.0); // fully transparent -> no entry
 
-        let dl = build(
+        let out = build(
             &tree,
             root,
             &fb(),
@@ -802,6 +952,8 @@ mod tests {
             &HashMap::new(),
             /* compositing */ true,
         );
+        assert!(out.planes.is_empty());
+        let dl = out.content;
 
         // Compositing => transparent full-frame clear.
         let bg = dl.background.expect("compositing clear");
@@ -875,7 +1027,7 @@ mod tests {
         layouts.insert(off_right, lay(30000.0, 100.0, 300.0, 100.0)); // fully out
         layouts.insert(ghost_bg, lay(10.0, 10.0, 50.0, 50.0));
 
-        let dl = build(
+        let out = build(
             &tree,
             root,
             &fb(),
@@ -887,6 +1039,8 @@ mod tests {
             &HashMap::new(),
             true,
         );
+        assert!(out.planes.is_empty());
+        let dl = out.content;
 
         // off_left and off_right are gone entirely; straddle + ghost remain.
         assert_eq!(dl.entries.len(), 2);
@@ -932,7 +1086,7 @@ mod tests {
         layouts.insert(poking, lay(450.0, 150.0, 100.0, 50.0)); // 50 px inside
         layouts.insert(outside, lay(600.0, 150.0, 100.0, 50.0)); // beyond window
 
-        let dl = build(
+        let out = build(
             &tree,
             root,
             &fb(),
@@ -944,6 +1098,8 @@ mod tests {
             &HashMap::new(),
             true,
         );
+        assert!(out.planes.is_empty());
+        let dl = out.content;
 
         assert_eq!(dl.entries.len(), 2, "outside child culled");
         assert_eq!(dl.entries[0].item.bbox.w, 100);
@@ -952,6 +1108,84 @@ mod tests {
             (p.item.bbox.x, p.item.bbox.w),
             (450, 50),
             "poking child trimmed at the window edge"
+        );
+    }
+
+    /// `layer`-marked subtrees partition out of the content list into
+    /// a plane list with PLANE-LOCAL coordinates, the portal's
+    /// translate lands in the plane GEOMETRY (not the pixels), and a
+    /// pure move leaves the plane's content hash untouched — the
+    /// register-write fast path's foundation.
+    #[test]
+    fn layer_subtree_partitions_into_plane() {
+        let build_with_tx = |slide: f32| {
+            let mut tree = Tree::new();
+            let root = tree.create(NodeKind::Div, Style::default());
+            let portal = tree.create(
+                NodeKind::Div,
+                Style { layer: Some(1), ..Default::default() },
+            );
+            let card = tree.create(
+                NodeKind::Div,
+                Style {
+                    background_color: Some(Rgba::new(20, 30, 40, 255)),
+                    ..Default::default()
+                },
+            );
+            tree.append_child(root, portal);
+            tree.append_child(portal, card);
+
+            let mut layouts = HashMap::new();
+            let lay = |x, y, w, h| ComputedLayout { x, y, w, h };
+            layouts.insert(root, lay(0.0, 0.0, 1920.0, 1080.0));
+            // Wider than the screen — only a plane can hold this.
+            layouts.insert(portal, lay(100.0, 380.0, 3000.0, 400.0));
+            layouts.insert(card, lay(300.0, 400.0, 280.0, 340.0));
+
+            // The slide: portal + its subtree share the translate
+            // (resolve_transforms accumulates it in the real flow).
+            let slid = Transform { tx: slide, ..Transform::IDENTITY };
+            let mut transforms = HashMap::new();
+            transforms.insert(portal, slid);
+            transforms.insert(card, slid);
+
+            build(
+                &tree,
+                root,
+                &fb(),
+                &layouts,
+                &HashMap::new(),
+                &TextCache::new(),
+                &ImageRegistry::new(),
+                &HashMap::new(),
+                &transforms,
+                true,
+            )
+        };
+
+        let out = build_with_tx(-50.0);
+        // Content list: the portal subtree is gone entirely.
+        assert!(out.content.entries.is_empty(), "portal content stays out");
+        assert_eq!(out.planes.len(), 1);
+        let p = &out.planes[0];
+        assert_eq!((p.z, p.w, p.h), (1, 3000, 400));
+        // Geometry carries the translate: 100 - 50.
+        assert_eq!((p.x, p.y), (50, 380));
+        // Card in plane-local coords: layout offset inside the portal,
+        // translate cancelled.
+        assert_eq!(p.dl.entries.len(), 1);
+        let bbox = &p.dl.entries[0].item.bbox;
+        assert_eq!((bbox.x, bbox.y, bbox.w, bbox.h), (200, 20, 280, 340));
+        // The plane's background is the transparent clear.
+        assert_eq!(p.dl.background.as_ref().unwrap().color, Rgba::TRANSPARENT);
+
+        // Pure move: same content hash, different geometry.
+        let moved = build_with_tx(-150.0);
+        assert_eq!(moved.planes[0].x, -50);
+        assert_eq!(
+            moved.planes[0].dl.scene_hash(),
+            p.dl.scene_hash(),
+            "a slide must not change the plane's content hash"
         );
     }
 }

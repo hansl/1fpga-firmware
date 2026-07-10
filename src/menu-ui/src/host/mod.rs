@@ -871,6 +871,11 @@ fn parse_style_value(value: &JsValue, context: &mut Context) -> JsResult<Style> 
     // Translate offsets (paint-only); missing axis stays None = no shift.
     out.translate_x = read_f32(&o, "translateX", context)?;
     out.translate_y = read_f32(&o, "translateY", context)?;
+    // Hardware-layer z rank (LayerPortal). 0 / missing = content layer.
+    if let Some(z) = read_f32(&o, "layer", context)? {
+        let z = z.clamp(0.0, 255.0) as u8;
+        out.layer = (z > 0).then_some(z);
+    }
 
     let ff = o.get(js_string!("fontFamily"), context)?;
     if !ff.is_undefined() {

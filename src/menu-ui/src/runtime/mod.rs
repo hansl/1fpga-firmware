@@ -574,8 +574,8 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     // rebuild on change). A 10-25 ms JS reconcile no longer delays
     // input forwarding or frame presentation of the previous scene.
     use crate::runtime::packet::{
-        FontNeed, FramePacket, FrameRequests, ImageNeed, Mailbox, SharedCaches, TextNeed,
-        UiTimings,
+        FontNeed, FramePacket, FrameRequests, ImageNeed, Mailbox, PlanePacket, SharedCaches,
+        TextNeed, UiTimings,
     };
     use std::sync::Mutex;
     use std::sync::atomic::AtomicU64;
@@ -798,7 +798,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         // 6. Build the display list (the Send packet payload).
         let opacities = ui_state.with_tree(|tree| crate::style::resolve_opacity(tree, root));
         let transforms = ui_state.with_tree(|tree| crate::style::resolve_transforms(tree, root));
-        let dl = {
+        let built = {
             // Lock order: images before text_cache (global order is
             // fonts -> images -> text_cache; see SharedCaches).
             let images_l = caches.images.lock().unwrap();
@@ -818,7 +818,42 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                 )
             })
         };
-        let current_hash = dl.scene_hash();
+        let dl = built.content;
+        let planes: Vec<PlanePacket> = built
+            .planes
+            .into_iter()
+            .map(|p| PlanePacket {
+                z: p.z,
+                scene_hash: p.dl.scene_hash(),
+                dl: p.dl,
+                x: p.x,
+                y: p.y,
+                w: p.w,
+                h: p.h,
+            })
+            .collect();
+        // Content-layer hash: the engine's per-FB-slot skip compares
+        // THIS (planes must not invalidate content slots — a plane
+        // move repaints nothing).
+        let content_hash = dl.scene_hash();
+        // Idle-skip hash covers EVERYTHING the engine acts on: the
+        // content list plus every plane's content AND geometry (a
+        // pure plane move must still produce a packet — it becomes a
+        // register write engine-side).
+        let current_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            content_hash.hash(&mut h);
+            for p in &planes {
+                p.z.hash(&mut h);
+                p.scene_hash.hash(&mut h);
+                p.x.hash(&mut h);
+                p.y.hash(&mut h);
+                p.w.hash(&mut h);
+                p.h.hash(&mut h);
+            }
+            h.finish()
+        };
         let scene_dt = t6.elapsed();
 
         let has_requests =
@@ -840,7 +875,8 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
 
         mailbox.send(FramePacket {
             dl,
-            scene_hash: current_hash,
+            scene_hash: content_hash,
+            planes,
             requests: FrameRequests {
                 fonts: font_needs,
                 images: image_needs,

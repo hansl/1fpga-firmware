@@ -74,11 +74,33 @@ pub struct UiTimings {
     pub scene: Duration,
 }
 
+/// A hardware overlay plane's frame contribution: content (in
+/// plane-local coordinates) and screen geometry, SEPARATELY hashed —
+/// the engine re-renders the plane surface only when `scene_hash`
+/// changes and turns a pure geometry change into a position-register
+/// write (no frame submission at all).
+#[derive(Clone, Debug)]
+pub struct PlanePacket {
+    pub z: u8,
+    pub dl: DisplayList,
+    /// Hash of `dl` content only (geometry excluded).
+    pub scene_hash: u64,
+    pub x: i32,
+    pub y: i32,
+    pub w: u16,
+    pub h: u16,
+}
+
 /// One UI tick's output.
 #[derive(Clone, Debug)]
 pub struct FramePacket {
     pub dl: DisplayList,
+    /// Content-layer hash only (planes hash separately — see
+    /// [`PlanePacket::scene_hash`]).
     pub scene_hash: u64,
+    /// Overlay planes, highest-z first (v1: at most one — the
+    /// hardware has a single plane).
+    pub planes: Vec<PlanePacket>,
     pub requests: FrameRequests,
     pub ui: UiTimings,
 }

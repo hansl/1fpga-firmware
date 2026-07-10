@@ -113,6 +113,23 @@ fn engine_main(
 
     let mut boxart_anim: u64 = 0;
 
+    /// Hardware overlay plane state (v1: the single scanout plane).
+    /// The surface is a blitter-renderable texture; `scene`/`hash`
+    /// mirror the per-FB damage records but for the plane's own
+    /// (single-buffered) surface. `enable_after` defers the CONTROL
+    /// enable until the first content render's fence lands, so the
+    /// scanout never displays uninitialised DDR3.
+    struct PlaneHw {
+        tex: menu_core_host::texture::TextureHandle,
+        scene: Option<PaintedScene>,
+        hash: Option<u64>,
+        x: i32,
+        y: i32,
+        enabled: bool,
+        enable_after: Option<u32>,
+    }
+    let mut plane_hw: Option<PlaneHw> = None;
+
     // Per-FB-slot damage bookkeeping (see run()'s original comment:
     // the three slots are distinct physical buffers; each diffs
     // against ITS OWN prior snapshot).
@@ -169,10 +186,107 @@ fn engine_main(
             boxart_anim = boxart_anim.wrapping_add(1);
         }
 
+        // ---- Deferred plane enable ----------------------------------
+        // First-render fence reached → the surface has real pixels →
+        // safe to let the scanout read it. Runs every loop tick so it
+        // fires even when no further packets arrive.
+        if let Some(hw) = plane_hw.as_mut()
+            && let Some(f) = hw.enable_after
+            && device.fence_reached(f)
+        {
+            device.set_plane_enabled(true);
+            hw.enabled = true;
+            hw.enable_after = None;
+        }
+
         // ---- Latest UI frame (or housekeeping tick) -----------------
         let Some(pkt) = mailbox.recv_timeout(IDLE_TICK) else {
             continue;
         };
+
+        // ---- Overlay plane: registers first, render below ----------
+        // A pure move (slide tween on a LayerPortal) is JUST the
+        // register writes here — no frame submission, no blits, no
+        // fence. Content changes fold into the frame built further
+        // down (plane surface re-render under plane-local damage).
+        let plane_pkt = pkt.planes.first();
+        let mut plane_render = false;
+        match plane_pkt {
+            Some(p) => {
+                let need_alloc = match &plane_hw {
+                    Some(hw) => hw.tex.width != p.w || hw.tex.height != p.h,
+                    None => true,
+                };
+                if need_alloc {
+                    // The pool is a bump allocator — a size change
+                    // leaks the old surface. Fine for the intended
+                    // use (static-size portals); log so churn is
+                    // visible.
+                    if plane_hw.is_some() {
+                        tracing::warn!(
+                            "overlay plane resized to {}x{} (old surface leaked)",
+                            p.w,
+                            p.h
+                        );
+                    }
+                    match device.create_render_texture(p.w, p.h) {
+                        Ok(tex) => {
+                            if let Err(e) = device.set_plane_surface(&tex) {
+                                tracing::error!("plane surface config failed: {e}");
+                            }
+                            plane_hw = Some(PlaneHw {
+                                tex,
+                                scene: None,
+                                hash: None,
+                                x: i32::MIN,
+                                y: i32::MIN,
+                                enabled: false,
+                                enable_after: None,
+                            });
+                        }
+                        Err(e) => {
+                            // Degradation gap: the subtree was
+                            // partitioned OUT of the content list, so
+                            // it simply won't show. Only reachable on
+                            // texture-pool exhaustion.
+                            tracing::error!("plane surface alloc failed: {e}");
+                        }
+                    }
+                }
+                if let Some(hw) = plane_hw.as_mut() {
+                    plane_render = hw.hash != Some(p.scene_hash);
+                    if hw.x != p.x || hw.y != p.y {
+                        let cx = p.x.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                        let cy = p.y.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                        device.set_plane_pos(cx, cy);
+                        hw.x = p.x;
+                        hw.y = p.y;
+                    }
+                    // Re-enable immediately only when the surface
+                    // already holds rendered content; a fresh surface
+                    // waits for its first render's fence (see the
+                    // deferred-enable check at the loop top).
+                    if !hw.enabled
+                        && hw.enable_after.is_none()
+                        && !plane_render
+                        && hw.hash.is_some()
+                    {
+                        device.set_plane_enabled(true);
+                        hw.enabled = true;
+                    }
+                }
+            }
+            None => {
+                if let Some(hw) = plane_hw.as_mut()
+                    && hw.enabled
+                {
+                    device.set_plane_enabled(false);
+                    hw.enabled = false;
+                    // Content/hash records stay — re-enabling with
+                    // unchanged content is registers-only.
+                }
+            }
+        }
 
         // ---- Ensure device-side resources the frame asked for ------
         // Any actual mutation bumps the cache generation so the UI
@@ -261,10 +375,13 @@ fn engine_main(
 
         let t_paint_start = Instant::now();
 
-        // Per-slot skip: this FB already holds exactly this scene and
-        // there is no glyph work to flush.
+        // Per-slot skip: this FB already holds exactly this scene,
+        // there is no glyph work to flush, and no plane surface needs
+        // re-rendering. (Pure plane MOVES take this path — their
+        // register writes already happened above.)
         if render_trusted
             && pendings.is_empty()
+            && !plane_render
             && scene_hash_per_fb[render_idx] == Some(pkt.scene_hash)
         {
             accumulate_ui(&pkt, &mut t_jobs, &mut t_input, &mut t_text_prep,
@@ -282,6 +399,46 @@ fn engine_main(
             let fonts = caches.fonts.lock().unwrap();
             crate::paint::render_pending_text(frame, &pendings, &fonts)?
         };
+
+        // ---- Plane surface re-render (plane-local damage) -----------
+        // Same damage machinery as the FB path, but the target is the
+        // plane's texture and there is exactly ONE scene record (the
+        // surface is single-buffered — a change can shear for one
+        // scanout frame; acceptable for tween-scale updates).
+        let frame = if plane_render
+            && let (Some(p), Some(hw)) = (plane_pkt, plane_hw.as_mut())
+        {
+            let new_scene = p.dl.to_scene();
+            let plan: Option<Vec<damage::PixelRect>> = match &hw.scene {
+                Some(prev) => Some(damage::compute_damage(prev, &new_scene)),
+                None => None, // fresh surface → full render
+            };
+            let mut f = frame.set_target(&hw.tex)?;
+            {
+                let text_cache_l = caches.text_cache.lock().unwrap();
+                match plan {
+                    Some(rects) => {
+                        for r in &rects {
+                            let clip_rect: Rect = (*r).into();
+                            let ff = f.set_clip(clip_rect)?;
+                            let ff = crate::display_list::replay(
+                                &p.dl, Some(clip_rect), &text_cache_l, ff,
+                            )?;
+                            f = ff.clear_clip()?;
+                        }
+                    }
+                    None => {
+                        f = crate::display_list::replay(&p.dl, None, &text_cache_l, f)?;
+                    }
+                }
+            }
+            hw.scene = Some(new_scene);
+            hw.hash = Some(p.scene_hash);
+            f
+        } else {
+            frame
+        };
+
         let frame = frame.set_target_framebuffer()?;
 
         let paint_rect_count: u32;
@@ -335,6 +492,16 @@ fn engine_main(
 
         let new_token = frame.present()?.submit()?;
         pending_fences.push_back((new_token.fence_value(), Instant::now()));
+
+        // First plane render just submitted → enable once its fence
+        // lands (checked at the loop top).
+        if plane_render
+            && let Some(hw) = plane_hw.as_mut()
+            && !hw.enabled
+            && hw.enable_after.is_none()
+        {
+            hw.enable_after = Some(new_token.fence_value());
+        }
 
         // ---- Content coverage mask (unchanged policy) ----------------
         if cfg.content_mask_on {

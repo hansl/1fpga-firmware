@@ -147,11 +147,16 @@ module compositor #(
     // decoupled from BURST so raising BURST for full-line reads doesn't
     // grow the run-scan logic (which congests the HPS register-bus timing).
     localparam int BURST_TILES = 8;
-    // Boxart ring slot: the panel is <=512px = <=128 words, so its line
-    // buffer needs only 128-word slots (vs 512 for full lines) — that saved
-    // BRAM funds the deeper read-ahead below without growing total memory.
-    localparam int LB_SLOT_BX  = 128;
-    localparam int LBW_BX      = $clog2(LB_SLOT_BX);         // 7
+    // Overlay-plane ring slot (historically "boxart"). Sized for one
+    // full screen line of VISIBLE plane pixels: the producer fetches
+    // only the on-screen intersection of the plane row (see the
+    // visible-window logic below), so a plane WIDER than the screen —
+    // e.g. a carousel strip slid by position-register writes — still
+    // fits and costs at most one line of bandwidth. 512 words = 2048
+    // px slot (1920 used; power-of-two slot stride for {slot,word}
+    // flat indexing).
+    localparam int LB_SLOT_BX  = 512;
+    localparam int LBW_BX      = $clog2(LB_SLOT_BX);         // 9
     localparam int MASK_BEATS  = (N_TY + PIX_PER_WORD-1) / PIX_PER_WORD; // 32-bit rows packed 4/beat -> 5
     localparam int TXW         = $clog2(N_TX);               // 5
     localparam int TYW         = $clog2(N_TY);               // 5
@@ -305,6 +310,7 @@ module compositor #(
     // buses too.
     logic               bx_en_h0,  bx_en_h1;
     logic signed [15:0] bx_x_h0,   bx_x_h1,  bx_y_h0, bx_y_h1;
+    logic signed [15:0] bx_rd0_h0, bx_rd0_h1;
     logic [11:0]        bx_w_h0,   bx_w_h1,  bx_h_h0, bx_h_h1;
     logic               cen_h0,    cen_h1;
     logic               men_h0,    men_h1;
@@ -312,25 +318,30 @@ module compositor #(
         if (!hdmi_rst_n) begin
             bx_en_h0<=1'b0; bx_en_h1<=1'b0; bx_x_h0<='0; bx_x_h1<='0;
             bx_y_h0<='0; bx_y_h1<='0; bx_w_h0<='0; bx_w_h1<='0; bx_h_h0<='0; bx_h_h1<='0;
+            bx_rd0_h0<='0; bx_rd0_h1<='0;
             cen_h0<=1'b0; cen_h1<=1'b0; men_h0<=1'b0; men_h1<=1'b0;
         end else begin
             bx_en_h0<=bx_en_l; bx_en_h1<=bx_en_h0;
             bx_x_h0<=bx_x_l;   bx_x_h1<=bx_x_h0;   bx_y_h0<=bx_y_l[15:0]; bx_y_h1<=bx_y_h0;
             bx_w_h0<=bx_w_l;   bx_w_h1<=bx_w_h0;   bx_h_h0<=bx_h_l; bx_h_h1<=bx_h_h0;
+            bx_rd0_h0<=bx_rd0_l; bx_rd0_h1<=bx_rd0_h0;
             cen_h0<=comp_en_l; cen_h1<=cen_h0;
             men_h0<=mask_rd_l; men_h1<=men_h0;
         end
     end
     logic               bx_en_f;
     logic signed [15:0] bx_x_f, bx_y_f;
+    logic signed [15:0] bx_rd0_f;
     logic [11:0]        bx_w_f, bx_h_f;
     logic               comp_en_f, cmask_en_f;
     always_ff @(posedge hdmi_clk or negedge hdmi_rst_n) begin
         if (!hdmi_rst_n) begin
             bx_en_f<=1'b0; bx_x_f<='0; bx_y_f<='0; bx_w_f<='0; bx_h_f<='0;
+            bx_rd0_f<='0;
             comp_en_f<=1'b0; cmask_en_f<=1'b0;
         end else if (hcount == 12'd0 && vcount == V_ACTIVE + 12'd4) begin
             bx_en_f<=bx_en_h1; bx_x_f<=bx_x_h1; bx_y_f<=bx_y_h1; bx_w_f<=bx_w_h1; bx_h_f<=bx_h_h1;
+            bx_rd0_f<=bx_rd0_h1;
             // composite/mask enables frame-latched alongside (the
             // producer already frame-latches its copies; a mid-frame
             // host toggle used to split one displayed frame into two
@@ -396,8 +407,15 @@ module compositor #(
     wire bx_v_cover = bx_en_f && (bx_row >= 0) && (bx_row < $signed({5'b0, bx_h_f}));
     wire bx_h_cover = (bx_col >= 0) && (bx_col < $signed({5'b0, bx_w_f}));
     wire bx_cover   = bx_v_cover && bx_h_cover;        // boxart covers this pixel
-    wire signed [16:0] bx_col_nx = $signed({5'b0, nx}) - bx_x_f;
-    assign lb_raddr_bx = {rd_slot_next, bx_col_nx[LBW_BX+1:2]}; // (nx-x)/4, narrow boxart slot
+    // Ring word 0 holds the plane word at screen column bx_rd0_f (the
+    // producer's fetch start: max(bx_x,0) aligned down into the plane's
+    // 4-px word grid). Indexing the ring by screen-relative words —
+    // not plane columns — is what lets a plane WIDER than the screen
+    // fit a one-line ring. The pixel lane still comes from bx_col
+    // (plane column): the fetch start is word-aligned in plane space,
+    // so (col - x) and (col - rd0) agree mod 4.
+    wire signed [16:0] bx_col_rd = $signed({5'b0, nx}) - bx_rd0_f;
+    assign lb_raddr_bx = {rd_slot_next, bx_col_rd[LBW_BX+1:2]};
     logic [31:0] bx_pixel;
     always_comb begin
         unique case (bx_col[1:0])               // lane = (col - x) & 3
@@ -666,14 +684,62 @@ module compositor #(
     logic [7:0]       burst_left;
     logic [2:0]       mask_beat;        // beat index during the mask read
 
-    // boxart (layer 2) DDR bookkeeping + the current boxart-row byte
-    // address (computed once when the layer-2 fill for a line starts).
+    // overlay plane (layer 2) DDR bookkeeping + the current plane-row
+    // byte address (computed once when the layer-2 fill for a line
+    // starts).
     logic [31:0]      bx_base_l, bx_line_base;
     logic [13:0]      bx_stride_l;
-    wire [LBW:0]      bx_words = (bx_w_l + 12'd3) >> 2;          // ceil(w/4) words/row
     wire signed [16:0] bx_prod_row = $signed({5'b0, prod_line}) - bx_y_l;
-    wire              bx_cover_prod = bx_en_l && (bx_prod_row >= 0)
-                                      && (bx_prod_row < $signed({5'b0, bx_h_l}));
+
+    // ---- Visible-window computation (frame-stable) -------------------
+    // Fetch only the on-screen intersection of the plane row, so a
+    // plane wider than the screen costs at most one line of bandwidth.
+    // The fetch start is aligned DOWN to a 4-px ring word (16-byte DDR
+    // alignment); bx_rd0_l is the SCREEN column ring word 0 lands on,
+    // consumed by the reader's ring indexing. Registered continuously
+    // off the frame-latched bx_*_l copies (stable all frame), so none
+    // of this arithmetic touches the burst-decision critical path.
+    logic [11:0]        bx_skip_words_q;  // fetch-start plane word
+    logic [LBW:0]       bx_vis_words_q;   // words to fetch per row (0..480)
+    logic signed [15:0] bx_rd0_l;
+    always_ff @(posedge avl_clk or negedge avl_rst_n) begin
+        if (!avl_rst_n) begin
+            bx_skip_words_q <= '0;
+            bx_vis_words_q  <= '0;
+            bx_rd0_l        <= '0;
+        end else begin
+            automatic logic signed [16:0] xs;
+            automatic logic [16:0]        neg_x;
+            automatic logic [11:0]        skip_w;
+            automatic logic signed [16:0] scr_cols;
+            automatic logic [11:0]        end_col;
+            automatic logic [LBW+2:0]     end_words;
+            xs    = {bx_x_l[15], bx_x_l};
+            neg_x = 17'(-xs);
+            // Plane columns clipped by the left screen edge, in whole
+            // words. A plane fully off-left aliases past the >>2
+            // truncation, so saturate skip high — vis clamps to 0.
+            if (bx_x_l >= 0)                       skip_w = 12'd0;
+            else if (neg_x >= {5'd0, bx_w_l})      skip_w = 12'hFFF;
+            else                                   skip_w = neg_x[13:2];
+            // Last visible plane column (exclusive): plane width or
+            // the right screen edge, whichever cuts first.
+            scr_cols = 17'sd0 + $signed(17'(H_ACTIVE)) - xs;
+            if (scr_cols <= 0)                             end_col = 12'd0;
+            else if ($signed({5'd0, bx_w_l}) <= scr_cols)  end_col = bx_w_l;
+            else                                           end_col = scr_cols[11:0];
+            end_words = (LBW+3)'((end_col + 12'd3) >> 2);
+            bx_skip_words_q <= skip_w;
+            bx_vis_words_q  <= (end_words > (LBW+3)'(skip_w))
+                                   ? (LBW+1)'(end_words - (LBW+3)'(skip_w))
+                                   : '0;
+            bx_rd0_l        <= bx_x_l + $signed({2'b00, skip_w, 2'b00});
+        end
+    end
+
+    wire bx_cover_prod = bx_en_l && (bx_prod_row >= 0)
+                         && (bx_prod_row < $signed({5'b0, bx_h_l}))
+                         && (bx_vis_words_q != '0);
 
     // masked-content tile bookkeeping
     wire [TYW-1:0] prod_tile_y = prod_line[TSHIFT+TYW-1 -: TYW];
@@ -699,8 +765,8 @@ module compositor #(
                 run_tiles = run_tiles + 4'd1;
     end
 
-    // boxart (layer 2) reads only its own row width; wp/content read the line.
-    wire [LBW:0] layer_words = (prod_layer == 2'd2) ? bx_words : WORDS_PER_LINE[LBW:0];
+    // plane (layer 2) reads only its VISIBLE row window; wp/content read the line.
+    wire [LBW:0] layer_words = (prod_layer == 2'd2) ? bx_vis_words_q : WORDS_PER_LINE[LBW:0];
     wire [LBW:0] words_rem  = layer_words - prod_word;
     wire [7:0]   full_burst = (words_rem >= BURST[LBW:0]) ? BURST[7:0] : words_rem[7:0];
     wire [7:0]   mct_burst  = {run_tiles, 4'b0};                 // run_tiles * 16
@@ -876,13 +942,16 @@ module compositor #(
                                 prod_layer <= 2'd1;     // wallpaper -> content
                                 prod_word  <= '0;
                             end else if (prod_layer == 2'd1 && bx_cover_prod) begin
-                                // content -> boxart (this line is covered).
-                                // Latch the boxart-row byte address (one
-                                // multiply, not per pixel).
+                                // content -> plane (this line is covered).
+                                // Latch the plane-row byte address (one
+                                // multiply, not per pixel), offset to the
+                                // first VISIBLE word of the row. Row index
+                                // is 9 bits: plane height caps at 512.
                                 prod_layer   <= 2'd2;
                                 prod_word    <= '0;
                                 bx_line_base <= bx_base_l
-                                                + (bx_prod_row[8:0] * bx_stride_l);
+                                                + (bx_prod_row[8:0] * bx_stride_l)
+                                                + {16'd0, bx_skip_words_q, 4'd0};
                             end else begin
                                 // all layers done for this line -> next line
                                 prod_line    <= prod_line + 12'd1;
