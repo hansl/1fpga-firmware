@@ -193,13 +193,18 @@ export const CardCarousel = memo(function CardCarousel({
   }, [selected, base, systems.length]);
 
   // The slide is the PORTAL's translate — engine-side that's a plane
-  // position-register write per tween frame, zero blit traffic. The
-  // strip-space target is CENTRE_X - (selected+0.5)*SLOT; the portal
-  // holds slots [base, base+PLANE_SLOTS), so its screen offset adds
-  // base*SLOT. On a recenter, base and the local card positions move
-  // in opposite directions — the on-screen result (and this tween
-  // target) is continuous.
-  const targetLeft = CENTRE_X - (selected + 0.5) * SLOT + base * SLOT;
+  // position-register write per tween frame, zero blit traffic.
+  //
+  // COORDINATE SPLIT (do not merge these): the tween animates ONLY
+  // the continuous strip-space term. The window offset base*SLOT goes
+  // through the portal's `left` — instant, and committed in the SAME
+  // packet as the re-keyed card positions, so the engine's flip
+  // applies both atomically. Folding base*SLOT into the tween target
+  // let the recenter's coordinate jump GLIDE (260 ms) while the
+  // content jumped instantly: the strip visually snapped k slots left
+  // and slid back right on every recenter (HW test 4's "resets to the
+  // left and moves back and forth").
+  const targetLeft = CENTRE_X - (selected + 0.5) * SLOT;
   const ref = useRef<gui.NodeId | null>(null);
   useTween(ref, { translateX: targetLeft }, { duration: 260, easing: 'easeOut' });
 
@@ -215,7 +220,7 @@ export const CardCarousel = memo(function CardCarousel({
       <LayerPortal
         ref={ref}
         z={1}
-        x={0}
+        x={base * SLOT}
         y={FRAME_TOP - FRAME_PAD}
         width={PLANE_SLOTS * SLOT}
         height={CARD_H + FRAME_PAD * 2}

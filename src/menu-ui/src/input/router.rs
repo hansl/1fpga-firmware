@@ -297,8 +297,11 @@ mod tests {
     #[test]
     fn unmapped_key_yields_empty() {
         let r = IntentRouter::new();
-        // KEY_A = 30 — not in the default keymap.
-        let d = r.translate(&key_event(30, true));
+        // KEY_B = 48 — not in the default keymap. (KEY_A, this test's
+        // original probe, has been deliberately mapped to face_west
+        // since the SNES-convention Z/X/A/S row was added — the test
+        // was stale, not the router.)
+        let d = r.translate(&key_event(48, true));
         assert!(d.is_empty());
     }
 }
