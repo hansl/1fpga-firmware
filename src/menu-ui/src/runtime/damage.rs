@@ -23,15 +23,11 @@
 //! slot we hit two frames ago. The runtime keeps a `scene_per_fb`
 //! array of three snapshots for exactly this reason.
 
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use menu_core_host::protocol::Rect;
 
-use crate::layout::ComputedLayout;
-use crate::style::Transform;
-use crate::text::ResolvedTextStyle;
 use crate::vdom::{NodeId, NodeKind, Tree};
 
 /// One drawable item recorded in a [`PaintedScene`]. The pair (bbox,
@@ -146,204 +142,10 @@ pub fn total_area(rects: &[PixelRect]) -> u64 {
         .sum()
 }
 
-/// One-shot hash of everything that determines whether the framebuffer
-/// would render identical pixels for the current tree+layout vs. a
-/// prior state. Used by the runtime for the "scene unchanged → skip
-/// submit" fast path; comparing two `u64`s is much cheaper than
-/// diffing two scene Vecs and avoids the rendering-correctness pitfalls
-/// of partial / damage-rect repaints.
-pub fn scene_hash(
-    tree: &Tree,
-    root: NodeId,
-    layouts: &HashMap<NodeId, ComputedLayout>,
-    text_styles: &HashMap<NodeId, ResolvedTextStyle>,
-    opacities: &HashMap<NodeId, f32>,
-    transforms: &HashMap<NodeId, Transform>,
-) -> u64 {
-    let scene = compute_scene(tree, root, layouts, text_styles, opacities, transforms);
-    scene.hash()
-}
-
-/// Walk the tree and build a [`PaintedScene`] reflecting what would
-/// be drawn for the current state.
-pub fn compute_scene(
-    tree: &Tree,
-    root: NodeId,
-    layouts: &HashMap<NodeId, ComputedLayout>,
-    text_styles: &HashMap<NodeId, ResolvedTextStyle>,
-    opacities: &HashMap<NodeId, f32>,
-    transforms: &HashMap<NodeId, Transform>,
-) -> PaintedScene {
-    let mut items = Vec::new();
-    walk(tree, root, layouts, text_styles, opacities, transforms, &mut items);
-    PaintedScene { items }
-}
-
-fn walk(
-    tree: &Tree,
-    id: NodeId,
-    layouts: &HashMap<NodeId, ComputedLayout>,
-    text_styles: &HashMap<NodeId, ResolvedTextStyle>,
-    opacities: &HashMap<NodeId, f32>,
-    transforms: &HashMap<NodeId, Transform>,
-    out: &mut Vec<PaintedItem>,
-) {
-    let Some(node) = tree.get(id) else {
-        return;
-    };
-    let Some(lay) = layouts.get(&id) else {
-        return;
-    };
-    let xf = transforms.get(&id).copied().unwrap_or(Transform::IDENTITY);
-    let scaled = !xf.is_identity();
-    // Damage bbox follows the *transformed* footprint so per-rect
-    // clip + copy cover the area actually painted. For non-scaled
-    // nodes this collapses to the layout rect (with the identity
-    // transform leaving x/y/w/h unchanged), so existing damage
-    // behaviour is preserved.
-    let bbox = transformed_bbox(lay, xf);
-
-    // Effective opacity drives painted pixels — include it in the
-    // content hash so a tween that animates opacity (without moving
-    // the bbox) damages the right rect. Quantise to 8 bits so
-    // microscopic float jitter doesn't invalidate every frame.
-    let opacity_u8 = opacities
-        .get(&id)
-        .copied()
-        .unwrap_or(1.0)
-        .clamp(0.0, 1.0)
-        .mul_add(255.0, 0.5) as u8;
-    // Quantise the effective transform similarly so float jitter in
-    // a tween's penultimate frame doesn't invalidate damage every
-    // tick. 1.0 unit = 1024 (i.e., milli-scale × ~1) — fine enough to
-    // catch small UI changes (1.10 vs 1.05), coarse enough to ignore
-    // single-bit float noise.
-    let sx_q = (xf.scale_x.clamp(0.0, 64.0) * 1024.0).round() as i32;
-    let sy_q = (xf.scale_y.clamp(0.0, 64.0) * 1024.0).round() as i32;
-    // Quantise rotation (degrees) so a rotation-only tween still
-    // invalidates the img's content hash and triggers a repaint.
-    let rot_q = (xf.rotation * 64.0).round() as i32;
-    let _ = scaled; // currently only the bbox + hash uses xf
-    // Fully-transparent nodes don't paint and therefore don't
-    // contribute to the scene; treat them as if they weren't there.
-    let skip = opacity_u8 == 0;
-
-    if !skip {
-        match &node.kind {
-            NodeKind::Div => {
-                if let Some(bg) = node.style.background_color {
-                    if bbox.w > 0 && bbox.h > 0 {
-                        let mut h = DefaultHasher::new();
-                        0u8.hash(&mut h); // tag
-                        bg.to_u32().hash(&mut h);
-                        bbox.hash(&mut h);
-                        opacity_u8.hash(&mut h);
-                        out.push(PaintedItem {
-                            node_id: id,
-                            bbox,
-                            content_hash: h.finish(),
-                        });
-                    }
-                }
-            }
-            NodeKind::Text { content } => {
-                if bbox.w > 0 && bbox.h > 0 {
-                    // Mirror paint_text's dst.x policy exactly:
-                    //
-                    //   - 1:1 (no scaling): align x down to a
-                    //     16-px boundary so the framebuffer write
-                    //     addresses are 64-byte aligned at cur_x=0.
-                    //     The actual painted area extends up to
-                    //     15 px LEFT of layout.x, so the damage
-                    //     rect must too.
-                    //   - Scaled: paint_text uses the raw
-                    //     transformed x (the burst-alignment
-                    //     optimisation doesn't apply in scale-mode
-                    //     anyway — the engine reads per-pixel).
-                    //     Aligning here would push the damage rect
-                    //     LEFT of paint, leaving up to 15 px of
-                    //     stale pixels on the RIGHT that paint
-                    //     draws but damage never covers — visible
-                    //     as fragments after a row whose previous
-                    //     content was wider than the new one.
-                    let painted_bbox = if xf.is_identity() {
-                        PixelRect {
-                            x: bbox.x & !15,
-                            y: bbox.y,
-                            w: bbox.w,
-                            h: bbox.h,
-                        }
-                    } else {
-                        bbox
-                    };
-                    let mut h = DefaultHasher::new();
-                    1u8.hash(&mut h);
-                    content.hash(&mut h);
-                    if let Some(s) = text_styles.get(&id) {
-                        s.font_name.hash(&mut h);
-                        (s.px_size as u32).hash(&mut h);
-                        s.color.to_u32().hash(&mut h);
-                    }
-                    painted_bbox.hash(&mut h);
-                    opacity_u8.hash(&mut h);
-                    sx_q.hash(&mut h);
-                    sy_q.hash(&mut h);
-                    out.push(PaintedItem {
-                        node_id: id,
-                        bbox: painted_bbox,
-                        content_hash: h.finish(),
-                    });
-                }
-            }
-            NodeKind::Img { src } => {
-                if bbox.w > 0 && bbox.h > 0 {
-                    let mut h = DefaultHasher::new();
-                    2u8.hash(&mut h);
-                    src.hash(&mut h);
-                    bbox.hash(&mut h);
-                    opacity_u8.hash(&mut h);
-                    sx_q.hash(&mut h);
-                    sy_q.hash(&mut h);
-                    rot_q.hash(&mut h);
-                    out.push(PaintedItem {
-                        node_id: id,
-                        bbox,
-                        content_hash: h.finish(),
-                    });
-                }
-            }
-        }
-    }
-    for &child in &node.children {
-        walk(tree, child, layouts, text_styles, opacities, transforms, out);
-    }
-}
-
-fn layout_to_bbox(lay: &ComputedLayout) -> PixelRect {
-    let x = lay.x.max(0.0).min(u16::MAX as f32) as u16;
-    let y = lay.y.max(0.0).min(u16::MAX as f32) as u16;
-    let w = lay.w.max(0.0).min(u16::MAX as f32) as u16;
-    let h = lay.h.max(0.0).min(u16::MAX as f32) as u16;
-    PixelRect { x, y, w, h }
-}
-
-/// Layout rect scaled around its centre per `xf`. Used by the
-/// damage walker so each item's bbox matches the area `paint::paint`
-/// actually writes after applying the same transform.
-fn transformed_bbox(lay: &ComputedLayout, xf: Transform) -> PixelRect {
-    // Use the rotated AABB so a rotated image's damage rect covers its
-    // full footprint (it extends beyond the scale box). Collapses to
-    // the scale box when there's no rotation, preserving prior
-    // behaviour for every existing node.
-    let (tx, ty, tw, th) = xf.apply_to_aabb(lay.x, lay.y, lay.w, lay.h);
-    let to_u16 = |v: f32| v.max(0.0).min(u16::MAX as f32) as u16;
-    PixelRect {
-        x: to_u16(tx),
-        y: to_u16(ty),
-        w: to_u16(tw),
-        h: to_u16(th),
-    }
-}
+/// (The scene/ops used to be built by two separate tree walks here
+/// and in paint.rs; both are replaced by `display_list::build`, which
+/// derives each item's bbox and its draw op from the same math. This
+/// module keeps the damage DATA MODEL and the diff below.)
 
 /// Diff `prev` and `cur`; return per-rect damage covering every node
 /// that was added, removed, or changed. Output rects are

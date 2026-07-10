@@ -15,6 +15,7 @@
 //! no layout engine, no React. Subsequent milestones layer Taffy,
 //! text, images, react-reconciler, and input on top.
 
+pub mod display_list;
 pub mod font;
 pub mod host;
 pub mod image;

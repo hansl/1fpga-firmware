@@ -423,7 +423,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     // enable the hardware blend, so the content FB never carries it (the
     // per-frame full-FB wallpaper copy was the menu-fps bottleneck). On
     // any failure compositing stays off and content clears opaque, as
-    // before — see `paint::paint`.
+    // before — see `display_list::build`'s background policy.
     let compositing = match cfg.wallpaper.as_ref() {
         Some(p) if crate::image::upload_wallpaper_layer(
             &mut device,
@@ -844,10 +844,27 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         // wait_fence below blocks only if we're outrunning the FPGA.
         let opacities = ui_state.with_tree(|tree| crate::style::resolve_opacity(tree, root));
         let transforms = ui_state.with_tree(|tree| crate::style::resolve_transforms(tree, root));
-        let current_scene = ui_state.with_tree(|tree| {
-            damage::compute_scene(tree, root, &layouts, &text_styles, &opacities, &transforms)
+        // Build the frame's DISPLAY LIST: one walk resolving every
+        // draw op AND its damage item from the same math (see
+        // display_list.rs). This is the packet that will cross the
+        // UI-thread -> engine-thread boundary in the dual-core split;
+        // for now build and replay happen on the same thread.
+        let dl = ui_state.with_tree(|tree| {
+            crate::display_list::build(
+                tree,
+                root,
+                &fb,
+                &layouts,
+                &text_styles,
+                &text_cache,
+                &images,
+                &opacities,
+                &transforms,
+                compositing,
+            )
         });
-        let current_hash = current_scene.hash();
+        let current_hash = dl.scene_hash();
+        let current_scene = dl.to_scene();
 
         // NOW wait for the previous frame's fence (= sync barrier for
         // reading FB_STATE.render). Wait happens AFTER scene compute
@@ -955,22 +972,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                 for r in &rects {
                     let clip_rect: menu_core_host::protocol::Rect = (*r).into();
                     let f = frame.set_clip(clip_rect)?;
-                    let f = ui_state.with_tree(|tree| {
-                        crate::paint::paint(
-                            tree,
-                            root,
-                            &fb,
-                            &layouts,
-                            &text_styles,
-                            &text_cache,
-                            &images,
-                            &opacities,
-                            &transforms,
-                            Some(clip_rect),
-                            compositing,
-                            f,
-                        )
-                    })?;
+                    let f = crate::display_list::replay(&dl, Some(clip_rect), f)?;
                     frame = f.clear_clip()?;
                 }
                 frame
@@ -979,22 +981,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                 paint_full = true;
                 paint_rect_count = 1;
                 paint_area_px = fb_area;
-                ui_state.with_tree(|tree| {
-                    crate::paint::paint(
-                        tree,
-                        root,
-                        &fb,
-                        &layouts,
-                        &text_styles,
-                        &text_cache,
-                        &images,
-                        &opacities,
-                        &transforms,
-                        None,
-                        compositing,
-                        frame,
-                    )
-                })?
+                crate::display_list::replay(&dl, None, frame)?
             }
         };
 
