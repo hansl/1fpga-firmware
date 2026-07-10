@@ -19,7 +19,6 @@ use crate::font::{FontError, FontRegistry};
 use crate::host::UiState;
 use crate::image::ImageRegistry;
 use crate::input::events::{InputSource, RawInputEvent};
-use crate::input::pump::Pump;
 use crate::input::router::{IntentKind, IntentRouter};
 use crate::input::state::InputState;
 use crate::text::TextCache;
@@ -229,42 +228,6 @@ fn boa_err(e: boa_engine::JsError) -> RuntimeError {
     RuntimeError::Js(format!("{e}"))
 }
 
-/// Walk the tree under `root` and load every `<img src>` we haven't
-/// seen yet. Failed loads are recorded as `Failed` entries so we
-/// don't retry on every frame.
-fn prepare_images(
-    tree: &Tree,
-    root: NodeId,
-    images: &mut ImageRegistry,
-    device: &mut Device,
-) {
-    fn walk(tree: &Tree, id: NodeId, images: &mut ImageRegistry, device: &mut Device) {
-        let Some(node) = tree.get(id) else {
-            return;
-        };
-        if let NodeKind::Img { src } = &node.kind
-            && !src.is_empty()
-        {
-            // Intrinsic texture: feeds the layout measure function and
-            // the paint fallback. Idempotent.
-            let _ = images.get_or_load(device, src);
-            // If the node has an explicit pixel size, pre-build a
-            // texture resized to it so the blit is 1:1 (crisp Lanczos)
-            // instead of nearest-neighbour FPGA scaling. Auto/flex-sized
-            // images keep using the intrinsic texture.
-            if let (Some(w), Some(h)) = (node.style.width, node.style.height) {
-                let tw = (w.round() as i32).clamp(1, u16::MAX as i32) as u16;
-                let th = (h.round() as i32).clamp(1, u16::MAX as i32) as u16;
-                images.ensure_sized(device, src, tw, th);
-            }
-        }
-        for &child in &node.children {
-            walk(tree, child, images, device);
-        }
-    }
-    walk(tree, root, images, device);
-}
-
 /// Verbose tree dump used for diagnostics. Only emits at DEBUG level
 /// so production logs stay quiet.
 fn dump_tree(tree: &Tree, id: NodeId, depth: usize) {
@@ -289,6 +252,8 @@ pub mod anim;
 mod boa;
 pub mod damage;
 pub mod dump;
+pub mod engine;
+pub mod packet;
 pub mod fps;
 pub mod raf;
 pub mod viewport;
@@ -443,9 +408,6 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     // (it gates the content layer over the wallpaper). Enabled on the
     // first successful upload below.
     let content_mask_on = compositing && cfg.content_mask;
-    let mut coverage_ring = [menu_core_host::mask::CoverageMask::empty(); 3];
-    let mut coverage_frame: usize = 0;
-    let mut content_mask_enabled = false;
     if content_mask_on {
         info!("content coverage mask: ON (host computes per-frame tile bitmap)");
     }
@@ -466,7 +428,8 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
             Err(e) => error!("boxart demo upload failed: {e}"),
         }
     }
-    let mut boxart_anim: u64 = 0;
+    // (The boxart demo's per-frame position animation runs on the
+    // engine thread — see engine.rs.)
 
     // 2. Load the JS bundle.
     let bundle: Vec<u8> = match cfg.bundle_override.as_ref() {
@@ -552,9 +515,8 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     // this is a deliberately bandwidth-constrained config where an
     // occasional slow frame under heavy DDR contention is legitimate.
     let timeout = Duration::from_secs(2);
-    let mut frame_idx: u32 = 0;
     let mut fonts = FontRegistry::new();
-    let mut text_cache = TextCache::new();
+    let text_cache = TextCache::new();
 
     // Drain any `gui.warmupGlyphs` requests the bundle's main()
     // queued. Done here, before the frame loop, so the first
@@ -583,160 +545,102 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
     // 1920×1080 wallpaper at a 720p render target gets resized to
     // 1280×720 once, then every paint hits the 1:1 burst path.
     images.set_max_dims(fb.width, fb.height);
-    let mut pump = Pump::open_all();
     let router = IntentRouter::new();
     let mut event_buf: Vec<RawInputEvent> = Vec::new();
-    // Reference epoch for `requestAnimationFrame` timestamps. The
-    // first callback sees a small positive number (ms since just
-    // before the loop started) — matches the browser DOMHighResTimeStamp
-    // shape close enough for our use cases.
     let raf_epoch = std::time::Instant::now();
 
-    // Per-FB content hash + scene snapshot. The three FB slots have
-    // *distinct* physical addresses (`mem::FB0_OFFSET`/`FB1_OFFSET`/
-    // `FB2_OFFSET` — 8 MB apart), so each render_idx slot's memory
-    // is independent. The damage diff that drives each frame's paint
-    // is against THIS slot's prior snapshot — otherwise we'd skip
-    // painting regions that are stale in *this* slot just because
-    // they're up-to-date in a different slot we painted recently.
-    // (Trying to collapse this to a single snapshot was a brief
-    // mistake born from a stale comment claiming the FB pointers
-    // were aliased; with non-aliased pointers it produced visible
-    // ghosts during slide animations.)
-    let mut scene_hash_per_fb: [Option<u64>; 3] = [None, None, None];
-    let mut scene_per_fb: [Option<damage::PaintedScene>; 3] =
-        [None, None, None];
-    // In-flight fence values from submitted-but-not-yet-retired
-    // frames. The triple-buffer fb_swapper has 3 FB slots: at most
-    // one displayed + one ready + one rendering. To match that,
-    // bound the host's lead to 2 in-flight frames — if we have 2
-    // pending, wait for the oldest fence to retire before submitting
-    // the next frame. This is "1-2 frames ahead" pipelining: the
-    // FPGA is processing frame N while the host prepares N+1 and
-    // N+2 is queued in the ring.
-    // Each entry is (fence_value, submit_instant) so that on retire we
-    // can measure the frame's true FPGA render time (submit -> retire).
-    let mut pending_fences: std::collections::VecDeque<(u32, std::time::Instant)> =
-        std::collections::VecDeque::with_capacity(3);
-    // Bounded to 1 so the host always waits for the previous frame's
-    // PRESENT to retire before reading FB_STATE.render. Without this,
-    // every other iteration would read a stale render_idx (FPGA still
-    // processing the previous PRESENT), causing damage-tracking
-    // misalignment and ghosting. The dual blit engines still help
-    // because: (a) PRESENT alternates them so consecutive frames don't
-    // hit the same engine back-to-back; (b) the wait happens AFTER
-    // scene compute, so the FPGA's blit work overlaps with the host's
-    // CPU work for the next frame.
-    const MAX_INFLIGHT_FRAMES: usize = 1;
-
-    // Damage-paint threshold: above this fraction of the FB we fall
-    // back to a single clip-less paint instead of per-rect clipped
-    // paints. The guard exists because each damage rect costs a full
-    // tree-walk; but `coalesce_nearby` keeps the post-coalesce rect
-    // count tiny (~2-3), so that per-rect overhead is small and a
-    // partial paint stays cheaper than a full one well past 70% — a
-    // full paint redraws the *entire* opaque wallpaper (~110 ms at
-    // 1080p, the worst single-frame cost in the profiles). A category
-    // switch legitimately dirties ~45-70% (full column content change +
-    // sliding strip), and at 70% this threshold was escalating those to
-    // a whole-screen wallpaper repaint that's more expensive than the
-    // partial it replaced. Set high so only near-total damage goes full.
-    // (Deeper win, separate change: the per-FB-slot diff is 3 frames
-    // stale under triple-buffering, inflating nav damage; and
-    // `total_area` sums rects without de-overlapping — both bias this
-    // measurement upward.)
     let fb_area: u64 = (fb.width as u64) * (fb.height as u64);
     let full_paint_threshold: u64 = fb_area * 95 / 100;
-    // Per-stage timing accumulators. Every TIMING_LOG_PERIOD frames
-    // we log the average per-stage cost. Tells us where the frame
-    // budget actually goes (so we can tell tick_jobs from layout
-    // from present, etc.).
-    use std::time::Instant;
-    const TIMING_LOG_PERIOD: u32 = 60;
-    let mut t_jobs = Duration::ZERO;
-    let mut t_input = Duration::ZERO;
-    let mut t_text_prep = Duration::ZERO;
-    let mut t_images = Duration::ZERO;
-    let mut t_text_pop = Duration::ZERO;
-    let mut t_layout = Duration::ZERO;
-    let mut t_paint = Duration::ZERO;
-    let mut t_fence = Duration::ZERO;
-    let mut t_scanout = Duration::ZERO;
-    // Scene-build (opacity/transform/compute_scene) split out of the
-    // paint bucket — it's the "tree logic" that would move to the JS
-    // core in a 2-thread split, so we want it priced separately.
-    let mut t_scene = Duration::ZERO;
-    // True FPGA render time per frame: submit -> that frame's fence
-    // retire, independent of host/FPGA overlap. Compared against `cpu`
-    // (below) this is the CPU-bound vs FPGA-bound verdict — i.e. whether
-    // moving the JS reconcile to a second core can lift fps at all, and
-    // where the core-0/core-1 boundary should sit. `t_fpga_max` catches
-    // the full-repaint spikes that the average hides.
-    let mut t_fpga = Duration::ZERO;
-    let mut t_fpga_max = Duration::ZERO;
-    // Damage-stage accounting: rect count + total area per frame,
-    // and how many frames in the window fell back to full paint.
-    let mut sum_paint_rect_count: u64 = 0;
-    let mut sum_paint_area_px: u64 = 0;
-    let mut count_full_paints: u32 = 0;
 
-    // Cached layout: the Taffy solve (~4.8 ms) is recomputed only when a
-    // layout-affecting change happened (structure / text / layout style).
-    // Paint-only tween frames (opacity / scale / rotate) reuse it — that's
-    // what makes transform animations cheap.
+    // Cached layout: the Taffy solve (~4.8 ms) is recomputed only when
+    // a layout-affecting change happened (structure / text / a layout
+    // style) or the engine grew a cache (new font metrics).
     let mut layouts: std::collections::HashMap<NodeId, crate::layout::ComputedLayout> =
         std::collections::HashMap::new();
 
+    // ================= Dual-core split =================
+    //
+    //   core 0 — engine thread (engine.rs): evdev input pump +
+    //            forwarding, Device ownership (resource ensures,
+    //            damage bookkeeping, display-list replay, PRESENT/
+    //            fence pacing, boxart animation, coverage mask).
+    //   core 1 — THIS thread: Boa (reconcile/effects), Taffy layout,
+    //            display-list build.
+    //
+    // The boundary object is the FramePacket (display list + resource
+    // requests + UI timings) through a latest-wins mailbox; raw input
+    // flows the other way over an mpsc channel. Registries are shared
+    // read-mostly (engine mutates, bumps a generation; we re-layout /
+    // rebuild on change). A 10-25 ms JS reconcile no longer delays
+    // input forwarding or frame presentation of the previous scene.
+    use crate::runtime::packet::{
+        FontNeed, FramePacket, FrameRequests, ImageNeed, Mailbox, SharedCaches, TextNeed,
+        UiTimings,
+    };
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicU64;
+
+    let caches = SharedCaches {
+        fonts: Arc::new(Mutex::new(fonts)),
+        images: Arc::new(Mutex::new(images)),
+        text_cache: Arc::new(Mutex::new(text_cache)),
+        generation: Arc::new(AtomicU64::new(0)),
+    };
+    let mailbox = Mailbox::new();
+    let (input_tx, input_rx) = std::sync::mpsc::channel::<RawInputEvent>();
+    let engine_handle = engine::spawn(
+        engine::DeviceCarrier(device),
+        caches.clone(),
+        mailbox.clone(),
+        input_tx,
+        running.clone(),
+        engine::EngineConfig {
+            boxart_demo,
+            content_mask_on,
+            fb_area,
+            full_paint_threshold,
+            timeout,
+        },
+    );
+    // Pin the UI thread to the LAST core (core 1 on the DE10's
+    // dual-A9), leaving core 0 — where Linux parks IRQs — to the
+    // engine's input/device work.
+    if let Some(ids) = core_affinity::get_core_ids()
+        && ids.len() > 1
+        && let Some(last) = ids.last()
+    {
+        core_affinity::set_for_current(*last);
+    }
+
+    let mut last_sent_hash: Option<u64> = None;
+    let mut last_seen_gen: u64 = u64::MAX; // force first layout/build
+    let mut layout_gen: u64 = u64::MAX;
+    let mut carry_events: Vec<RawInputEvent> = Vec::new();
+
+    use std::time::Instant;
     while running.load(Ordering::SeqCst) {
         let t0 = Instant::now();
 
-        // Boxart demo: slide the panel in from the right edge and back, a
-        // pure per-frame register write (no blit). Runs every loop tick
-        // (even idle ones) so the motion stays smooth.
-        if boxart_demo {
-            const PERIOD: u64 = 240; // frames per in-out cycle
-            let phase = boxart_anim % PERIOD;
-            let tri = if phase < PERIOD / 2 { phase } else { PERIOD - phase };
-            let frac = tri as f32 / (PERIOD / 2) as f32; // 0 -> 1 -> 0
-            let x_off = 1920.0_f32; // fully off the right edge
-            let x_on = (1920 - 256 - 40) as f32; // fully on, 40px inset
-            let x = (x_off - frac * (x_off - x_on)).round() as i16;
-            device.set_boxart_pos(x, 400);
-            boxart_anim = boxart_anim.wrapping_add(1);
-        }
-
-        // 0a. Drive the JS job queue forward by one tick. We can't
-        //     use `context.run_jobs()` here — it blocks until every
-        //     queued job (including future-scheduled timeouts) is
-        //     drained, so a recurring `setInterval` would deadlock
-        //     the loop. `boa::tick_jobs` polls the executor's
-        //     `run_jobs_async` future a bounded number of times
-        //     instead; see its doc comment for the rationale.
+        // 0a. Drive the JS job queue forward by one tick (see
+        //     boa::tick_jobs for why not run_jobs()).
         if let Err(e) = boa::tick_jobs(&executor, &mut context) {
             tracing::warn!("tick_jobs error: {e}");
         }
 
         let t1 = Instant::now();
 
-        // 0b. Pump input. Drain pending evdev events, translate to
-        //     intents, dispatch any subscribed JS listeners. When a
-        //     batch dispatcher is registered (via
-        //     `gui.setInputDispatcher`), we cross the Rust→Boa
-        //     boundary once per drain regardless of event count —
-        //     JS owns the per-listener routing. The per-event path
-        //     stays as the fallback for any bundle that hasn't
-        //     registered a dispatcher.
+        // 0b. Input now arrives from the engine thread's evdev pump
+        //     over the channel (plus anything the idle park below
+        //     carried over). Dispatch to JS as before.
         event_buf.clear();
-        pump.drain(&mut event_buf);
+        event_buf.append(&mut carry_events);
+        while let Ok(ev) = input_rx.try_recv() {
+            event_buf.push(ev);
+        }
         if !event_buf.is_empty() {
             match input_state.batch_dispatcher() {
                 Some(dispatcher) => {
-                    dispatch_input_batch(
-                        &router,
-                        &event_buf,
-                        &dispatcher,
-                        &mut context,
-                    )?;
+                    dispatch_input_batch(&router, &event_buf, &dispatcher, &mut context)?;
                     event_buf.clear();
                 }
                 None => {
@@ -747,17 +651,12 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
             }
         }
 
-        // 0c. Tick jobs again — handlers above may have called
-        //     setTimeout (directly or via React's setState scheduler).
+        // 0c. Tick jobs again — handlers may have queued work.
         if let Err(e) = boa::tick_jobs(&executor, &mut context) {
             tracing::warn!("tick_jobs error: {e}");
         }
 
-        // 0d. Drain the requestAnimationFrame queue. Each callback
-        //     receives ms-since-runtime-start, matching the browser's
-        //     DOMHighResTimeStamp contract. Re-registrations from
-        //     inside callbacks land in the next frame's queue (drain
-        //     snapshots before iterating).
+        // 0d. requestAnimationFrame queue.
         let raf_callbacks = raf_state.drain();
         if !raf_callbacks.is_empty() {
             let now_ms = raf_epoch.elapsed().as_secs_f64() * 1000.0;
@@ -767,8 +666,6 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                     tracing::warn!("requestAnimationFrame callback threw: {e}");
                 }
             }
-            // RAF callbacks routinely call setState / updateStyle and
-            // may have queued more work; pump it before paint.
             if let Err(e) = boa::tick_jobs(&executor, &mut context) {
                 tracing::warn!("tick_jobs error: {e}");
             }
@@ -776,47 +673,103 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
 
         let t2 = Instant::now();
 
-        // 0e. Advance any in-flight tweens. Runs before layout so
-        //     tweens of layout-affecting properties (width, height,
-        //     etc.) take effect this frame. Each tween mutates the
-        //     target node's style via `Style::merge_from`, which is
-        //     the same path React's `gui.updateStyle` uses; the
-        //     damage system then naturally diffs the changed value
-        //     into a per-rect repaint.
+        // 0e. Advance tweens (mutates styles; damage picks it up).
         let _active_tweens = anim_mgr.tick(&ui_state);
 
         // 1. Resolve text style inheritance once for the frame.
         let text_styles = ui_state.with_tree(|tree| crate::text::resolve(tree, root));
 
-        // 2. Prepare: ensure every (font, size) used by text nodes
-        //    has a built+uploaded atlas. Mutates Device, must run
-        //    before begin_frame.
-        ui_state.with_tree(|tree| crate::text::prepare(tree, &text_styles, &mut fonts, &mut device))?;
+        // 2. Collect FONT needs (walk only — the engine rasterises +
+        //    uploads). Runtime warmup requests ride along.
+        let mut font_needs: Vec<FontNeed> = ui_state.with_tree(|tree| {
+            let mut needed: std::collections::HashMap<(String, u16), std::collections::HashSet<char>> =
+                std::collections::HashMap::new();
+            for (id, rs) in &text_styles {
+                let Some(node) = tree.get(*id) else { continue };
+                let NodeKind::Text { content } = &node.kind else { continue };
+                let key = (rs.font_name.clone(), rs.px_size.round() as u16);
+                let chars = needed.entry(key).or_default();
+                for ch in content.chars() {
+                    chars.insert(ch);
+                }
+            }
+            needed
+                .into_iter()
+                .map(|((family, px_size), chars)| FontNeed { family, px_size, chars })
+                .collect()
+        });
+        for req in warmup_queue.drain() {
+            font_needs.push(FontNeed {
+                family: req.family,
+                px_size: req.px_size,
+                chars: req.chars,
+            });
+        }
 
         let t3 = Instant::now();
 
-        // 3. Prepare images: walk the tree, decode + upload any
-        //    `<img>` whose `src` we haven't seen yet. Failures are
-        //    cached so we don't retry every frame.
-        ui_state.with_tree(|tree| prepare_images(tree, root, &mut images, &mut device));
+        // 3. Collect IMAGE needs (walk only).
+        let image_needs: Vec<ImageNeed> = ui_state.with_tree(|tree| {
+            let mut out = Vec::new();
+            fn walk(tree: &Tree, id: NodeId, out: &mut Vec<ImageNeed>) {
+                let Some(node) = tree.get(id) else { return };
+                if let NodeKind::Img { src } = &node.kind
+                    && !src.is_empty()
+                {
+                    let sized = match (node.style.width, node.style.height) {
+                        (Some(w), Some(h)) => Some((
+                            (w.round() as i32).clamp(1, u16::MAX as i32) as u16,
+                            (h.round() as i32).clamp(1, u16::MAX as i32) as u16,
+                        )),
+                        _ => None,
+                    };
+                    out.push(ImageNeed { src: src.clone(), sized });
+                }
+                for &child in &node.children {
+                    walk(tree, child, out);
+                }
+            }
+            walk(tree, root, &mut out);
+            out
+        });
 
         let t4 = Instant::now();
 
-        // 4. Populate text cache: allocate render-target textures for
-        //    any (content, font, size, color) tuples we haven't seen
-        //    yet. Returns the list of pendings to render this frame.
-        let pendings = ui_state.with_tree(|tree| {
-            text_cache.populate(tree, &text_styles, &fonts, &mut device)
-        })?;
+        // 4. Collect TEXT-RT needs: cache misses only (the engine
+        //    measures + allocates + renders; entries appear next
+        //    generation).
+        let text_needs: Vec<TextNeed> = {
+            let cache = caches.text_cache.lock().unwrap();
+            ui_state.with_tree(|tree| {
+                let mut out = Vec::new();
+                for (id, rs) in &text_styles {
+                    let Some(node) = tree.get(*id) else { continue };
+                    let NodeKind::Text { content } = &node.kind else { continue };
+                    if content.is_empty() {
+                        continue;
+                    }
+                    let key = crate::text::CacheKey {
+                        content: content.clone(),
+                        font_name: rs.font_name.clone(),
+                        px_size: rs.px_size.round() as u16,
+                        color: rs.color.to_u32(),
+                    };
+                    if cache.lookup(&key).is_none() {
+                        out.push(TextNeed { key, color: rs.color });
+                    }
+                }
+                out
+            })
+        };
 
         let t5 = Instant::now();
 
-        // 5. Compute layout — but only when something layout-affecting
-        //    changed since last frame (structure / text / a layout style).
-        //    Paint-only tween frames reuse the cached `layouts`, skipping
-        //    Taffy's ~4.8 ms solve. Taffy's measure function consults the
-        //    font atlas / image registry for text and img leaves.
-        if ui_state.with_tree(|tree| tree.is_layout_dirty()) {
+        // 5. Layout — when tree-dirty OR the engine grew a cache (new
+        //    font metrics can change text measures).
+        let cache_gen = caches.generation();
+        if ui_state.with_tree(|tree| tree.is_layout_dirty()) || cache_gen != layout_gen {
+            let fonts_l = caches.fonts.lock().unwrap();
+            let images_l = caches.images.lock().unwrap();
             layouts = ui_state.with_tree(|tree| {
                 crate::layout::compute(
                     tree,
@@ -824,307 +777,91 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                     fb.width as f32,
                     fb.height as f32,
                     &text_styles,
-                    &fonts,
-                    &images,
+                    &fonts_l,
+                    &images_l,
                 )
             });
+            drop(images_l);
+            drop(fonts_l);
             ui_state.with_tree_mut(|tree| tree.clear_layout_dirty());
+            layout_gen = cache_gen;
         }
 
         let t6 = Instant::now();
 
-        // 6. Build the current PaintedScene snapshot, and skip
-        //    everything when this FB slot already has it. Computing
-        //    the scene is cheap (just a tree walk + small Vec) and
-        //    gives us both the fast skip-hash and the structure
-        //    damage needs to diff against the prior state.
-        //
-        // Compute scene FIRST — this work doesn't depend on render_idx
-        // and overlaps with the FPGA's previous-frame blit work. The
-        // wait_fence below blocks only if we're outrunning the FPGA.
+        // 6. Build the display list (the Send packet payload).
         let opacities = ui_state.with_tree(|tree| crate::style::resolve_opacity(tree, root));
         let transforms = ui_state.with_tree(|tree| crate::style::resolve_transforms(tree, root));
-        // Build the frame's DISPLAY LIST: one walk resolving every
-        // draw op AND its damage item from the same math (see
-        // display_list.rs). This is the packet that will cross the
-        // UI-thread -> engine-thread boundary in the dual-core split;
-        // for now build and replay happen on the same thread.
-        let dl = ui_state.with_tree(|tree| {
-            crate::display_list::build(
-                tree,
-                root,
-                &fb,
-                &layouts,
-                &text_styles,
-                &text_cache,
-                &images,
-                &opacities,
-                &transforms,
-                compositing,
-            )
-        });
+        let dl = {
+            // Lock order: images before text_cache (global order is
+            // fonts -> images -> text_cache; see SharedCaches).
+            let images_l = caches.images.lock().unwrap();
+            let cache = caches.text_cache.lock().unwrap();
+            ui_state.with_tree(|tree| {
+                crate::display_list::build(
+                    tree,
+                    root,
+                    &fb,
+                    &layouts,
+                    &text_styles,
+                    &cache,
+                    &images_l,
+                    &opacities,
+                    &transforms,
+                    compositing,
+                )
+            })
+        };
         let current_hash = dl.scene_hash();
-        let current_scene = dl.to_scene();
+        let scene_dt = t6.elapsed();
 
-        // NOW wait for the previous frame's fence (= sync barrier for
-        // reading FB_STATE.render). Wait happens AFTER scene compute
-        // so the FPGA's blit work overlaps with the host's CPU work.
-        // MAX_INFLIGHT_FRAMES=1 keeps FB_STATE.render always
-        // trustworthy after this wait; a deeper bound trades that for
-        // more overlap and falls back to full paints whenever a
-        // PRESENT is still in flight (see render_trusted below).
-        let fence_wait_start = Instant::now();
-        // submit -> retire of the frame we block on = the FPGA's true
-        // render time for that frame (it started rendering at submit and
-        // is done when its fence retires), regardless of how much the
-        // host overlapped it. This is the number that decides CPU- vs
-        // FPGA-bound. 0 only on the first frame (nothing in flight yet).
-        let mut frame_fpga_dt = Duration::ZERO;
-        if pending_fences.len() >= MAX_INFLIGHT_FRAMES {
-            let (oldest_fence, oldest_submit) = pending_fences.pop_front().unwrap();
-            device.wait_fence(oldest_fence, timeout)?;
-            frame_fpga_dt = oldest_submit.elapsed();
-        }
-        // Opportunistically drain any further already-retired fences
-        // (single non-blocking register read each). FENCE_VALUE is
-        // monotonic, so front-to-back is correct.
-        while let Some(&(f, _)) = pending_fences.front() {
-            if device.fence_reached(f) {
-                pending_fences.pop_front();
-            } else {
-                break;
-            }
-        }
-        let fence_dt = fence_wait_start.elapsed();
+        let has_requests =
+            !font_needs.is_empty() || !image_needs.is_empty() || !text_needs.is_empty();
 
-        // render_idx is TRUSTWORTHY only when no PRESENT is still in
-        // flight: each submission's FENCE sits after its PRESENT in
-        // the ring, so an empty queue proves fb_swapper has rotated
-        // past our last PRESENT. With MAX_INFLIGHT_FRAMES=1 the wait
-        // above always empties the queue; at deeper pipelining the
-        // FPGA may still owe a PRESENT, in which case FB_STATE.render
-        // is stale — the blits themselves still land in the right
-        // slot (the FPGA resolves the target after the in-ring
-        // PRESENT), but our per-slot damage bookkeeping would key off
-        // the wrong slot, silently underpainting whatever changed
-        // between the mixed-up frames (stale-texture flicker during
-        // animation). When untrusted: no skip, full paint (correct
-        // for any target slot), no record updates (stale records are
-        // conservative — future diffs only overpaint).
-        let render_trusted = pending_fences.is_empty();
-        let render_idx = (device.fb_state().render as usize).min(2);
-        if render_trusted && scene_hash_per_fb[render_idx] == Some(current_hash) {
-            // This FB slot already has the desired content. Sleep
-            // ~one vsync to bound the loop and continue.
+        // Idle skip: nothing changed since the last packet and there
+        // is no resource work to request — park on the input channel
+        // so a keypress wakes us instantly (better than the old fixed
+        // 16 ms sleep).
+        if Some(current_hash) == last_sent_hash && cache_gen == last_seen_gen && !has_requests {
             fps_counter.record_frame();
-            std::thread::sleep(Duration::from_millis(16));
+            if let Ok(ev) = input_rx.recv_timeout(Duration::from_millis(8)) {
+                carry_events.push(ev);
+            }
             continue;
         }
+        last_sent_hash = Some(current_hash);
+        last_seen_gen = cache_gen;
 
-        // 7. Paint directly into FB[render_idx] with damage-region
-        //    tracking. Each FB slot has its own physical memory (see
-        //    `scene_per_fb`'s declaration), so the diff that drives
-        //    this paint is against THIS slot's prior snapshot.
-        //
-        //    The slot we're targeting isn't the one HDMI is currently
-        //    scanning (fb_swapper rotates display ↔ render on each
-        //    PRESENT), so we can paint without tearing the displayed
-        //    image. A previous version of the runtime painted into a
-        //    single staging RT and copied it to each FB on every
-        //    frame; the copy alone cost ~14 ms of DDR3 bandwidth and
-        //    added nothing once the FBs were correctly per-slot
-        //    tracked, so it was removed.
-        let frame = device.begin_frame();
-        let frame = crate::paint::render_pending_text(frame, &pendings, &fonts)?;
-        let frame = frame.set_target_framebuffer()?;
-
-        // Track what we actually painted this frame for the timing
-        // log's damage stats. Initialized in each arm of the match
-        // below.
-        let paint_rect_count: u32;
-        let paint_area_px: u64;
-        let mut paint_full = false;
-
-        let damage_paint_plan: Option<Vec<damage::PixelRect>> =
-            match &scene_per_fb[render_idx] {
-                Some(prev) if render_trusted => {
-                    let d = damage::compute_damage(prev, &current_scene);
-                    let area = damage::total_area(&d);
-                    if d.is_empty() || area > full_paint_threshold {
-                        None
-                    } else {
-                        Some(d)
-                    }
-                }
-                // Untrusted render_idx → full paint (slot-agnostic).
-                _ => None,
-            };
-        let frame = match damage_paint_plan {
-            Some(rects) => {
-                paint_rect_count = rects.len() as u32;
-                paint_area_px = damage::total_area(&rects);
-                // Per-rect clipped paint. clear_clip after each rect
-                // so the next rect's set_clip replaces it cleanly.
-                // The host-side bbox cull inside paint() also uses
-                // the rect so nodes outside it never get a blit op
-                // issued.
-                let mut frame = frame;
-                for r in &rects {
-                    let clip_rect: menu_core_host::protocol::Rect = (*r).into();
-                    let f = frame.set_clip(clip_rect)?;
-                    let f = crate::display_list::replay(&dl, Some(clip_rect), f)?;
-                    frame = f.clear_clip()?;
-                }
-                frame
-            }
-            None => {
-                paint_full = true;
-                paint_rect_count = 1;
-                paint_area_px = fb_area;
-                crate::display_list::replay(&dl, None, frame)?
-            }
-        };
-
-        let t7 = Instant::now();
-
-        let new_token = frame.present()?.submit()?;
-        pending_fences.push_back((new_token.fence_value(), Instant::now()));
-        let scanout_dt = Duration::ZERO;
-
-        // Content coverage mask (task #15): derive the tile bitmap from the
-        // already-built scene's painted bounding boxes (no extra tree walk),
-        // unioned over the last 3 frames so the displayed slot (which lags
-        // render under triple-buffering) is always covered. Conservative —
-        // marks whole tiles touched by any drawn box, never drops content.
-        // We only get here on a frame that actually painted (idle frames
-        // `continue` at the slot-unchanged check above), so the mask tracks
-        // content changes without any extra per-frame work when idle.
-        if content_mask_on {
-            let mut cov = menu_core_host::mask::CoverageMask::empty();
-            for item in &current_scene.items {
-                cov.mark_rect(
-                    item.bbox.x as i32,
-                    item.bbox.y as i32,
-                    item.bbox.w as u32,
-                    item.bbox.h as u32,
-                );
-            }
-            coverage_ring[coverage_frame % 3] = cov;
-            coverage_frame += 1;
-            let mut union = coverage_ring[0];
-            union.union(&coverage_ring[1]);
-            union.union(&coverage_ring[2]);
-            device.upload_content_mask(union.words())?;
-            if !content_mask_enabled {
-                device.set_content_mask(true);
-                content_mask_enabled = true;
-                info!("content coverage mask enabled ({} tiles)", union.covered_tiles());
-            }
-        }
-
-        if render_trusted {
-            scene_hash_per_fb[render_idx] = Some(current_hash);
-            scene_per_fb[render_idx] = Some(current_scene);
-        }
-        // else: target slot unknown — leave all records untouched.
-        // They stay conservative (diffs against them cover at least
-        // the real difference), and the stale hash prevents a false
-        // skip next iteration.
-        ui_state.with_tree_mut(|t| t.clear_dirty());
+        mailbox.send(FramePacket {
+            dl,
+            scene_hash: current_hash,
+            requests: FrameRequests {
+                fonts: font_needs,
+                images: image_needs,
+                texts: text_needs,
+            },
+            ui: UiTimings {
+                jobs: t1 - t0,
+                input: t2 - t1,
+                text_prep: t3 - t2,
+                images: t4 - t3,
+                text_pop: t5 - t4,
+                layout: t6 - t5,
+                scene: scene_dt,
+            },
+        });
         fps_counter.record_frame();
-
-        sum_paint_rect_count += paint_rect_count as u64;
-        sum_paint_area_px += paint_area_px;
-        if paint_full {
-            count_full_paints += 1;
-        }
-
-        t_jobs += t1 - t0;
-        t_input += t2 - t1;
-        t_text_prep += t3 - t2;
-        t_images += t4 - t3;
-        t_text_pop += t5 - t4;
-        t_layout += t6 - t5;
-        // Scene build = opacity/transform/compute_scene, i.e. t6 -> the
-        // start of the fence wait. The rest of t7 - t6 (after removing
-        // the scene build and the fence wait) is the damage diff + the
-        // actual paint loop.
-        let scene_dt = fence_wait_start.saturating_duration_since(t6);
-        t_scene += scene_dt;
-        t_paint += (t7 - t6).saturating_sub(fence_dt).saturating_sub(scene_dt);
-        t_fence += fence_dt;
-        t_fpga += frame_fpga_dt;
-        if frame_fpga_dt > t_fpga_max {
-            t_fpga_max = frame_fpga_dt;
-        }
-        t_scanout += scanout_dt;
-
-        frame_idx = frame_idx.wrapping_add(1);
-
-        if frame_idx % TIMING_LOG_PERIOD == 0 {
-            let n = TIMING_LOG_PERIOD as u32;
-            let avg = |t: Duration| t.as_micros() as u32 / n;
-            let total = t_jobs + t_input + t_text_prep + t_images + t_text_pop
-                + t_layout + t_scene + t_paint + t_fence + t_scanout;
-            // cpu = host-thread busy time (everything except the fence
-            // wait). The cpu-vs-fpga comparison is the verdict: cpu >
-            // fpga ⇒ CPU-bound, a JS render-thread split can lift fps;
-            // fpga > cpu ⇒ render is the ceiling, split won't help fps
-            // (cut render cost instead). `fpga_max` flags full-repaint
-            // spikes the average hides.
-            let cpu = total.saturating_sub(t_fence);
-            tracing::info!(
-                "frame timings (us avg over {n}): jobs={} input={} text_prep={} images={} text_pop={} layout={} scene={} paint={} fence={} fpga={} fpga_max={} cpu={} total={}",
-                avg(t_jobs),
-                avg(t_input),
-                avg(t_text_prep),
-                avg(t_images),
-                avg(t_text_pop),
-                avg(t_layout),
-                avg(t_scene),
-                avg(t_paint),
-                avg(t_fence),
-                avg(t_fpga),
-                t_fpga_max.as_micros() as u32,
-                avg(cpu),
-                avg(total),
-            );
-            // Damage / pixel accounting. "rects" is average rect
-            // count per frame (after coalescing); "area" is average
-            // damaged pixels per frame as a percentage of the FB;
-            // "full" is the number of frames in this window that
-            // fell back to a full repaint (above the 70 % threshold
-            // or first-frame for the slot).
-            let pct = |area: u64| {
-                if fb_area == 0 { 0u32 } else {
-                    ((area * 100) / (fb_area * n as u64)) as u32
-                }
-            };
-            tracing::info!(
-                "damage avg over {n}: rects={:.1} area={}% full={}",
-                (sum_paint_rect_count as f32) / (n as f32),
-                pct(sum_paint_area_px),
-                count_full_paints,
-            );
-            t_jobs = Duration::ZERO;
-            t_input = Duration::ZERO;
-            t_text_prep = Duration::ZERO;
-            t_images = Duration::ZERO;
-            t_text_pop = Duration::ZERO;
-            t_layout = Duration::ZERO;
-            t_paint = Duration::ZERO;
-            t_fence = Duration::ZERO;
-            t_scanout = Duration::ZERO;
-            t_scene = Duration::ZERO;
-            t_fpga = Duration::ZERO;
-            t_fpga_max = Duration::ZERO;
-            sum_paint_rect_count = 0;
-            sum_paint_area_px = 0;
-            count_full_paints = 0;
-        }
     }
 
-    info!("menu-ui: stopping engine");
-    device.stop()?;
+    info!("menu-ui: stopping (ui thread)");
+    running.store(false, Ordering::SeqCst);
+    match engine_handle.join() {
+        Ok(r) => r?,
+        Err(_) => {
+            return Err(RuntimeError::Io(std::io::Error::other(
+                "engine thread panicked",
+            )));
+        }
+    }
     Ok(())
 }

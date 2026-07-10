@@ -200,6 +200,49 @@ impl TextCache {
         }
         Ok(pendings)
     }
+
+    /// Engine-side variant of [`Self::populate`]: ensure cache entries
+    /// for an explicit list of `(key, color)` needs (collected by the
+    /// UI thread from its tree — the engine has no tree). Same skip
+    /// rules: existing entries, missing atlases and zero-extent lines
+    /// are ignored. Returns the `PendingRender`s to rasterise this
+    /// frame.
+    pub fn ensure_keys(
+        &mut self,
+        needs: &[(CacheKey, Rgba)],
+        fonts: &FontRegistry,
+        device: &mut Device,
+    ) -> Result<Vec<PendingRender>, FontError> {
+        let mut pendings = Vec::new();
+        for (key, color) in needs {
+            if key.content.is_empty() || self.entries.contains_key(key) {
+                continue;
+            }
+            let Some(cached_atlas) = fonts.get(&key.font_name, key.px_size) else {
+                continue; // atlas not built yet; retried next packet
+            };
+            let w = cached_atlas.atlas.measure(&key.content) as u16;
+            let h = cached_atlas.atlas.line_height;
+            if w == 0 || h == 0 {
+                continue;
+            }
+            let texture = device.create_render_target(w, h)?;
+            self.entries.insert(
+                key.clone(),
+                CachedLine { texture, width: w, height: h },
+            );
+            pendings.push(PendingRender {
+                texture,
+                width: w,
+                height: h,
+                content: key.content.clone(),
+                font_name: key.font_name.clone(),
+                px_size: key.px_size,
+                color: *color,
+            });
+        }
+        Ok(pendings)
+    }
 }
 
 /// Ensure every `(font, px_size)` pair used by text nodes in the tree

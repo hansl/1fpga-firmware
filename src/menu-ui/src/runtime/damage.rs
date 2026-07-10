@@ -28,7 +28,7 @@ use std::hash::{Hash, Hasher};
 
 use menu_core_host::protocol::Rect;
 
-use crate::vdom::{NodeId, NodeKind, Tree};
+use crate::vdom::NodeId;
 
 /// One drawable item recorded in a [`PaintedScene`]. The pair (bbox,
 /// content_hash) is what damage detection compares — when either
