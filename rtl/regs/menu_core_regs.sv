@@ -98,9 +98,12 @@ module menu_core_regs (
     output logic        boxart_en_o,
 
     // Compositor observability — surfaces through LAYER_DEBUG (0x70).
-    // descriptors_i is a free-running count of layer descriptors the
-    // DMA has written into the cache, so the host can verify it is
-    // ticking at frame rate (count × frames per second).
+    // Repurposed (the layer-DMA descriptor count it once carried is
+    // gone): bits [15:0] = scanout underrun counter — mid-frame events
+    // where the HDMI beam overtook the line-buffer producer and
+    // displayed a stale slot. Free-running since reset; crossed from
+    // avl_clk with plain 2FF per bit, so a read racing an increment
+    // can be off by one — fine for its "is it climbing?" purpose.
     input  logic [31:0] layer_descriptors_i,
 
     // Sideband in: FPGA-driven views.
@@ -152,7 +155,11 @@ module menu_core_regs (
     // sits at host physical 0xFF210000, which is offset 0x10000 within
     // the window.
     localparam logic [20:0] BLOCK_BASE = 21'h10000;
-    localparam logic [20:0] BLOCK_MASK = 21'hFFF00;
+    // Mask covers ALL address bits above the 256-B register window
+    // ([20:8]); the previous 21'hFFF00 dropped bit 20 and aliased the
+    // live registers at window offset 0x110000 — a stray access there
+    // would silently corrupt ring/boxart config.
+    localparam logic [20:0] BLOCK_MASK = 21'h1FFF00;
 
     wire in_block = ((req_addr & BLOCK_MASK) == BLOCK_BASE);
     wire [5:0] reg_idx = req_addr[7:2];

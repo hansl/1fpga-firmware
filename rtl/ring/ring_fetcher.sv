@@ -258,8 +258,12 @@ module ring_fetcher (
     assign target_width_o  = target_is_fb_q ? fb_width_i  : target_width_q;
     assign target_height_o = target_is_fb_q ? fb_height_i : target_height_q;
 
-    // Texture descriptor base = tex_table_addr + tex_id * 32.
-    wire [31:0] desc_base = tex_table_addr_i + (arg_q[0] <<< 5);
+    // Texture descriptor base = tex_table_addr + tex_id * 32. tex_id
+    // is the LOW HALF of the word only — the sentinel checks already
+    // use [15:0], and an unmasked shift would let stray upper bits
+    // (future flags, host bugs) fetch a descriptor from a wild
+    // address and blit garbage.
+    wire [31:0] desc_base = tex_table_addr_i + ({16'd0, arg_q[0][15:0]} <<< 5);
 
     // ---- FSM transitions ---------------------------------------------
     integer i;

@@ -97,28 +97,44 @@ module lwh2f_bridge (
     logic [20:0] r_addr_q;
     logic [11:0] r_id_q;
 
+    // RDATA is registered on the first R_RESP cycle. AXI requires RDATA
+    // stable while RVALID is held; the old combinational feed from
+    // req_readdata let live counters (FRAME_COUNT, RING_HEAD, FENCE_VALUE)
+    // tick mid-handshake when the HPS delays RREADY.
+    logic [31:0] r_data_q;
+    logic        r_data_held_q;
+
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            r_state  <= R_IDLE;
-            r_addr_q <= '0;
-            r_id_q   <= '0;
+            r_state       <= R_IDLE;
+            r_addr_q      <= '0;
+            r_id_q        <= '0;
+            r_data_q      <= '0;
+            r_data_held_q <= 1'b0;
         end else begin
             unique case (r_state)
                 R_IDLE: if (ar_valid) begin
-                    r_addr_q <= ar_addr;
-                    r_id_q   <= ar_id;
-                    r_state  <= R_RESP;
+                    r_addr_q      <= ar_addr;
+                    r_id_q        <= ar_id;
+                    r_data_held_q <= 1'b0;
+                    r_state       <= R_RESP;
                 end
-                R_RESP: if (r_ready) begin
-                    r_state <= R_IDLE;
+                R_RESP: begin
+                    if (!r_data_held_q) begin
+                        r_data_q      <= req_readdata;
+                        r_data_held_q <= 1'b1;
+                    end
+                    if (r_ready && r_data_held_q) begin
+                        r_state <= R_IDLE;
+                    end
                 end
             endcase
         end
     end
 
     assign ar_ready = (r_state == R_IDLE);
-    assign r_valid  = (r_state == R_RESP);
-    assign r_data   = req_readdata;
+    assign r_valid  = (r_state == R_RESP) && r_data_held_q;
+    assign r_data   = r_data_q;
     assign r_id     = r_id_q;
     assign r_resp   = 2'b00;
     assign r_last   = 1'b1;

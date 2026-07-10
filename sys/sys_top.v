@@ -769,9 +769,14 @@ wire         bob_deint;
 		.boxart_w       (comp_bx_size_s1[11:0]),
 		.boxart_h       (comp_bx_size_s1[27:16]),
 		.boxart_stride  (comp_bx_stride_s1),
-		.boxart_en      (comp_bx_en_s[1])
+		.boxart_en      (comp_bx_en_s[1]),
+		.underrun_cnt_o (comp_underrun_cnt)
 	);
 `endif
+
+// Scanout underrun counter (clk_100m domain) routed back into the
+// core for host diagnostics via LAYER_DEBUG.
+wire [15:0] comp_underrun_cnt;
 
 reg        LFB_EN     = 0;
 reg        LFB_FLT    = 0;
@@ -1746,6 +1751,7 @@ emu emu
 	.COMP_BOXART_SIZE(comp_boxart_size),
 	.COMP_BOXART_STRIDE(comp_boxart_stride),
 	.COMP_BOXART_EN(comp_boxart_en),
+	.COMP_UNDERRUN(comp_underrun_cnt),
 
 `ifdef MISTER_FB
 	.FB_EN(fb_en),

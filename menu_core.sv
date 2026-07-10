@@ -173,6 +173,7 @@ module emu
 	output [31:0] COMP_BOXART_SIZE,   // {_, h:12, _, w:12}
 	output [31:0] COMP_BOXART_STRIDE, // bytes per boxart row
 	output        COMP_BOXART_EN,     // boxart layer enable
+	input  [15:0] COMP_UNDERRUN,      // scanout underrun count (clk_100m domain)
 
 	input         OSD_STATUS
 );
@@ -393,9 +394,25 @@ wire [31:0] swap_fb_state;
 wire [31:0] swap_frame_count;
 wire [31:0] swap_vsync_count;
 
+// Scanout underrun counter sync (clk_100m -> clk_sys, per-bit 2FF;
+// approximate reads acceptable -- diagnostic counter only).
+(* preserve *) logic [15:0] comp_underrun_sync0;
+logic [15:0] comp_underrun_sync1;
+always_ff @(posedge clk_sys) begin
+    comp_underrun_sync0 <= COMP_UNDERRUN;
+    comp_underrun_sync1 <= comp_underrun_sync0;
+end
+
 // CONTROL.CE (clear-error pulse) re-arms the fetcher: it leaves S_HALT
-// and clears the error bit. We OR this into the fetcher's reset.
+// and clears the error bit. We OR this into the fetcher's reset —
+// and ONLY the fetcher's. It used to reset fb_swapper, both blit
+// engines, and the DDRAM arbiter too; a CE while a read burst was
+// in flight zeroed the arbiter's outstanding-beat counter, the
+// stragglers then underflowed it to 0xFFFF and the bus wedged
+// permanently (and the display/render/ready rotation snapped to
+// reset, visibly glitching the screen on every error recovery).
 wire fetcher_rst_n = (~RESET) & ~reg_clear_error;
+wire engine_rst_n  = ~RESET;
 
 lwh2f_bridge u_lwh2f_bridge (
     .clk            (clk_sys),
@@ -449,7 +466,10 @@ menu_core_regs u_menu_core_regs (
     .boxart_stride_o     (reg_boxart_stride),
     .boxart_en_o         (reg_boxart_en),
 
-    .layer_descriptors_i (32'd0),
+    // LAYER_DEBUG[15:0] = compositor scanout underrun counter (see
+    // menu_core_regs header). 2FF per bit from clk_100m; reads racing
+    // an increment may be off-by-one, which is fine for diagnostics.
+    .layer_descriptors_i ({16'd0, comp_underrun_sync1}),
 
     .ring_head_i    (fetcher_ring_head),
     .fence_value_i  (fetcher_fence_value),
@@ -597,16 +617,21 @@ wire [31:0] scanout_fb_base = fb_addr_select(swap_display_idx, reg_fb0_addr, reg
 wire [31:0] blit_fb_base    = fb_addr_select(swap_render_idx,  reg_fb0_addr, reg_fb1_addr, reg_fb2_addr);
 
 // Vsync pulse: rising edge of FB_VBL, double-flop synchronised.
-logic fb_vbl_d0, fb_vbl_d1;
+logic fb_vbl_d0, fb_vbl_d1, fb_vbl_d2;
 always_ff @(posedge clk_sys) begin
     fb_vbl_d0 <= FB_VBL;
     fb_vbl_d1 <= fb_vbl_d0;
+    fb_vbl_d2 <= fb_vbl_d1;
 end
-wire vsync_pulse = fb_vbl_d0 & ~fb_vbl_d1;
+// Edge-detect on the SECOND and THIRD flops: fb_vbl_d0 is the
+// metastability-capture stage and must not feed logic — using it
+// directly could double-pulse or drop a vsync (double-rotate or
+// missed swap = one-frame glitch).
+wire vsync_pulse = fb_vbl_d1 & ~fb_vbl_d2;
 
 fb_swapper u_fb_swapper (
     .clk             (clk_sys),
-    .rst_n           (fetcher_rst_n),
+    .rst_n           (engine_rst_n),
 
     .present_pulse_i (fetcher_present_pulse),
     .vsync_pulse_i   (vsync_pulse),
@@ -621,7 +646,7 @@ fb_swapper u_fb_swapper (
 
 blit_engine u_blit_engine (
     .clk        (clk_sys),
-    .rst_n      (fetcher_rst_n),
+    .rst_n      (engine_rst_n),
 
     .start_i    (blit0_start),
     .mode_i     (blit_mode),
@@ -697,7 +722,7 @@ wire        blit1_done;
 
 blit_engine u_blit_engine_1 (
     .clk        (clk_sys),
-    .rst_n      (fetcher_rst_n),
+    .rst_n      (engine_rst_n),
 
     .start_i    (blit1_start),           // Step 3: gated by active_engine in fetcher.
     .mode_i     (blit_mode),
@@ -790,8 +815,8 @@ wire owner_grant_ok = pipe_idle | (next_owner == owner_q);
 wire blit_owns_bus  = blit_busy  & owner_grant_ok;
 wire fetch_owns_bus = ~blit_busy & owner_grant_ok;
 
-always_ff @(posedge clk_sys or negedge fetcher_rst_n) begin
-    if (!fetcher_rst_n) begin
+always_ff @(posedge clk_sys or negedge engine_rst_n) begin
+    if (!engine_rst_n) begin
         owner_q             <= TAG_FETCH;
         outstanding_beats_q <= 16'd0;
     end else begin

@@ -120,7 +120,11 @@ module compositor #(
     input  logic [11:0]         boxart_w,
     input  logic [11:0]         boxart_h,
     input  logic [13:0]         boxart_stride,
-    input  logic                boxart_en
+    input  logic                boxart_en,
+
+    // Underrun diagnostics (avl_clk domain): count of mid-frame events
+    // where the beam overtook the producer (stale-line display).
+    output logic [15:0]         underrun_cnt_o
 );
 
     // ---- Derived timing ----------------------------------------------
@@ -224,12 +228,18 @@ module compositor #(
         end
     end
 
-    // content_mask_en into the hdmi domain (quasi-static; 2-flop).
-    logic cmask_en_h0, cmask_en_h1;
-    always_ff @(posedge hdmi_clk or negedge hdmi_rst_n) begin
-        if (!hdmi_rst_n) begin cmask_en_h0 <= 1'b0; cmask_en_h1 <= 1'b0; end
-        else begin cmask_en_h0 <= content_mask_en; cmask_en_h1 <= cmask_en_h0; end
-    end
+    // Producer-side per-frame config latches (avl_clk domain).
+    // Declared here, ahead of both the consumer's re-latch chain and
+    // the producer FSM that assigns them (see the frame_start_a
+    // block below). These are the single source of truth for a
+    // frame's config generation — the consumer samples THESE, not
+    // the live host ports.
+    logic               comp_en_l;        // composite_en latched per frame
+    logic               mask_rd_l;        // content_mask_en latched per frame
+    logic               bx_en_l;
+    logic signed [15:0] bx_x_l;
+    logic signed [15:0] bx_y_l;
+    logic [11:0]        bx_h_l, bx_w_l;
 
     // ================================================================
     //  HDMI timing generator (hdmi_clk domain)
@@ -252,46 +262,80 @@ module compositor #(
     wire h_sync_r = (hcount >= H_ACTIVE+H_FP) && (hcount < H_ACTIVE+H_FP+H_SYNC);
     wire v_sync_r = (vcount >= V_ACTIVE+V_FP) && (vcount < V_ACTIVE+V_FP+V_SYNC);
 
-    // frame toggle at the top of vertical blank (start of the first blank
-    // line) so the producer gets a head start prefilling during vblank.
+    // Frame toggle for the producer, fired TWO LINES into vertical
+    // blank rather than at its top. The fb_swapper's display flip
+    // fans out from the same vblank edge through a much longer
+    // pipeline (hdmi_vbl output reg → clk_vid reg → 2-flop clk_sys
+    // sync → display_q → FB_BASE clk_sys reg → 2-flop clk_100m ≈
+    // 100-140 ns), while the old top-of-vblank toggle reached
+    // frame_start_a in ~30 ns — so the producer latched the
+    // PRE-SWAP display base every single frame and scanned the old
+    // buffer while fb_swapper handed it back to the host as RENDER.
+    // During animation the host then blitted straight into the
+    // buffer being scanned out (the "texture flicker" bug). Two
+    // full lines (~30 µs) buries the swap-propagation latency with
+    // four orders of magnitude of margin, and the producer still
+    // has V_TOTAL-V_ACTIVE-2 = 43 blank lines of prefill lead
+    // (cons_line_bin resets at V_ACTIVE independently of this).
     logic frame_tgl;
     always_ff @(posedge hdmi_clk or negedge hdmi_rst_n) begin
         if (!hdmi_rst_n) frame_tgl <= 1'b0;
-        else if (hcount == 12'd0 && vcount == V_ACTIVE) frame_tgl <= ~frame_tgl;
+        else if (hcount == 12'd0 && vcount == V_ACTIVE + 12'd2) frame_tgl <= ~frame_tgl;
     end
 
-    // composite_en into the hdmi domain (quasi-static config; 2-flop).
-    logic comp_en_h0, comp_en_h1;
-    always_ff @(posedge hdmi_clk or negedge hdmi_rst_n) begin
-        if (!hdmi_rst_n) begin comp_en_h0 <= 1'b0; comp_en_h1 <= 1'b0; end
-        else begin comp_en_h0 <= composite_en; comp_en_h1 <= comp_en_h0; end
-    end
+    // (composite_en / content_mask_en now reach the pixel path via the
+    // producer's frame latches + the per-frame consumer re-latch below —
+    // the old free-running 2-flop copies could change blend policy
+    // mid-frame.)
 
     // ---- Boxart placement config into the hdmi domain ----------------
-    // 2-flop sync from the host-stable ports, then latch once per frame
-    // (top of vblank) so the whole active frame uses one position — a
-    // mid-frame position change would shear the panel.
+    // Sourced from the PRODUCER's frame-latched copies (bx_*_l /
+    // comp_en_l / mask_rd_l, latched in the avl domain at
+    // frame_start_a ≈ vblank line V_ACTIVE+2) rather than from the
+    // live host ports. The old scheme latched the two domains'
+    // copies at different instants (~40-50 ns apart) from
+    // independent 2-flop chains, so a host write landing in the
+    // window made the producer fetch boxart rows for one position
+    // while the pixel path overlaid another — for a whole frame,
+    // re-rolled at 60 Hz during slides. Sampling the producer's
+    // latched copies two lines later (V_ACTIVE+4) guarantees both
+    // sides of the pipe use the SAME generation of config: the
+    // values are ≥2 scanlines stable at the sampling instant, so
+    // the plain 2-flop chains below are safe for the multi-bit
+    // buses too.
     logic               bx_en_h0,  bx_en_h1;
     logic signed [15:0] bx_x_h0,   bx_x_h1,  bx_y_h0, bx_y_h1;
     logic [11:0]        bx_w_h0,   bx_w_h1,  bx_h_h0, bx_h_h1;
+    logic               cen_h0,    cen_h1;
+    logic               men_h0,    men_h1;
     always_ff @(posedge hdmi_clk or negedge hdmi_rst_n) begin
         if (!hdmi_rst_n) begin
             bx_en_h0<=1'b0; bx_en_h1<=1'b0; bx_x_h0<='0; bx_x_h1<='0;
             bx_y_h0<='0; bx_y_h1<='0; bx_w_h0<='0; bx_w_h1<='0; bx_h_h0<='0; bx_h_h1<='0;
+            cen_h0<=1'b0; cen_h1<=1'b0; men_h0<=1'b0; men_h1<=1'b0;
         end else begin
-            bx_en_h0<=boxart_en; bx_en_h1<=bx_en_h0;
-            bx_x_h0<=boxart_x;   bx_x_h1<=bx_x_h0;   bx_y_h0<=boxart_y; bx_y_h1<=bx_y_h0;
-            bx_w_h0<=boxart_w;   bx_w_h1<=bx_w_h0;   bx_h_h0<=boxart_h; bx_h_h1<=bx_h_h0;
+            bx_en_h0<=bx_en_l; bx_en_h1<=bx_en_h0;
+            bx_x_h0<=bx_x_l;   bx_x_h1<=bx_x_h0;   bx_y_h0<=bx_y_l[15:0]; bx_y_h1<=bx_y_h0;
+            bx_w_h0<=bx_w_l;   bx_w_h1<=bx_w_h0;   bx_h_h0<=bx_h_l; bx_h_h1<=bx_h_h0;
+            cen_h0<=comp_en_l; cen_h1<=cen_h0;
+            men_h0<=mask_rd_l; men_h1<=men_h0;
         end
     end
     logic               bx_en_f;
     logic signed [15:0] bx_x_f, bx_y_f;
     logic [11:0]        bx_w_f, bx_h_f;
+    logic               comp_en_f, cmask_en_f;
     always_ff @(posedge hdmi_clk or negedge hdmi_rst_n) begin
         if (!hdmi_rst_n) begin
             bx_en_f<=1'b0; bx_x_f<='0; bx_y_f<='0; bx_w_f<='0; bx_h_f<='0;
-        end else if (hcount == 12'd0 && vcount == V_ACTIVE) begin
+            comp_en_f<=1'b0; cmask_en_f<=1'b0;
+        end else if (hcount == 12'd0 && vcount == V_ACTIVE + 12'd4) begin
             bx_en_f<=bx_en_h1; bx_x_f<=bx_x_h1; bx_y_f<=bx_y_h1; bx_w_f<=bx_w_h1; bx_h_f<=bx_h_h1;
+            // composite/mask enables frame-latched alongside (the
+            // producer already frame-latches its copies; a mid-frame
+            // host toggle used to split one displayed frame into two
+            // blend policies and expose skipped stale tiles).
+            comp_en_f<=cen_h1; cmask_en_f<=men_h1;
         end
     end
 
@@ -340,7 +384,7 @@ module compositor #(
     wire [TXW-1:0] tile_x   = hcount[TSHIFT+TXW-1 -: TXW];
     wire           tile_cov = cur_mask_row[tile_x];
     // force content transparent on unset tiles when masking is enabled.
-    wire           ct_drop  = cmask_en_h1 && !tile_cov;
+    wire           ct_drop  = cmask_en_f && !tile_cov;
 
     // ---- Boxart per-pixel placement / clip --------------------------
     // bx_col/bx_row are signed: the panel may sit partly off-screen during
@@ -454,7 +498,7 @@ module compositor #(
         end else begin
             crgb_q2a     <= ct_pix_q[23:0];
             wmul_q2a     <= {wr_m[15:8], wg_m[15:8], wb_m[15:8]};
-            comp_q2a     <= comp_en_h1;
+            comp_q2a     <= comp_en_f;
             test_q2a     <= test_q1;
             bx_pix_q2a   <= bx_pix_q;
             bx_cover_q2a <= bx_cover_q1;
@@ -615,19 +659,17 @@ module compositor #(
     logic [31:0]      ct_line_base;     // byte addr of current content line
     logic [31:0]      wp_line_base;     // byte addr of current wallpaper line
     logic [13:0]      fb_stride_l;
-    logic             comp_en_l;        // composite_en latched per frame
-    logic             mask_rd_l;        // content_mask_en latched per frame
+    // (comp_en_l / mask_rd_l / bx_en_l / bx_x_l / bx_y_l / bx_w_l /
+    // bx_h_l are declared up with the consumer re-latch chain — they
+    // are the per-frame config generation shared by both domains.)
     logic [31:0]      mask_base_l;      // content_mask_base latched per frame
     logic [7:0]       burst_left;
     logic [2:0]       mask_beat;        // beat index during the mask read
 
-    // boxart (layer 2) config latched per frame, + the current boxart-row
-    // byte address (computed once when the layer-2 fill for a line starts).
+    // boxart (layer 2) DDR bookkeeping + the current boxart-row byte
+    // address (computed once when the layer-2 fill for a line starts).
     logic [31:0]      bx_base_l, bx_line_base;
-    logic signed [15:0] bx_y_l;
-    logic [11:0]      bx_h_l, bx_w_l;
     logic [13:0]      bx_stride_l;
-    logic             bx_en_l;
     wire [LBW:0]      bx_words = (bx_w_l + 12'd3) >> 2;          // ceil(w/4) words/row
     wire signed [16:0] bx_prod_row = $signed({5'b0, prod_line}) - bx_y_l;
     wire              bx_cover_prod = bx_en_l && (bx_prod_row >= 0)
@@ -666,6 +708,20 @@ module compositor #(
 
     wire prod_ahead_ok = ((prod_line - cons_line_a) < LINE_BUFS[11:0]);
     wire prod_more     = (prod_line < V_ACTIVE[11:0]);
+
+    // Avalon read in flight (request asserted or beats still due).
+    // frame_start is deferred while this holds — see the producer FSM.
+    wire prod_rd_busy  = (pstate == P_REQ) || (pstate == P_RX)
+                      || (pstate == P_MREQ) || (pstate == P_MRX);
+    logic        frame_pend;
+
+    // Consumer has overtaken the producer mid-frame = the beam is
+    // reading line slots not yet refilled this frame (both counters
+    // are frame-relative, so a plain compare is wrap-free).
+    wire underrun_now  = prod_more && (cons_line_a > prod_line);
+    logic        underrun_d;
+    logic [15:0] underrun_cnt;
+    assign underrun_cnt_o = underrun_cnt;
     wire line_done     = (prod_word >= layer_words);
 
     wire [31:0] cur_line_base = (prod_layer == 2'd0) ? wp_line_base
@@ -719,14 +775,40 @@ module compositor #(
             req_addr_q   <= '0;
             bx_base_l    <= '0;
             bx_line_base <= '0;
+            bx_x_l       <= '0;
             bx_y_l       <= '0;
             bx_h_l       <= '0;
             bx_w_l       <= '0;
             bx_stride_l  <= '0;
             bx_en_l      <= 1'b0;
+            frame_pend   <= 1'b0;
+            underrun_cnt <= '0;
+            underrun_d   <= 1'b0;
             for (int i = 0; i < N_TY; i++) mask_avl[i] <= '1; // all covered
         end else begin
-            if (frame_start_a) begin
+            // Underrun diagnostics: the consumer has advanced past the
+            // producer's fill line mid-frame — the beam is displaying
+            // slots the producer hasn't refilled this frame (stale
+            // content = visible shimmer during animation). Count one
+            // event per occurrence; readable via COMP_UNDERRUN.
+            underrun_d <= underrun_now;
+            if (underrun_now && !underrun_d)
+                underrun_cnt <= underrun_cnt + 16'd1;
+
+            // Latch the frame-start request; honor it only when no
+            // Avalon read is in flight. The old code reset the FSM
+            // unconditionally: a burst still draining at vblank top
+            // left its remaining beats to be mis-counted against the
+            // NEW frame's first burst, permanently shifting the
+            // beat/address pairing for the entire next frame (whole-
+            // frame corruption after any stall reaching vblank; with
+            // masking enabled the stray pixel beats even landed in
+            // mask_avl). Deferring costs at most one burst (≤255
+            // beats ≈ 3 µs) of a 45-line vblank.
+            if (frame_start_a) frame_pend <= 1'b1;
+
+            if ((frame_start_a || frame_pend) && !prod_rd_busy) begin
+                frame_pend   <= 1'b0;
                 // new frame: latch geometry, reset producer to line 0.
                 fb_stride_l  <= fb_stride;
                 comp_en_l    <= composite_en;
@@ -739,8 +821,12 @@ module compositor #(
                 wp_line_base <= wallpaper_base;
                 prod_layer   <= composite_en ? 2'd0 : 2'd1; // wallpaper first if compositing
                 mask_beat    <= '0;
-                // latch boxart placement for the frame
+                // latch boxart placement for the frame (bx_x_l is
+                // consumer-only, but it is latched HERE so both
+                // domains share one config generation — the consumer
+                // re-latches these copies two lines later).
                 bx_base_l    <= boxart_base;
+                bx_x_l       <= boxart_x;
                 bx_y_l       <= boxart_y;
                 bx_h_l       <= boxart_h;
                 bx_w_l       <= boxart_w;
@@ -818,7 +904,7 @@ module compositor #(
                     end
                     P_REQ: begin
                         if (!avl_waitrequest) begin
-                            burst_left <= this_burst;
+                            burst_left <= req_burst_q;
                             pstate     <= P_RX;
                         end
                     end

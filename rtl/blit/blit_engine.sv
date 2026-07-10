@@ -702,11 +702,16 @@ module blit_engine (
         logic [7:0] r, g, b, a;
         unique case (blend)
             BLEND_SRCALPHA: begin
+                // Saturating adds: exact for premultiplied sources
+                // (src.ch <= src.a makes overflow impossible), but a
+                // per-channel tint can break that invariant — the
+                // plain adds here used to wrap to garbage colors
+                // instead of clamping.
                 inv_a = 8'hFF - ch_a(src);
-                r = ch_r(src) + mul8(ch_r(dst), inv_a);
-                g = ch_g(src) + mul8(ch_g(dst), inv_a);
-                b = ch_b(src) + mul8(ch_b(dst), inv_a);
-                a = ch_a(src) + mul8(ch_a(dst), inv_a);
+                r = sat_add8(ch_r(src), mul8(ch_r(dst), inv_a));
+                g = sat_add8(ch_g(src), mul8(ch_g(dst), inv_a));
+                b = sat_add8(ch_b(src), mul8(ch_b(dst), inv_a));
+                a = sat_add8(ch_a(src), mul8(ch_a(dst), inv_a));
                 blend_pixel = pack_pixel(r, g, b, a);
             end
             BLEND_ADDITIVE: begin
@@ -1574,7 +1579,12 @@ module blit_engine (
                     // fully-clipped rects (the fetcher already rejects
                     // oversize sources, but never write past the banks).
                     if ((src_w_q > 16'd128) || (src_h_q > 16'd128)
+                        || (src_w_q == 16'd0) || (src_h_q == 16'd0)
                         || (dst_w_q == 16'd0) || (dst_h_q == 16'd0)) begin
+                        // src_w==0 would issue a ZERO-LENGTH DDR burst
+                        // (aff_row_beats = 0): undefined on the f2h
+                        // slave and it desyncs the shared-port
+                        // arbiter's outstanding-beat counter.
                         state <= S_DONE;
                     end else begin
                         // Seed the source accumulators at the clipped
