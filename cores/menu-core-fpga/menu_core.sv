@@ -175,6 +175,7 @@ module emu
 	output [31:0] COMP_BOXART_STRIDE, // bytes per boxart row
 	output        COMP_BOXART_EN,     // boxart layer enable
 	input  [15:0] COMP_UNDERRUN,      // scanout underrun count (clk_100m domain)
+	input         SCANOUT_PRESSURE,   // producer read-ahead low (clk_100m domain)
 
 	input         OSD_STATUS
 );
@@ -397,12 +398,23 @@ wire [31:0] swap_vsync_count;
 
 // Scanout underrun counter sync (clk_100m -> clk_sys, per-bit 2FF;
 // approximate reads acceptable -- diagnostic counter only).
-(* preserve *) logic [15:0] comp_underrun_sync0;
-logic [15:0] comp_underrun_sync1;
+(* preserve *) logic [16:0] comp_underrun_sync0;
+logic [16:0] comp_underrun_sync1;
 always_ff @(posedge clk_sys) begin
-    comp_underrun_sync0 <= COMP_UNDERRUN;
+    comp_underrun_sync0 <= {SCANOUT_PRESSURE, COMP_UNDERRUN};
     comp_underrun_sync1 <= comp_underrun_sync0;
 end
+
+// Blit backpressure: while the scanout producer is low on read-ahead
+// (level signal, hysteretic in the compositor), both blit engines see
+// DDR busy — no NEW commands or write beats are accepted; in-flight
+// read responses still land, and a stalled write burst legally holds
+// its data until busy drops. The ring FETCHER stays ungated so
+// command fetch keeps work queued for when pressure lifts. This is
+// what makes scanout underruns structurally impossible under total
+// DDR oversubscription — MPFE priority alone cannot guarantee the
+// producer's throughput once the blitters saturate the device.
+wire scanout_pressure_s = comp_underrun_sync1[16];
 
 // CONTROL.CE (clear-error pulse) re-arms the fetcher: it leaves S_HALT
 // and clears the error bit. We OR this into the fetcher's reset —
@@ -467,10 +479,12 @@ menu_core_regs u_menu_core_regs (
     .boxart_stride_o     (reg_boxart_stride),
     .boxart_en_o         (reg_boxart_en),
 
-    // LAYER_DEBUG[15:0] = compositor scanout underrun counter (see
-    // menu_core_regs header). 2FF per bit from clk_100m; reads racing
-    // an increment may be off-by-one, which is fine for diagnostics.
-    .layer_descriptors_i ({16'd0, comp_underrun_sync1}),
+    // LAYER_DEBUG[15:0] = compositor scanout underrun counter,
+    // LAYER_DEBUG[16] = live scanout-pressure (blit backpressure)
+    // level (see menu_core_regs header). 2FF per bit from clk_100m;
+    // reads racing an increment may be off-by-one, which is fine for
+    // diagnostics.
+    .layer_descriptors_i ({15'd0, comp_underrun_sync1}),
 
     .ring_head_i    (fetcher_ring_head),
     .fence_value_i  (fetcher_fence_value),
@@ -694,7 +708,8 @@ blit_engine u_blit_engine (
     .ddram_din_o        (blit_din),
     .ddram_we_o         (blit_we),
     .ddram_rd_o         (blit_rd),
-    .ddram_busy_i       (DDRAM_BUSY),
+    // Scanout backpressure ORed in — see scanout_pressure_s above.
+    .ddram_busy_i       (DDRAM_BUSY | scanout_pressure_s),
     .ddram_dout_i       (DDRAM_DOUT),
     .ddram_dout_valid_i (blit_dout_valid)
 );
@@ -772,7 +787,8 @@ blit_engine u_blit_engine_1 (
     .ddram_din_o        (blit1_din),
     .ddram_we_o         (blit1_we),
     .ddram_rd_o         (blit1_rd),
-    .ddram_busy_i       (DDRAM2_BUSY),
+    // Scanout backpressure ORed in — see scanout_pressure_s above.
+    .ddram_busy_i       (DDRAM2_BUSY | scanout_pressure_s),
     .ddram_dout_i       (DDRAM2_DOUT),
     .ddram_dout_valid_i (DDRAM2_DOUT_READY)
 );

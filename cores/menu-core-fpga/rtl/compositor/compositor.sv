@@ -124,7 +124,10 @@ module compositor #(
 
     // Underrun diagnostics (avl_clk domain): count of mid-frame events
     // where the beam overtook the producer (stale-line display).
-    output logic [15:0]         underrun_cnt_o
+    output logic [15:0]         underrun_cnt_o,
+    // Blit backpressure: high while the producer's read-ahead is low
+    // mid-frame (avl_clk domain; see the pressure block below).
+    output logic                scanout_pressure_o
 );
 
     // ---- Derived timing ----------------------------------------------
@@ -774,6 +777,30 @@ module compositor #(
 
     wire prod_ahead_ok = ((prod_line - cons_line_a) < LINE_BUFS[11:0]);
     wire prod_more     = (prod_line < V_ACTIVE[11:0]);
+
+    // ---- Scanout pressure (blit backpressure) ---------------------
+    // Asserted while the producer's read-ahead is low mid-frame; the
+    // core ORs this into the blit engines' DDR busy inputs so they
+    // stop accepting new command/data beats until the ring refills.
+    // Priority on the MPFE alone cannot prevent underruns when the
+    // total DDR demand oversubscribes the device — a sustained blit
+    // burst degrades scanout throughput below the 6-line ring's
+    // tolerance and the beam displays stale ring lines (measured: 41
+    // underrun events in one interactive session, each a visible
+    // one-frame smear). With the blitters yielding at <3 lines of
+    // headroom (resuming at >=4 — hysteresis so the gate doesn't
+    // chatter), the producer refills within a couple of line times
+    // and blits stretch by microseconds instead. Deasserted outside
+    // the active frame: blits run free through vblank.
+    logic scanout_pressure_q;
+    wire [11:0] prod_ahead_lines = prod_line - cons_line_a;
+    always_ff @(posedge avl_clk or negedge avl_rst_n) begin
+        if (!avl_rst_n)                          scanout_pressure_q <= 1'b0;
+        else if (!prod_more)                     scanout_pressure_q <= 1'b0;
+        else if (prod_ahead_lines < 12'd3)       scanout_pressure_q <= 1'b1;
+        else if (prod_ahead_lines >= 12'd4)      scanout_pressure_q <= 1'b0;
+    end
+    assign scanout_pressure_o = scanout_pressure_q;
 
     // Avalon read in flight (request asserted or beats still due).
     // frame_start is deferred while this holds — see the producer FSM.

@@ -467,37 +467,16 @@ fn engine_main(
 
         let t_paint_start = Instant::now();
 
-        // Per-slot skip: this FB already holds exactly this scene,
-        // there is no glyph work to flush, and no plane surface needs
-        // re-rendering. (Pure plane MOVES take this path — their
-        // register writes already happened above.)
-        if render_trusted
-            && pendings.is_empty()
-            && !plane_render
-            && scene_hash_per_fb[render_idx] == Some(pkt.scene_hash)
-        {
-            accumulate_ui(&pkt, &mut t_jobs, &mut t_input, &mut t_text_prep,
-                          &mut t_images, &mut t_text_pop, &mut t_layout, &mut t_scene);
-            t_ensure += ensure_dt;
-            t_fence += fence_dt;
-            continue;
-        }
-
-        let current_scene = pkt.dl.to_scene();
-
-        // ---- Paint ---------------------------------------------------
-        let frame = device.begin_frame();
-        let frame = {
-            let fonts = caches.fonts.lock().unwrap();
-            crate::paint::render_pending_text(frame, &pendings, &fonts)?
-        };
-
-        // ---- Plane surface re-render (plane-local damage) -----------
+        // ---- Plane surface re-render: OWN submission + fence --------
         // Same damage machinery as the FB path, but the target is the
-        // plane's BACK surface (the scanout reads the front; the flip
-        // happens at this render's fence — see the loop top). Each
-        // surface diffs against its own last-rendered scene.
-        let frame = if plane_render
+        // plane's BACK surface and the submission carries NO PRESENT:
+        // its fence fires when the blits complete (a few ms), not
+        // after present/vsync — so the flip (and therefore the tween
+        // cadence during animations) is decoupled from the display
+        // frame rate. Ring execution is FIFO, so the pending-text
+        // renders here are also visible to the content replay below.
+        let mut texts_rendered = false;
+        if plane_render
             && let (Some(p), Some(hw)) = (plane_pkt, plane_hw.as_mut())
         {
             let new_scene = p.dl.to_scene();
@@ -505,7 +484,13 @@ fn engine_main(
                 Some(prev) => Some(damage::compute_damage(prev, &new_scene)),
                 None => None, // fresh surface → full render
             };
-            let mut f = frame.set_target(&hw.tex[plane_back])?;
+            let pf = device.begin_frame();
+            let pf = {
+                let fonts = caches.fonts.lock().unwrap();
+                crate::paint::render_pending_text(pf, &pendings, &fonts)?
+            };
+            texts_rendered = true;
+            let mut f = pf.set_target(&hw.tex[plane_back])?;
             {
                 let text_cache_l = caches.text_cache.lock().unwrap();
                 match plan {
@@ -524,11 +509,41 @@ fn engine_main(
                     }
                 }
             }
+            let ptok = f.submit()?;
             hw.scene[plane_back] = Some(new_scene);
             hw.hash[plane_back] = Some(p.scene_hash);
-            f
-        } else {
+            hw.flip_after = Some(PendingFlip {
+                fence: ptok.fence_value(),
+                idx: plane_back,
+                x: p.x,
+                y: p.y,
+            });
+        }
+
+        // Per-slot skip: this FB already holds exactly this scene and
+        // there is no glyph work to flush. Plane-only packets (moves
+        // AND content re-renders — submitted above) take this path
+        // without touching the content framebuffer.
+        if render_trusted
+            && pendings.is_empty()
+            && scene_hash_per_fb[render_idx] == Some(pkt.scene_hash)
+        {
+            accumulate_ui(&pkt, &mut t_jobs, &mut t_input, &mut t_text_prep,
+                          &mut t_images, &mut t_text_pop, &mut t_layout, &mut t_scene);
+            t_ensure += ensure_dt;
+            t_fence += fence_dt;
+            continue;
+        }
+
+        let current_scene = pkt.dl.to_scene();
+
+        // ---- Paint ---------------------------------------------------
+        let frame = device.begin_frame();
+        let frame = if texts_rendered {
             frame
+        } else {
+            let fonts = caches.fonts.lock().unwrap();
+            crate::paint::render_pending_text(frame, &pendings, &fonts)?
         };
 
         let frame = frame.set_target_framebuffer()?;
@@ -584,20 +599,6 @@ fn engine_main(
 
         let new_token = frame.present()?.submit()?;
         pending_fences.push_back((new_token.fence_value(), Instant::now()));
-
-        // Plane render just submitted → flip to the back surface (with
-        // its matching position) once the fence lands (loop top).
-        // Re-renders into a still-pending back advance the fence.
-        if plane_render
-            && let (Some(p), Some(hw)) = (plane_pkt, plane_hw.as_mut())
-        {
-            hw.flip_after = Some(PendingFlip {
-                fence: new_token.fence_value(),
-                idx: plane_back,
-                x: p.x,
-                y: p.y,
-            });
-        }
 
         // ---- Content coverage mask (unchanged policy) ----------------
         if cfg.content_mask_on {

@@ -770,13 +770,18 @@ wire         bob_deint;
 		.boxart_h       (comp_bx_size_s1[27:16]),
 		.boxart_stride  (comp_bx_stride_s1),
 		.boxart_en      (comp_bx_en_s[1]),
-		.underrun_cnt_o (comp_underrun_cnt)
+		.underrun_cnt_o (comp_underrun_cnt),
+		.scanout_pressure_o (comp_scanout_pressure)
 	);
 `endif
 
 // Scanout underrun counter (clk_100m domain) routed back into the
 // core for host diagnostics via LAYER_DEBUG.
 wire [15:0] comp_underrun_cnt;
+// Blit backpressure: producer read-ahead low (clk_100m domain). The
+// core syncs it to clk_sys and stalls NEW blit DDR beats while high,
+// so scanout fetch always wins under total DDR oversubscription.
+wire comp_scanout_pressure;
 
 reg        LFB_EN     = 0;
 reg        LFB_FLT    = 0;
@@ -1752,6 +1757,7 @@ emu emu
 	.COMP_BOXART_STRIDE(comp_boxart_stride),
 	.COMP_BOXART_EN(comp_boxart_en),
 	.COMP_UNDERRUN(comp_underrun_cnt),
+	.SCANOUT_PRESSURE(comp_scanout_pressure),
 
 `ifdef MISTER_FB
 	.FB_EN(fb_en),
