@@ -1,1 +1,2 @@
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) blit_engine.sv]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) blit_pressure_gate.sv]

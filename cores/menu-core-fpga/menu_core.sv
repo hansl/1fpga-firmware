@@ -193,10 +193,10 @@ assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
 // u_blit_engine_1). No arbiter — engine1 is the sole consumer.
 assign DDRAM2_ADDR     = blit1_addr;
 assign DDRAM2_BURSTCNT = blit1_burstcnt;
-assign DDRAM2_RD       = blit1_rd;
+assign DDRAM2_RD       = blit1_rd_g;   // via u_blit1_gate (backpressure)
 assign DDRAM2_DIN      = blit1_din;
 assign DDRAM2_BE       = blit1_be;
-assign DDRAM2_WE       = blit1_we;
+assign DDRAM2_WE       = blit1_we_g;   // via u_blit1_gate (backpressure)
 assign {SDRAM_DQ, SDRAM_A, SDRAM_BA, SDRAM_CLK, SDRAM_CKE, SDRAM_DQML, SDRAM_DQMH, SDRAM_nWE, SDRAM_nCAS, SDRAM_nRAS, SDRAM_nCS} = 'Z;
 // DDRAM_* is driven by the M2b ring fetcher (see instantiation below).
 assign DDRAM_CLK = clk_sys;
@@ -406,14 +406,16 @@ always_ff @(posedge clk_sys) begin
 end
 
 // Blit backpressure: while the scanout producer is low on read-ahead
-// (level signal, hysteretic in the compositor), both blit engines see
-// DDR busy — no NEW commands or write beats are accepted; in-flight
-// read responses still land, and a stalled write burst legally holds
-// its data until busy drops. The ring FETCHER stays ungated so
-// command fetch keeps work queued for when pressure lifts. This is
-// what makes scanout underruns structurally impossible under total
-// DDR oversubscription — MPFE priority alone cannot guarantee the
-// producer's throughput once the blitters saturate the device.
+// (level signal, hysteretic in the compositor), both blit engines
+// stop issuing NEW DDR commands; in-flight write bursts complete and
+// read responses land. Gating goes through blit_pressure_gate — NOT
+// a bare OR into the engines' busy inputs, which desynced the
+// command/response accounting and wedged the fetcher (see the gate's
+// header). The ring FETCHER stays ungated so command fetch keeps
+// work queued for when pressure lifts. This is what makes scanout
+// underruns structurally impossible under total DDR oversubscription
+// — MPFE priority alone cannot guarantee the producer's throughput
+// once the blitters saturate the device.
 wire scanout_pressure_s = comp_underrun_sync1[16];
 
 // CONTROL.CE (clear-error pulse) re-arms the fetcher: it leaves S_HALT
@@ -708,10 +710,26 @@ blit_engine u_blit_engine (
     .ddram_din_o        (blit_din),
     .ddram_we_o         (blit_we),
     .ddram_rd_o         (blit_rd),
-    // Scanout backpressure ORed in — see scanout_pressure_s above.
-    .ddram_busy_i       (DDRAM_BUSY | scanout_pressure_s),
+    .ddram_busy_i       (blit0_busy_gated),
     .ddram_dout_i       (DDRAM_DOUT),
     .ddram_dout_valid_i (blit_dout_valid)
+);
+
+// Scanout-backpressure gate for engine0 (sits between the engine and
+// the ram1 arbiter mux below; the fetcher shares ram1 but is exempt
+// by design — it parks in S_BLIT_WAIT during blits anyway).
+wire blit0_busy_gated, blit_rd_g, blit_we_g;
+blit_pressure_gate u_blit0_gate (
+    .clk            (clk_sys),
+    .rst_n          (engine_rst_n),
+    .pressure_i     (scanout_pressure_s),
+    .eng_rd_i       (blit_rd),
+    .eng_we_i       (blit_we),
+    .eng_burstcnt_i (blit_burstcnt),
+    .eng_busy_o     (blit0_busy_gated),
+    .port_rd_o      (blit_rd_g),
+    .port_we_o      (blit_we_g),
+    .port_busy_i    (DDRAM_BUSY)
 );
 
 ////////////////////////////////////////////////////////////////////////////
@@ -787,10 +805,24 @@ blit_engine u_blit_engine_1 (
     .ddram_din_o        (blit1_din),
     .ddram_we_o         (blit1_we),
     .ddram_rd_o         (blit1_rd),
-    // Scanout backpressure ORed in — see scanout_pressure_s above.
-    .ddram_busy_i       (DDRAM2_BUSY | scanout_pressure_s),
+    .ddram_busy_i       (blit1_busy_gated),
     .ddram_dout_i       (DDRAM2_DOUT),
     .ddram_dout_valid_i (DDRAM2_DOUT_READY)
+);
+
+// Scanout-backpressure gate for engine1 (sole consumer of ram2).
+wire blit1_busy_gated, blit1_rd_g, blit1_we_g;
+blit_pressure_gate u_blit1_gate (
+    .clk            (clk_sys),
+    .rst_n          (engine_rst_n),
+    .pressure_i     (scanout_pressure_s),
+    .eng_rd_i       (blit1_rd),
+    .eng_we_i       (blit1_we),
+    .eng_burstcnt_i (blit1_burstcnt),
+    .eng_busy_o     (blit1_busy_gated),
+    .port_rd_o      (blit1_rd_g),
+    .port_we_o      (blit1_we_g),
+    .port_busy_i    (DDRAM2_BUSY)
 );
 
 // Layer registers are not consumed in this core half yet — the multi-layer
@@ -863,10 +895,10 @@ assign DDRAM_BE       = blit_owns_bus  ? blit_be
                       : fetch_owns_bus ? fetch_be
                       : 8'd0;
 assign DDRAM_DIN      = blit_owns_bus ? blit_din : 64'd0;
-assign DDRAM_RD       = blit_owns_bus  ? blit_rd
+assign DDRAM_RD       = blit_owns_bus  ? blit_rd_g
                       : fetch_owns_bus ? fetch_rd
                       : 1'b0;
-assign DDRAM_WE       = blit_owns_bus ? blit_we : 1'b0;
+assign DDRAM_WE       = blit_owns_bus ? blit_we_g : 1'b0;
 
 // reg_ring_kick is currently advisory — the fetcher polls RING_TAIL
 // every cycle anyway. Wire-suppress to avoid unused warnings until
