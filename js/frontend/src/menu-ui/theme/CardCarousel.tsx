@@ -109,7 +109,11 @@ const Card = memo(function Card({
         opacity: selected ? 1.0 : 0.55,
       }}
     >
-      {/* Selection ring — kept mounted, visibility via colour. */}
+      {/* Selection ring — the card body's PARENT, not a sibling: the
+          host's pristine-dst (dst_clear) chain then knows the body
+          paints OVER the ring and blends it correctly, while an
+          unselected ring (transparent, skipped) leaves the body on
+          the pristine fast path (opaque burst write). */}
       <div
         style={{
           position: 'absolute',
@@ -119,20 +123,20 @@ const Card = memo(function Card({
           height: CARD_H + s(10),
           backgroundColor: selected ? '#ffffffe0' : '#00000000',
         }}
-      />
-      <div
-        style={{
-          position: 'absolute',
-          left: 0,
-          top: 0,
-          width: CARD_W,
-          height: CARD_H,
-          backgroundColor: '#131d29e6',
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-        }}
       >
+        <div
+          style={{
+            position: 'absolute',
+            left: s(5),
+            top: s(5),
+            width: CARD_W,
+            height: CARD_H,
+            backgroundColor: '#131d29e6',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+          }}
+        >
         <div
           style={{
             width: CARD_W,
@@ -148,9 +152,10 @@ const Card = memo(function Card({
             <Icon name={glyphFor(system.tag)} size={s(110)} color="#5f7a90" />
           )}
         </div>
-        <div style={{ fontSize: s(26), color: '#e8f0f8' }}>{system.name}</div>
-        <div style={{ fontSize: s(18), color: '#7e8ea0', marginTop: s(6) }}>
-          {system.gamesPath ? 'games' : system.tag}
+          <div style={{ fontSize: s(26), color: '#e8f0f8' }}>{system.name}</div>
+          <div style={{ fontSize: s(18), color: '#7e8ea0', marginTop: s(6) }}>
+            {system.gamesPath ? 'games' : system.tag}
+          </div>
         </div>
       </div>
     </div>
@@ -206,7 +211,16 @@ export const CardCarousel = memo(function CardCarousel({
   // left and moves back and forth").
   const targetLeft = CENTRE_X - (selected + 0.5) * SLOT;
   const ref = useRef<gui.NodeId | null>(null);
-  useTween(ref, { translateX: targetLeft }, { duration: 260, easing: 'easeOut' });
+  // snapBeyond bounds re-target lag: a re-targeted ease glides FROM
+  // the current value, so held key-repeat used to leave the strip
+  // arbitrarily far behind the selection (ring off-screen), then
+  // catch up in one big slide on release. Capped at one slot, the
+  // strip tracks any repeat rate and still settles smoothly.
+  useTween(
+    ref,
+    { translateX: targetLeft },
+    { duration: 260, easing: 'easeOut', snapBeyond: SLOT },
+  );
 
   const hi = Math.min(systems.length - 1, base + PLANE_SLOTS - 1);
   const visible: Array<{ system: SystemCard; slot: number }> = [];

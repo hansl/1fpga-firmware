@@ -402,7 +402,31 @@ fn walk(
                     color.to_u32().hash(&mut h);
                     bbox.hash(&mut h);
                     opacity_u8.hash(&mut h);
-                    let (effective_color, blend) = apply_opacity_to_color(color, opacity_u8);
+                    // Over the pristine transparent clear, SrcAlpha of
+                    // a premultiplied source against dst=0 IS the
+                    // source — write it Opaque and skip the per-pixel
+                    // dst read. Same policy Text/Copy below already
+                    // apply; the child_dst_clear chain guarantees
+                    // correctness (anything painting over pixels a
+                    // parent already filled has lost the flag). The
+                    // stored premultiplied rgb+alpha is exactly what
+                    // the scanout's plane/content blend consumes —
+                    // note this premultiplies even at full opacity
+                    // (apply_opacity_to_color's Opaque branch keeps
+                    // straight rgb, which over-brightens sub-FF-alpha
+                    // fills at composite). This is what keeps a full
+                    // plane re-render (11 translucent card bodies) at
+                    // burst-write speed instead of ~30 ms of RMW.
+                    let (effective_color, blend) = if dst_clear {
+                        let eff_a = ((color.a as u16) * (opacity_u8 as u16) / 255) as u8;
+                        let pre = |c: u8| ((c as u16) * (eff_a as u16) / 255) as u8;
+                        (
+                            Rgba::new(pre(color.r), pre(color.g), pre(color.b), eff_a),
+                            BlendMode::Opaque,
+                        )
+                    } else {
+                        apply_opacity_to_color(color, opacity_u8)
+                    };
                     // Skip the fill op (not the damage item) when it
                     // cannot change pixels: effective alpha 0 (CSS
                     // transparent paints NOTHING — an Opaque fill of
@@ -464,8 +488,11 @@ fn walk(
                         // Color is baked into the RT. Over the pristine
                         // transparent clear an Opaque copy is pixel-
                         // identical to SrcAlpha (premultiplied src over
-                        // transparent) and skips the per-pixel dst read.
-                        blend: if dst_clear && opacity_u8 == 0xFF {
+                        // transparent) and skips the per-pixel dst read
+                        // — including when an opacity tint applies (the
+                        // tint multiplies the premultiplied source; the
+                        // dst contributes nothing against transparent).
+                        blend: if dst_clear {
                             BlendMode::Opaque
                         } else {
                             BlendMode::SrcAlpha
@@ -602,7 +629,10 @@ fn build_img_op(
     let sw = ((visible.w as f32 * rx).round().max(1.0) as u16).min(src_w - sx0);
     let sh = ((visible.h as f32 * ry).round().max(1.0) as u16).min(src_h - sy0);
     let dst = Rect::new(visible.x, visible.y, visible.w, visible.h);
-    let blend = if (dst_clear || fully_opaque) && opacity_u8 == 0xFF {
+    // Opaque when the pixels can't need blending (opaque src at full
+    // opacity) or can't have anything to blend WITH (pristine dst —
+    // the tint still applies on the Opaque path).
+    let blend = if dst_clear || (fully_opaque && opacity_u8 == 0xFF) {
         BlendMode::Opaque
     } else {
         BlendMode::SrcAlpha
@@ -840,14 +870,21 @@ pub fn has_opaque_covering_child(
     false
 }
 
-/// Apply opacity to a solid fill colour (premultiplied SrcAlpha when
-/// translucent). Moved verbatim from `paint.rs`.
+/// Apply opacity to a solid fill colour: opaque results write
+/// directly, anything translucent premultiplies and blends. Keyed on
+/// the EFFECTIVE alpha (colour alpha × opacity) — the old version
+/// keyed on opacity alone, so a full-opacity translucent colour
+/// (`#131d29e6`) was written Opaque with straight rgb: it stomped
+/// whatever it painted over instead of blending, and composited
+/// over-bright at scanout. (Fills over the pristine clear don't reach
+/// this — the dst_clear fast path in `walk` premultiplies + writes
+/// Opaque, which against transparent IS the blend.)
 #[inline]
 fn apply_opacity_to_color(color: Rgba, opacity_u8: u8) -> (Rgba, BlendMode) {
-    if opacity_u8 == 0xFF {
+    let eff_a = ((color.a as u16) * (opacity_u8 as u16) / 255) as u8;
+    if eff_a == 0xFF {
         (color, BlendMode::Opaque)
     } else {
-        let eff_a = ((color.a as u16) * (opacity_u8 as u16) / 255) as u8;
         let pre = |c: u8| ((c as u16) * (eff_a as u16) / 255) as u8;
         (
             Rgba::new(pre(color.r), pre(color.g), pre(color.b), eff_a),
@@ -1109,6 +1146,72 @@ mod tests {
             (450, 50),
             "poking child trimmed at the window edge"
         );
+    }
+
+    /// Translucent fills over the pristine transparent clear write
+    /// PREMULTIPLIED pixels with an Opaque burst (no dst read);
+    /// children of a filled parent lose the flag and blend.
+    #[test]
+    fn pristine_fill_is_premultiplied_opaque() {
+        let mut tree = Tree::new();
+        let root = tree.create(NodeKind::Div, Style::default());
+        let panel = tree.create(
+            NodeKind::Div,
+            Style {
+                // #40404080: straight rgb 64, alpha 128.
+                background_color: Some(Rgba::new(64, 64, 64, 128)),
+                ..Default::default()
+            },
+        );
+        let inner = tree.create(
+            NodeKind::Div,
+            Style {
+                background_color: Some(Rgba::new(200, 200, 200, 128)),
+                ..Default::default()
+            },
+        );
+        tree.append_child(root, panel);
+        tree.append_child(panel, inner);
+
+        let mut layouts = HashMap::new();
+        let lay = |x, y, w, h| ComputedLayout { x, y, w, h };
+        layouts.insert(root, lay(0.0, 0.0, 1920.0, 1080.0));
+        layouts.insert(panel, lay(100.0, 100.0, 400.0, 200.0));
+        layouts.insert(inner, lay(120.0, 120.0, 100.0, 50.0));
+
+        let out = build(
+            &tree,
+            root,
+            &fb(),
+            &layouts,
+            &HashMap::new(),
+            &TextCache::new(),
+            &ImageRegistry::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            true, // compositing → pristine transparent clear
+        );
+        let dl = out.content;
+        assert_eq!(dl.entries.len(), 2);
+        match dl.entries[0].op.as_ref().expect("panel paints") {
+            DrawOp::Fill { color, blend, .. } => {
+                assert_eq!(*blend, BlendMode::Opaque, "pristine fill skips dst reads");
+                // Premultiplied: 64 * 128/255 ≈ 32.
+                assert_eq!(color.a, 128);
+                assert!(color.r <= 33 && color.r >= 31, "rgb premultiplied, got {}", color.r);
+            }
+            other => panic!("expected Fill, got {other:?}"),
+        }
+        match dl.entries[1].op.as_ref().expect("inner paints") {
+            DrawOp::Fill { blend, .. } => {
+                assert_eq!(
+                    *blend,
+                    BlendMode::SrcAlpha,
+                    "child over the parent's fill must blend"
+                );
+            }
+            other => panic!("expected Fill, got {other:?}"),
+        }
     }
 
     /// `layer`-marked subtrees partition out of the content list into

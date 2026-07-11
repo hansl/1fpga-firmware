@@ -421,6 +421,7 @@ fn start_tween(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
     // ---- Parse opts -----------------------------------------------
     let mut duration_ms: f64 = 200.0;
     let mut easing = Easing::EaseOut;
+    let mut snap_beyond: Option<f32> = None;
     if let Some(o) = opts_val.as_object() {
         let d = o.get(js_string!("duration"), context)?;
         if !d.is_undefined() {
@@ -432,6 +433,14 @@ fn start_tween(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
             && let Some(parsed) = Easing::from_str(&s)
         {
             easing = parsed;
+        }
+        // Bounded re-target lag (see AnimationManager::start).
+        let sb = o.get(js_string!("snapBeyond"), context)?;
+        if !sb.is_undefined() {
+            let v = sb.to_number(context)? as f32;
+            if v.is_finite() && v > 0.0 {
+                snap_beyond = Some(v);
+            }
         }
     }
     let duration = Duration::from_secs_f64((duration_ms / 1000.0).max(0.0));
@@ -456,8 +465,8 @@ fn start_tween(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
     let scale_uniform = target_obj.get(js_string!("scale"), context)?;
     if !scale_uniform.is_undefined() && !scale_uniform.is_null() {
         let v = scale_uniform.to_number(context)? as f32;
-        mgr.start(&state, id, TweenProp::ScaleX, v, duration, easing);
-        mgr.start(&state, id, TweenProp::ScaleY, v, duration, easing);
+        mgr.start(&state, id, TweenProp::ScaleX, v, duration, easing, snap_beyond);
+        mgr.start(&state, id, TweenProp::ScaleY, v, duration, easing, snap_beyond);
     }
 
     // We only iterate the known props rather than enumerating every
@@ -484,7 +493,7 @@ fn start_tween(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
             Some(p) => p,
             None => continue,
         };
-        mgr.start(&state, id, prop, target_value, duration, easing);
+        mgr.start(&state, id, prop, target_value, duration, easing, snap_beyond);
     }
     Ok(JsValue::undefined())
 }

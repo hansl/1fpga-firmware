@@ -166,6 +166,15 @@ declare module '1fpga:gui' {
     duration?: number;
     /** Easing curve. Defaults to `'easeOut'`. */
     easing?: Easing;
+    /**
+     * Bounded re-target lag: when a re-target leaves the current
+     * value further than this from the new target, the tween snaps
+     * to this distance and glides the rest. Without it, a re-targeted
+     * ease glides FROM the current value, so rapid re-targets (held
+     * key-repeat) fall arbitrarily far behind and catch up in one
+     * big slide when input stops. Unset = unbounded (old behaviour).
+     */
+    snapBeyond?: number;
   }
 
   /**

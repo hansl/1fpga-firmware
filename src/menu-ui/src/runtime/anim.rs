@@ -217,6 +217,7 @@ impl AnimationManager {
     /// new target. First-ever tween for a (node, prop) reads
     /// `style.x` directly (good enough — there's nothing to animate
     /// from yet).
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         &self,
         ui_state: &UiState,
@@ -225,14 +226,30 @@ impl AnimationManager {
         to: f32,
         duration: Duration,
         easing: Easing,
+        snap_beyond: Option<f32>,
     ) {
         let mut inner = self.inner.borrow_mut();
-        let from = match inner.last_values.get(&(node_id, prop)).copied() {
+        let mut from = match inner.last_values.get(&(node_id, prop)).copied() {
             Some(v) => v,
             None => ui_state.with_tree(|t| {
                 t.get(node_id).map(|n| prop.read(&n.style)).unwrap_or(0.0)
             }),
         };
+        // Bounded re-target lag. A re-targeted ease glides FROM the
+        // current value, so under held key-repeat the value covers
+        // only a fraction of each step and falls arbitrarily far
+        // behind the target — the carousel strip visibly trailed the
+        // selection off-screen, then caught up in one big slide when
+        // input stopped. `snapBeyond` caps the glide distance: when
+        // the retarget leaves `from` further than this from `to`, snap
+        // to that distance and glide the rest. The animation stays
+        // smooth per step but can never lag more than the cap.
+        if let Some(sb) = snap_beyond
+            && sb > 0.0
+            && (to - from).abs() > sb
+        {
+            from = if to > from { to - sb } else { to + sb };
+        }
         if duration.is_zero() || (from - to).abs() < f32::EPSILON {
             // Degenerate (zero duration) or no-op (same value): just
             // apply and skip the tween. Still record `to` as the
