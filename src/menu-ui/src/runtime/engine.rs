@@ -171,6 +171,14 @@ fn engine_main(
         y: i32,
         enabled: bool,
         flip_after: Option<PendingFlip>,
+        /// A flip's base-register write only takes effect at the
+        /// compositor's NEXT per-frame config latch — for up to a
+        /// scanout frame the beam keeps reading the OLD front. The
+        /// old front (the new back) must therefore not be rendered
+        /// into until VSYNC_COUNT passes this value, or the beam
+        /// photographs a mid-replay surface: ring-only cards, cleared
+        /// neighbours — HW test 11's one-frame white-card flashes.
+        back_unsafe_until: Option<u32>,
     }
     let mut plane_hw: Option<PlaneHw> = None;
 
@@ -276,6 +284,9 @@ fn engine_main(
             }
             hw.front = idx;
             hw.flip_after = None;
+            // The freed buffer stays on-beam until the next config
+            // latch — see back_unsafe_until.
+            hw.back_unsafe_until = Some(device.vsync_count().wrapping_add(1));
             if !hw.enabled {
                 device.set_plane_enabled(true);
                 hw.enabled = true;
@@ -331,6 +342,7 @@ fn engine_main(
                                 y: i32::MIN,
                                 enabled: false,
                                 flip_after: None,
+                                back_unsafe_until: None,
                             });
                         }
                         Err(e) => {
@@ -372,6 +384,8 @@ fn engine_main(
                             tracing::error!("plane flip failed: {e}");
                         }
                         hw.front = fl.idx;
+                        hw.back_unsafe_until =
+                            Some(device.vsync_count().wrapping_add(1));
                         if !hw.enabled {
                             device.set_plane_enabled(true);
                             hw.enabled = true;
@@ -543,6 +557,23 @@ fn engine_main(
                 plane_pos_regs(&mut device, p.x, p.y);
                 hw.x = p.x;
                 hw.y = p.y;
+            }
+            // Vsync gate: the surface we are about to render into may
+            // still be ON-BEAM (a flip's base write only latches at
+            // the next scanout frame). Wait for the counter to pass
+            // the flip's mark — at most one display frame, and it
+            // correctly caps plane updates at the display rate.
+            if let Some(target) = hw.back_unsafe_until.take() {
+                let start = Instant::now();
+                while (device.vsync_count().wrapping_sub(target) as i32) < 0 {
+                    if start.elapsed() > Duration::from_millis(40) {
+                        tracing::warn!(
+                            "vsync gate timed out (target {target}); rendering anyway"
+                        );
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_micros(300));
+                }
             }
             let pf = device.begin_frame();
             let pf = {

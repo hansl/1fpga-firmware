@@ -1102,6 +1102,17 @@ impl Device {
         self.regs.read32(registers::FRAME_COUNT)
     }
 
+    /// Read `VSYNC_COUNT`: increments every display vblank, with or
+    /// without a present. This is the clock for scanout-latch
+    /// visibility: a register written during frame N is latched by
+    /// the compositor's per-frame config latch no later than the
+    /// vblank that ends N — once the counter advances past the write,
+    /// the old value is provably off-beam.
+    #[inline]
+    pub fn vsync_count(&self) -> u32 {
+        self.regs.read32(registers::VSYNC_COUNT)
+    }
+
     /// Decoded snapshot of `FB_STATE`.
     #[inline]
     pub fn fb_state(&self) -> FbState {
