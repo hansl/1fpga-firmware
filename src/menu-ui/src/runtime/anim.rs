@@ -191,7 +191,13 @@ struct Tween {
 
 impl Tween {
     /// Advance to `now` and return `(current_value, done)`.
-    fn advance(&mut self, now: Instant) -> (f32, bool) {
+    /// `eps` is the per-property done threshold: below it the value
+    /// snaps to the target and the tween retires. It must sit UNDER
+    /// the property's paint quantum (1/255 for opacity, ~half a pixel
+    /// for offsets) so the final snap is invisible — but not so far
+    /// under that the follower's exponential tail churns the scene
+    /// hash for a second producing no visible change.
+    fn advance(&mut self, now: Instant, eps: f32) -> (f32, bool) {
         if matches!(self.easing, Easing::Follow) {
             // Exponential approach: value += (to - value) * (1 - e^(-dt/tau)).
             let dt = now.duration_since(self.last).as_secs_f32();
@@ -199,9 +205,7 @@ impl Tween {
             let tau = self.duration.as_secs_f32().max(0.001);
             let k = 1.0 - (-dt / tau).exp();
             self.value += (self.to - self.value) * k;
-            // Done when visually indistinguishable from the target
-            // (sub-pixel and sub-1% opacity alike).
-            if (self.to - self.value).abs() < 0.05 {
+            if (self.to - self.value).abs() < eps {
                 self.value = self.to;
                 return (self.to, true);
             }
@@ -341,7 +345,14 @@ impl AnimationManager {
                 .tweens
                 .iter_mut()
                 .map(|(&key, tween)| {
-                    let (value, done) = tween.advance(now);
+                    // Done threshold under the property's paint
+                    // quantum: opacity/scale quantise at ~1/255,
+                    // offsets at whole pixels.
+                    let eps = match key.1 {
+                        TweenProp::Opacity | TweenProp::ScaleX | TweenProp::ScaleY => 0.003,
+                        _ => 0.4,
+                    };
+                    let (value, done) = tween.advance(now, eps);
                     (key, value, done)
                 })
                 .collect()

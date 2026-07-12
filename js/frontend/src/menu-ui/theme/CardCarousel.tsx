@@ -83,17 +83,31 @@ const Card = memo(function Card({
   selected: boolean;
 }) {
   const ref = useRef<gui.NodeId | null>(null);
+  const ringRef = useRef<gui.NodeId | null>(null);
   // Selection emphasis is a translateY lift + opacity + ring — NOT a
-  // scale. A scale tween puts every texture and text inside the card
-  // through the FPGA's scale-mode copy path (per-pixel round trips,
-  // the one path the burst blitter doesn't cover) on EVERY tween
-  // frame; measured at ~340 ms/frame across a 7-card band. Translate
-  // keeps all copies 1:1 on the burst path. Scale can return when
-  // scaled blits ride the affine engine's staged path.
+  // scale (scale-mode copies are the slow blit path). All three ride
+  // 'follow' tweens: under held key-repeat the emphasis re-targets
+  // every step, and restarted timed eases (plus latest-wins frame
+  // dropping) turned each step into a near-binary POP — two bright
+  // blinks per step at repeat rate read as flicker even with the
+  // strip itself gliding smoothly (HW test 10's diff maps: labels
+  // doubled ~30 px apart, ring rectangles a full card apart).
+  // Followers blend re-targets mid-flight: the ring cross-fades
+  // between cards, the lift/dim glide continuously.
   useTween(
     ref,
     { translateY: selected ? -LIFT : 0, opacity: selected ? 1.0 : 0.55 },
-    { duration: 200, easing: 'easeOut' },
+    { duration: 90, easing: 'follow' },
+  );
+  // Ring: constant white fill, SELECTION EXPRESSED AS OPACITY so the
+  // follower can fade it. Faded out, its effective alpha is 0 and the
+  // host skips the fill op entirely (zero-alpha skip) — an invisible
+  // ring costs nothing. A sibling (not the body's parent) so its
+  // opacity doesn't multiply into the card content.
+  useTween(
+    ringRef,
+    { opacity: selected ? 0.88 : 0.0 },
+    { duration: 90, easing: 'follow' },
   );
   const art = artFor(system.uniqueName);
   return (
@@ -109,34 +123,31 @@ const Card = memo(function Card({
         opacity: selected ? 1.0 : 0.55,
       }}
     >
-      {/* Selection ring — the card body's PARENT, not a sibling: the
-          host's pristine-dst (dst_clear) chain then knows the body
-          paints OVER the ring and blends it correctly, while an
-          unselected ring (transparent, skipped) leaves the body on
-          the pristine fast path (opaque burst write). */}
       <div
+        ref={ringRef}
         style={{
           position: 'absolute',
           left: -s(5),
           top: -s(5),
           width: CARD_W + s(10),
           height: CARD_H + s(10),
-          backgroundColor: selected ? '#ffffffe0' : '#00000000',
+          backgroundColor: '#ffffff',
+          opacity: selected ? 0.88 : 0.0,
+        }}
+      />
+      <div
+        style={{
+          position: 'absolute',
+          left: 0,
+          top: 0,
+          width: CARD_W,
+          height: CARD_H,
+          backgroundColor: '#131d29e6',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
         }}
       >
-        <div
-          style={{
-            position: 'absolute',
-            left: s(5),
-            top: s(5),
-            width: CARD_W,
-            height: CARD_H,
-            backgroundColor: '#131d29e6',
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-          }}
-        >
         <div
           style={{
             width: CARD_W,
@@ -152,10 +163,9 @@ const Card = memo(function Card({
             <Icon name={glyphFor(system.tag)} size={s(110)} color="#5f7a90" />
           )}
         </div>
-          <div style={{ fontSize: s(26), color: '#e8f0f8' }}>{system.name}</div>
-          <div style={{ fontSize: s(18), color: '#7e8ea0', marginTop: s(6) }}>
-            {system.gamesPath ? 'games' : system.tag}
-          </div>
+        <div style={{ fontSize: s(26), color: '#e8f0f8' }}>{system.name}</div>
+        <div style={{ fontSize: s(18), color: '#7e8ea0', marginTop: s(6) }}>
+          {system.gamesPath ? 'games' : system.tag}
         </div>
       </div>
     </div>
