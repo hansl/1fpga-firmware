@@ -704,6 +704,7 @@ wire         bob_deint;
 	reg [31:0] comp_bx_pos_s0,    comp_bx_pos_s1;
 	reg [31:0] comp_bx_size_s0,   comp_bx_size_s1;
 	reg [13:0] comp_bx_stride_s0, comp_bx_stride_s1;
+	reg [7:0]  comp_bx_alpha_s0, comp_bx_alpha_s1;
 	reg [13:0] comp_fb_stride_s0, comp_fb_stride_s1;
 	reg [1:0]  comp_en_s;
 	reg [1:0]  comp_mask_en_s;
@@ -716,6 +717,7 @@ wire         bob_deint;
 		comp_bx_pos_s0    <= comp_boxart_pos;    comp_bx_pos_s1    <= comp_bx_pos_s0;
 		comp_bx_size_s0   <= comp_boxart_size;   comp_bx_size_s1   <= comp_bx_size_s0;
 		comp_bx_stride_s0 <= comp_boxart_stride[13:0]; comp_bx_stride_s1 <= comp_bx_stride_s0;
+		comp_bx_alpha_s0 <= comp_plane_alpha; comp_bx_alpha_s1 <= comp_bx_alpha_s0;
 		comp_fb_stride_s0 <= FB_STRIDE;   comp_fb_stride_s1 <= comp_fb_stride_s0;
 		comp_en_s         <= {comp_en_s[0], comp_composite_en};
 		comp_mask_en_s    <= {comp_mask_en_s[0], comp_mask_en};
@@ -769,9 +771,11 @@ wire         bob_deint;
 		.boxart_w       (comp_bx_size_s1[11:0]),
 		.boxart_h       (comp_bx_size_s1[27:16]),
 		.boxart_stride  (comp_bx_stride_s1),
+		.plane_alpha    (comp_bx_alpha_s1),
 		.boxart_en      (comp_bx_en_s[1]),
 		.underrun_cnt_o (comp_underrun_cnt),
-		.scanout_pressure_o (comp_scanout_pressure)
+		.scanout_pressure_o (comp_scanout_pressure),
+		.cfg_latch_cnt_o (comp_cfg_latch_cnt)
 	);
 `endif
 
@@ -782,6 +786,9 @@ wire [15:0] comp_underrun_cnt;
 // core syncs it to clk_sys and stalls NEW blit DDR beats while high,
 // so scanout fetch always wins under total DDR oversubscription.
 wire comp_scanout_pressure;
+// Config-latch counter (clk_100m domain): flip-visibility signal.
+wire [14:0] comp_cfg_latch_cnt;
+wire [7:0]  comp_plane_alpha;
 
 reg        LFB_EN     = 0;
 reg        LFB_FLT    = 0;
@@ -1758,6 +1765,8 @@ emu emu
 	.COMP_BOXART_EN(comp_boxart_en),
 	.COMP_UNDERRUN(comp_underrun_cnt),
 	.SCANOUT_PRESSURE(comp_scanout_pressure),
+	.CFG_LATCH_CNT(comp_cfg_latch_cnt),
+	.COMP_PLANE_ALPHA(comp_plane_alpha),
 
 `ifdef MISTER_FB
 	.FB_EN(fb_en),

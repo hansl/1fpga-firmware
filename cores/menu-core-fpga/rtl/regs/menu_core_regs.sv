@@ -95,6 +95,8 @@ module menu_core_regs (
     output logic [31:0] boxart_pos_o,
     output logic [31:0] boxart_size_o,
     output logic [31:0] boxart_stride_o,
+    // Whole-plane alpha (0xA0[7:0]; reset 0xFF = opaque).
+    output logic [7:0]  plane_alpha_o,
     output logic        boxart_en_o,
 
     // Compositor observability — surfaces through LAYER_DEBUG (0x70).
@@ -150,6 +152,7 @@ module menu_core_regs (
     localparam logic [5:0] IDX_BOXART_POS       = 6'h25;  // 0x94 / 4
     localparam logic [5:0] IDX_BOXART_SIZE      = 6'h26;  // 0x98 / 4
     localparam logic [5:0] IDX_BOXART_STRIDE    = 6'h27;  // 0x9C / 4
+    localparam logic [5:0] IDX_PLANE_ALPHA      = 6'h28;  // 0xA0 / 4
 
     // The LW_H2F window is 2 MiB (21-bit address). Our register block
     // sits at host physical 0xFF210000, which is offset 0x10000 within
@@ -212,6 +215,7 @@ module menu_core_regs (
             scratch[IDX_BOXART_POS]    <= 32'h0;
             scratch[IDX_BOXART_SIZE]   <= 32'h0;
             scratch[IDX_BOXART_STRIDE] <= 32'h0;
+            scratch[IDX_PLANE_ALPHA]   <= 32'h0000_00FF; // opaque
             clear_error_q <= 1'b0;
             ring_kick_q   <= 1'b0;
         end else begin
@@ -282,6 +286,7 @@ module menu_core_regs (
     assign boxart_pos_o        = scratch[IDX_BOXART_POS];
     assign boxart_size_o       = scratch[IDX_BOXART_SIZE];
     assign boxart_stride_o     = scratch[IDX_BOXART_STRIDE];
+    assign plane_alpha_o       = scratch[IDX_PLANE_ALPHA][7:0];
     assign boxart_en_o         = scratch[IDX_CONTROL][10];
 
     // Suppress unused-input warnings.

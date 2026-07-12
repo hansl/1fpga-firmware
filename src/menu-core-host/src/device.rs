@@ -742,6 +742,28 @@ impl Device {
         self.set_boxart(on);
     }
 
+    /// Whole-plane alpha (0 = invisible, 255 = as-authored), applied
+    /// to the plane's premultiplied pixels at scanout and latched
+    /// per frame with the rest of the plane config. Register-driven
+    /// fades for any plane content.
+    #[inline]
+    pub fn set_plane_alpha(&mut self, alpha: u8) {
+        self.regs.write32(registers::PLANE_ALPHA, alpha as u32);
+    }
+
+    /// The compositor's config-latch counter (LAYER_DEBUG[31:17],
+    /// 15 bits, wraps): increments exactly when a frame's config
+    /// generation — including the plane base — takes effect. THE
+    /// atomic-flip visibility signal: after writing plane registers,
+    /// once this counter advances the write is provably live and the
+    /// previously-scanned surface is off-beam. Old bitstreams
+    /// (pre-counter) read 0 here forever; callers should fall back
+    /// to [`Self::vsync_count`] when the counter never moves.
+    #[inline]
+    pub fn config_latch_count(&self) -> u16 {
+        ((self.regs.read32(registers::LAYER_DEBUG) >> 17) & 0x7FFF) as u16
+    }
+
     fn init_texture_storage(&mut self) -> Result<(), DeviceError> {
         let pool_phys = self.cfg.base_phys_addr + mem::TEX_POOL_OFFSET as u32;
         let table_phys = self.cfg.base_phys_addr + mem::TEX_TABLE_OFFSET as u32;

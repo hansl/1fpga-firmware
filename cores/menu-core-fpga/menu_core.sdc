@@ -40,6 +40,7 @@ set_false_path -to [get_registers {*comp_bx_base_s0[*]}]
 set_false_path -to [get_registers {*comp_bx_pos_s0[*]}]
 set_false_path -to [get_registers {*comp_bx_size_s0[*]}]
 set_false_path -to [get_registers {*comp_bx_stride_s0[*]}]
+set_false_path -to [get_registers {*comp_bx_alpha_s0[*]}]
 set_false_path -to [get_registers {*comp_bx_en_s[0]}]
 # Reset deassertion bridges (async assert, sync deassert) — first stage.
 set_false_path -to [get_registers {*comp_h_rst[0]}]

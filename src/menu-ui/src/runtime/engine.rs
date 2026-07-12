@@ -175,10 +175,14 @@ fn engine_main(
         /// compositor's NEXT per-frame config latch — for up to a
         /// scanout frame the beam keeps reading the OLD front. The
         /// old front (the new back) must therefore not be rendered
-        /// into until VSYNC_COUNT passes this value, or the beam
-        /// photographs a mid-replay surface: ring-only cards, cleared
-        /// neighbours — HW test 11's one-frame white-card flashes.
-        back_unsafe_until: Option<u32>,
+        /// into until the compositor has provably latched: gated on
+        /// (config_latch_target, vsync_target) — the latch counter is
+        /// the EXACT signal (increments precisely at the latch); the
+        /// vsync target is the fallback for bitstreams predating the
+        /// counter (LAYER_DEBUG[31:17] stuck at zero there). Without
+        /// this gate the beam photographs a mid-replay surface —
+        /// HW test 11's one-frame white-card flashes.
+        back_unsafe_until: Option<(u16, u32)>,
     }
     let mut plane_hw: Option<PlaneHw> = None;
 
@@ -286,7 +290,10 @@ fn engine_main(
             hw.flip_after = None;
             // The freed buffer stays on-beam until the next config
             // latch — see back_unsafe_until.
-            hw.back_unsafe_until = Some(device.vsync_count().wrapping_add(1));
+            hw.back_unsafe_until = Some((
+                device.config_latch_count().wrapping_add(1) & 0x7FFF,
+                device.vsync_count().wrapping_add(1),
+            ));
             if !hw.enabled {
                 device.set_plane_enabled(true);
                 hw.enabled = true;
@@ -384,8 +391,10 @@ fn engine_main(
                             tracing::error!("plane flip failed: {e}");
                         }
                         hw.front = fl.idx;
-                        hw.back_unsafe_until =
-                            Some(device.vsync_count().wrapping_add(1));
+                        hw.back_unsafe_until = Some((
+                            device.config_latch_count().wrapping_add(1) & 0x7FFF,
+                            device.vsync_count().wrapping_add(1),
+                        ));
                         if !hw.enabled {
                             device.set_plane_enabled(true);
                             hw.enabled = true;
@@ -563,12 +572,23 @@ fn engine_main(
             // the next scanout frame). Wait for the counter to pass
             // the flip's mark — at most one display frame, and it
             // correctly caps plane updates at the display rate.
-            if let Some(target) = hw.back_unsafe_until.take() {
+            if let Some((latch_target, vsync_target)) = hw.back_unsafe_until.take() {
                 let start = Instant::now();
-                while (device.vsync_count().wrapping_sub(target) as i32) < 0 {
+                loop {
+                    // Exact: the config-latch counter reached the
+                    // flip's mark (15-bit wrap-safe forward compare).
+                    let latch_ok = (device.config_latch_count().wrapping_sub(latch_target)
+                        & 0x7FFF)
+                        < 0x4000;
+                    // Fallback for pre-counter bitstreams.
+                    let vsync_ok =
+                        (device.vsync_count().wrapping_sub(vsync_target) as i32) >= 0;
+                    if latch_ok || vsync_ok {
+                        break;
+                    }
                     if start.elapsed() > Duration::from_millis(40) {
                         tracing::warn!(
-                            "vsync gate timed out (target {target}); rendering anyway"
+                            "flip-latch gate timed out (latch {latch_target}, vsync {vsync_target}); rendering anyway"
                         );
                         break;
                     }

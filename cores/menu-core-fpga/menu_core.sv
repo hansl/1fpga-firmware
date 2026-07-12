@@ -173,9 +173,11 @@ module emu
 	output [31:0] COMP_BOXART_POS,    // {y:i16, x:i16}
 	output [31:0] COMP_BOXART_SIZE,   // {_, h:12, _, w:12}
 	output [31:0] COMP_BOXART_STRIDE, // bytes per boxart row
+	output [7:0]  COMP_PLANE_ALPHA,   // whole-plane alpha (0xA0)
 	output        COMP_BOXART_EN,     // boxart layer enable
 	input  [15:0] COMP_UNDERRUN,      // scanout underrun count (clk_100m domain)
 	input         SCANOUT_PRESSURE,   // producer read-ahead low (clk_100m domain)
+	input  [14:0] CFG_LATCH_CNT,      // compositor config-latch counter (clk_100m)
 
 	input         OSD_STATUS
 );
@@ -298,6 +300,7 @@ assign COMP_BOXART_BASE   = reg_boxart_addr;
 assign COMP_BOXART_POS    = reg_boxart_pos;
 assign COMP_BOXART_SIZE   = reg_boxart_size;
 assign COMP_BOXART_STRIDE = reg_boxart_stride;
+assign COMP_PLANE_ALPHA   = reg_plane_alpha;
 assign COMP_BOXART_EN     = reg_boxart_en;
 
 ////////////////////////////////////////////////////////////////////////////
@@ -382,6 +385,7 @@ wire [31:0] reg_boxart_addr;
 wire [31:0] reg_boxart_pos;
 wire [31:0] reg_boxart_size;
 wire [31:0] reg_boxart_stride;
+wire [7:0]  reg_plane_alpha;
 wire        reg_boxart_en;
 wire [31:0] fetcher_ring_head;
 wire [31:0] fetcher_fence_value;
@@ -398,10 +402,10 @@ wire [31:0] swap_vsync_count;
 
 // Scanout underrun counter sync (clk_100m -> clk_sys, per-bit 2FF;
 // approximate reads acceptable -- diagnostic counter only).
-(* preserve *) logic [16:0] comp_underrun_sync0;
-logic [16:0] comp_underrun_sync1;
+(* preserve *) logic [31:0] comp_underrun_sync0;
+logic [31:0] comp_underrun_sync1;
 always_ff @(posedge clk_sys) begin
-    comp_underrun_sync0 <= {SCANOUT_PRESSURE, COMP_UNDERRUN};
+    comp_underrun_sync0 <= {CFG_LATCH_CNT, SCANOUT_PRESSURE, COMP_UNDERRUN};
     comp_underrun_sync1 <= comp_underrun_sync0;
 end
 
@@ -479,14 +483,17 @@ menu_core_regs u_menu_core_regs (
     .boxart_pos_o        (reg_boxart_pos),
     .boxart_size_o       (reg_boxart_size),
     .boxart_stride_o     (reg_boxart_stride),
+    .plane_alpha_o       (reg_plane_alpha),
     .boxart_en_o         (reg_boxart_en),
 
-    // LAYER_DEBUG[15:0] = compositor scanout underrun counter,
-    // LAYER_DEBUG[16] = live scanout-pressure (blit backpressure)
-    // level (see menu_core_regs header). 2FF per bit from clk_100m;
-    // reads racing an increment may be off-by-one, which is fine for
-    // diagnostics.
-    .layer_descriptors_i ({15'd0, comp_underrun_sync1}),
+    // LAYER_DEBUG[15:0] = scanout underrun counter, [16] = live
+    // scanout-pressure level, [31:17] = config-latch counter (the
+    // atomic-flip visibility signal — increments exactly when a
+    // frame's config generation, incl. the plane base, takes
+    // effect). 2FF per bit from clk_100m; the counter is Gray-free
+    // but +1-tolerant reads are fine for its use (host waits for
+    // ANY advance past a recorded value).
+    .layer_descriptors_i (comp_underrun_sync1),
 
     .ring_head_i    (fetcher_ring_head),
     .fence_value_i  (fetcher_fence_value),

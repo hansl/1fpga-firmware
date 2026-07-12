@@ -69,6 +69,8 @@ pub const BOXART_BASE: usize = 0x90;
 pub const BOXART_POS: usize = 0x94;
 pub const BOXART_SIZE: usize = 0x98;
 pub const BOXART_STRIDE: usize = 0x9C;
+/// Whole-plane alpha for the overlay plane ([7:0]; 0xFF = opaque).
+pub const PLANE_ALPHA: usize = 0xA0;
 
 // --- STATUS bits (§3.2) ------------------------------------------------
 

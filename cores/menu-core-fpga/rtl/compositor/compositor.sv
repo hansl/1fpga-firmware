@@ -127,7 +127,14 @@ module compositor #(
     output logic [15:0]         underrun_cnt_o,
     // Blit backpressure: high while the producer's read-ahead is low
     // mid-frame (avl_clk domain; see the pressure block below).
-    output logic                scanout_pressure_o
+    output logic                scanout_pressure_o,
+    // Config-latch counter (avl domain, wraps): increments when a
+    // frame's config generation latches. Flip-visibility signal.
+    output logic [14:0]         cfg_latch_cnt_o,
+    // Whole-plane alpha (0 = invisible, 255 = as-authored), applied
+    // to the plane's premultiplied pixels at scanout. Register-driven
+    // fades for any plane content.
+    input  logic [7:0]          plane_alpha
 );
 
     // ---- Derived timing ----------------------------------------------
@@ -248,6 +255,10 @@ module compositor #(
     logic signed [15:0] bx_x_l;
     logic signed [15:0] bx_y_l;
     logic [11:0]        bx_h_l, bx_w_l;
+    logic [7:0]         bx_alpha_l;       // whole-plane alpha, frame-latched
+    // Config-latch counter (see the frame-latch block); wraps at 2^15.
+    logic [14:0]        cfg_latch_cnt;
+    assign cfg_latch_cnt_o = cfg_latch_cnt;
 
     // ================================================================
     //  HDMI timing generator (hdmi_clk domain)
@@ -315,6 +326,7 @@ module compositor #(
     logic signed [15:0] bx_x_h0,   bx_x_h1,  bx_y_h0, bx_y_h1;
     logic signed [15:0] bx_rd0_h0, bx_rd0_h1;
     logic [11:0]        bx_w_h0,   bx_w_h1,  bx_h_h0, bx_h_h1;
+    logic [7:0]         bx_alpha_h0, bx_alpha_h1;
     logic               cen_h0,    cen_h1;
     logic               men_h0,    men_h1;
     always_ff @(posedge hdmi_clk or negedge hdmi_rst_n) begin
@@ -322,12 +334,14 @@ module compositor #(
             bx_en_h0<=1'b0; bx_en_h1<=1'b0; bx_x_h0<='0; bx_x_h1<='0;
             bx_y_h0<='0; bx_y_h1<='0; bx_w_h0<='0; bx_w_h1<='0; bx_h_h0<='0; bx_h_h1<='0;
             bx_rd0_h0<='0; bx_rd0_h1<='0;
+            bx_alpha_h0<=8'hFF; bx_alpha_h1<=8'hFF;
             cen_h0<=1'b0; cen_h1<=1'b0; men_h0<=1'b0; men_h1<=1'b0;
         end else begin
             bx_en_h0<=bx_en_l; bx_en_h1<=bx_en_h0;
             bx_x_h0<=bx_x_l;   bx_x_h1<=bx_x_h0;   bx_y_h0<=bx_y_l[15:0]; bx_y_h1<=bx_y_h0;
             bx_w_h0<=bx_w_l;   bx_w_h1<=bx_w_h0;   bx_h_h0<=bx_h_l; bx_h_h1<=bx_h_h0;
             bx_rd0_h0<=bx_rd0_l; bx_rd0_h1<=bx_rd0_h0;
+            bx_alpha_h0<=bx_alpha_l; bx_alpha_h1<=bx_alpha_h0;
             cen_h0<=comp_en_l; cen_h1<=cen_h0;
             men_h0<=mask_rd_l; men_h1<=men_h0;
         end
@@ -336,15 +350,18 @@ module compositor #(
     logic signed [15:0] bx_x_f, bx_y_f;
     logic signed [15:0] bx_rd0_f;
     logic [11:0]        bx_w_f, bx_h_f;
+    logic [7:0]         bx_alpha_f;
     logic               comp_en_f, cmask_en_f;
     always_ff @(posedge hdmi_clk or negedge hdmi_rst_n) begin
         if (!hdmi_rst_n) begin
             bx_en_f<=1'b0; bx_x_f<='0; bx_y_f<='0; bx_w_f<='0; bx_h_f<='0;
             bx_rd0_f<='0;
+            bx_alpha_f<=8'hFF;
             comp_en_f<=1'b0; cmask_en_f<=1'b0;
         end else if (hcount == 12'd0 && vcount == V_ACTIVE + 12'd4) begin
             bx_en_f<=bx_en_h1; bx_x_f<=bx_x_h1; bx_y_f<=bx_y_h1; bx_w_f<=bx_w_h1; bx_h_f<=bx_h_h1;
             bx_rd0_f<=bx_rd0_h1;
+            bx_alpha_f<=bx_alpha_h1;
             // composite/mask enables frame-latched alongside (the
             // producer already frame-latches its copies; a mid-frame
             // host toggle used to split one displayed frame into two
@@ -385,14 +402,23 @@ module compositor #(
 
     // Mask tile-row for the active line, latched at the line boundary for
     // the NEXT line (one 17:1 mux off the critical pixel path, leaving just
-    // a 30:1 bit select per pixel). nv = next vcount.
-    wire [11:0] nv = (hcount == H_TOTAL-1)
-                     ? ((vcount == V_TOTAL-1) ? 12'd0 : vcount + 12'd1)
-                     : vcount;
+    // a 30:1 bit select per pixel). The line-end strobe is PRE-REGISTERED
+    // (compare against H_TOTAL-2, registered, true exactly when hcount ==
+    // H_TOTAL-1) so the 12-bit compare is not in series with the 17:1
+    // mask mux — that combined path was the design's placement-pressure
+    // release valve and started failing once the plane-alpha multipliers
+    // joined the domain. Inside the strobe, "next vcount" needs no
+    // hcount term (the strobe IS the line boundary).
+    logic at_line_end_q;
+    always_ff @(posedge hdmi_clk or negedge hdmi_rst_n) begin
+        if (!hdmi_rst_n) at_line_end_q <= 1'b0;
+        else             at_line_end_q <= (hcount == H_TOTAL - 2);
+    end
+    wire [11:0] nv = (vcount == V_TOTAL-1) ? 12'd0 : vcount + 12'd1;
     logic [N_TX-1:0] cur_mask_row;
     always_ff @(posedge hdmi_clk or negedge hdmi_rst_n) begin
-        if (!hdmi_rst_n)              cur_mask_row <= '1;
-        else if (hcount == H_TOTAL-1) cur_mask_row <= mask_hdmi[nv[TSHIFT+TYW-1 -: TYW]];
+        if (!hdmi_rst_n)        cur_mask_row <= '1;
+        else if (at_line_end_q) cur_mask_row <= mask_hdmi[nv[TSHIFT+TYW-1 -: TYW]];
     end
     // covered bit for the current column (tile_x = hcount>>6).
     wire [TXW-1:0] tile_x   = hcount[TSHIFT+TXW-1 -: TXW];
@@ -504,17 +530,33 @@ module compositor #(
     wire [15:0] wg_m = wp_pix_q[15:8]  * ia;
     wire [15:0] wb_m = wp_pix_q[7:0]   * ia;
 
+    // Plane alpha, SPLIT across the plane pixel's two pass-through
+    // stages (bx rode q1→q2a→q2 untouched): the four 8×8 multiplies
+    // register into q2a; the ==FF bit-exact bypass selects in the
+    // q2a→q2 stage. One stage tried to do mult+compare+mux and missed
+    // timing into a RAM-inferred shift register; the select also
+    // turns the second stage into logic so the shift chain stays in
+    // FFs. Content is premultiplied, so whole-plane alpha is a
+    // uniform scale of all four channels.
+    wire [15:0] bxa_r = bx_pix_q[23:16] * bx_alpha_f;
+    wire [15:0] bxa_g = bx_pix_q[15:8]  * bx_alpha_f;
+    wire [15:0] bxa_b = bx_pix_q[7:0]   * bx_alpha_f;
+    wire [15:0] bxa_a = bx_pix_q[31:24] * bx_alpha_f;
+
     logic [23:0] crgb_q2a;    // content rgb, carried for the add
     logic [23:0] wmul_q2a;    // {wr_m, wg_m, wb_m}[15:8] — the /256 products
     logic        comp_q2a;
     logic [23:0] test_q2a;
     logic [31:0] bx_pix_q2a;
+    logic [31:0] bx_mul_q2a;
+    logic        bx_aff_q2a;
     logic        bx_cover_q2a;
     logic        h_act_q2a, v_act_q2a, h_sync_q2a, v_sync_q2a;
     always_ff @(posedge hdmi_clk or negedge hdmi_rst_n) begin
         if (!hdmi_rst_n) begin
             crgb_q2a <= 24'd0; wmul_q2a <= 24'd0; comp_q2a <= 1'b0;
             test_q2a <= 24'd0; bx_pix_q2a <= 32'd0; bx_cover_q2a <= 1'b0;
+            bx_mul_q2a <= 32'd0; bx_aff_q2a <= 1'b1;
             h_act_q2a <= 1'b0; v_act_q2a <= 1'b0; h_sync_q2a <= 1'b0; v_sync_q2a <= 1'b0;
         end else begin
             crgb_q2a     <= ct_pix_q[23:0];
@@ -522,6 +564,8 @@ module compositor #(
             comp_q2a     <= comp_en_f;
             test_q2a     <= test_q1;
             bx_pix_q2a   <= bx_pix_q;
+            bx_mul_q2a   <= {bxa_a[15:8], bxa_r[15:8], bxa_g[15:8], bxa_b[15:8]};
+            bx_aff_q2a   <= (bx_alpha_f == 8'hFF);
             bx_cover_q2a <= bx_cover_q1;
             h_act_q2a  <= h_act_q1;   v_act_q2a  <= v_act_q1;
             h_sync_q2a <= h_sync_q1;  v_sync_q2a <= v_sync_q1;
@@ -547,7 +591,10 @@ module compositor #(
             base_q2 <= 24'd0; bx_pix_q2 <= 32'd0; bx_cover_q2 <= 1'b0;
             h_act_q2 <= 1'b0; v_act_q2 <= 1'b0; h_sync_q2 <= 1'b0; v_sync_q2 <= 1'b0;
         end else begin
-            base_q2 <= base_sel; bx_pix_q2 <= bx_pix_q2a; bx_cover_q2 <= bx_cover_q2a;
+            base_q2 <= base_sel;
+            // Plane-alpha select (see the split note above).
+            bx_pix_q2 <= bx_aff_q2a ? bx_pix_q2a : bx_mul_q2a;
+            bx_cover_q2 <= bx_cover_q2a;
             h_act_q2 <= h_act_q2a;   v_act_q2 <= v_act_q2a;
             h_sync_q2 <= h_sync_q2a; v_sync_q2 <= v_sync_q2a;
         end
@@ -874,6 +921,8 @@ module compositor #(
             bx_w_l       <= '0;
             bx_stride_l  <= '0;
             bx_en_l      <= 1'b0;
+            bx_alpha_l   <= 8'hFF;
+            cfg_latch_cnt <= '0;
             frame_pend   <= 1'b0;
             underrun_cnt <= '0;
             underrun_d   <= 1'b0;
@@ -925,6 +974,14 @@ module compositor #(
                 bx_w_l       <= boxart_w;
                 bx_stride_l  <= boxart_stride;
                 bx_en_l      <= boxart_en;
+                bx_alpha_l   <= plane_alpha;
+                // Config-latch counter: increments EXACTLY when a new
+                // config generation (incl. the plane base) takes
+                // effect. The host's flip gate compares against this
+                // — the precise "your register write is now live"
+                // signal that a bare register write cannot provide
+                // (KMS calls this the flip-done event). 15 bits, wraps.
+                cfg_latch_cnt <= cfg_latch_cnt + 15'd1;
                 pstate       <= content_mask_en ? P_MREQ : P_IDLE; // load mask first
             end else begin
                 unique case (pstate)
