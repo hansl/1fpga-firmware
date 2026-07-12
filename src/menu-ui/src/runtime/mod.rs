@@ -614,6 +614,9 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
 
     let mut last_sent_hash: Option<u64> = None;
     let mut last_seen_gen: u64 = u64::MAX; // force first layout/build
+    // Spin diagnostics (see the warn below the idle-skip check).
+    let mut last_parked = Instant::now();
+    let mut last_spin_report = Instant::now();
     let mut layout_gen: u64 = u64::MAX;
     let mut carry_events: Vec<RawInputEvent> = Vec::new();
 
@@ -714,30 +717,54 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
 
         let t3 = Instant::now();
 
-        // 3. Collect IMAGE needs (walk only).
-        let image_needs: Vec<ImageNeed> = ui_state.with_tree(|tree| {
-            let mut out = Vec::new();
-            fn walk(tree: &Tree, id: NodeId, out: &mut Vec<ImageNeed>) {
-                let Some(node) = tree.get(id) else { return };
-                if let NodeKind::Img { src } = &node.kind
-                    && !src.is_empty()
-                {
-                    let sized = match (node.style.width, node.style.height) {
-                        (Some(w), Some(h)) => Some((
-                            (w.round() as i32).clamp(1, u16::MAX as i32) as u16,
-                            (h.round() as i32).clamp(1, u16::MAX as i32) as u16,
-                        )),
-                        _ => None,
-                    };
-                    out.push(ImageNeed { src: src.clone(), sized });
+        // 3. Collect IMAGE needs — MISSES ONLY. Requesting every
+        //    mounted <img> unconditionally kept `has_requests` true on
+        //    any screen with an image, which defeated the idle park
+        //    permanently: the UI busy-looped at 300+ fps (vs the 125
+        //    the 8 ms park allows) on every session since the carousel
+        //    landed. A satisfied or FAILED image (load errors are
+        //    cached as CachedImage::Failed) must not re-request.
+        let image_needs: Vec<ImageNeed> = {
+            let images_l = caches.images.lock().unwrap();
+            ui_state.with_tree(|tree| {
+                let mut out = Vec::new();
+                fn walk(
+                    tree: &Tree,
+                    id: NodeId,
+                    images: &crate::image::ImageRegistry,
+                    out: &mut Vec<ImageNeed>,
+                ) {
+                    let Some(node) = tree.get(id) else { return };
+                    if let NodeKind::Img { src } = &node.kind
+                        && !src.is_empty()
+                    {
+                        let sized = match (node.style.width, node.style.height) {
+                            (Some(w), Some(h)) => Some((
+                                (w.round() as i32).clamp(1, u16::MAX as i32) as u16,
+                                (h.round() as i32).clamp(1, u16::MAX as i32) as u16,
+                            )),
+                            _ => None,
+                        };
+                        let base = images.get(src);
+                        let base_failed =
+                            matches!(base, Some(crate::image::CachedImage::Failed { .. }));
+                        let base_missing = base.is_none();
+                        let sized_missing = match sized {
+                            Some((w, h)) => images.get_sized(src, w, h).is_none(),
+                            None => false,
+                        };
+                        if !base_failed && (base_missing || sized_missing) {
+                            out.push(ImageNeed { src: src.clone(), sized });
+                        }
+                    }
+                    for &child in &node.children {
+                        walk(tree, child, images, out);
+                    }
                 }
-                for &child in &node.children {
-                    walk(tree, child, out);
-                }
-            }
-            walk(tree, root, &mut out);
-            out
-        });
+                walk(tree, root, &images_l, &mut out);
+                out
+            })
+        };
 
         let t4 = Instant::now();
 
@@ -865,10 +892,35 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         // 16 ms sleep).
         if Some(current_hash) == last_sent_hash && cache_gen == last_seen_gen && !has_requests {
             fps_counter.record_frame();
+            last_parked = Instant::now();
             if let Ok(ev) = input_rx.recv_timeout(Duration::from_millis(8)) {
                 carry_events.push(ev);
             }
             continue;
+        }
+        // Spin diagnostics: a healthy UI parks within a couple of
+        // seconds of input stopping. Sustained non-parking means
+        // something re-arms every tick — an unsatisfiable resource
+        // request, a hash that never settles, a runaway tween — and
+        // WHICH one is exactly what's hard to reconstruct after the
+        // fact. Say it while it happens.
+        if last_parked.elapsed() > Duration::from_secs(3)
+            && last_spin_report.elapsed() > Duration::from_secs(5)
+        {
+            last_spin_report = Instant::now();
+            tracing::warn!(
+                "ui: not idle-parking for {:.1?} (hash_changed={} gen_changed={} needs: fonts={} images={} texts={}{})",
+                last_parked.elapsed(),
+                Some(current_hash) != last_sent_hash,
+                cache_gen != last_seen_gen,
+                font_needs.len(),
+                image_needs.len(),
+                text_needs.len(),
+                image_needs
+                    .first()
+                    .map(|i| format!(" first_img='{}'", i.src))
+                    .unwrap_or_default()
+            );
         }
         last_sent_hash = Some(current_hash);
         last_seen_gen = cache_gen;

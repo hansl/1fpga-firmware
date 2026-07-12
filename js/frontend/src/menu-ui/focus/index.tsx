@@ -124,14 +124,38 @@ export function FocusProvider({
     [active, focusZone],
   );
 
+  // Dropped-intent diagnostics: input that reaches the provider but
+  // no handler is the exact "keys do nothing, everything else looks
+  // alive" failure that's invisible in logs otherwise. Throttled so
+  // a held key doesn't flood.
+  const lastDropWarn = useRef(0);
+  const warnDrop = (why: string, name: string) => {
+    const now = Date.now();
+    if (now - lastDropWarn.current > 2000) {
+      lastDropWarn.current = now;
+      console.warn(`focus: intent '${name}' dropped — ${why}`);
+    }
+  };
+
   // The ONLY intent subscriptions for navigation in the whole app.
   const dispatch = useCallback(
     (name: string, e: gui.IntentEvent) => {
-      if (active == null) return;
+      if (active == null) {
+        warnDrop('no active zone', name);
+        return;
+      }
       const handlers = zones.current.get(active)?.listeners.get(name);
-      if (!handlers) return;
+      if (!handlers || handlers.size === 0) {
+        // back/confirm legitimately go unhandled on some zones; the
+        // four nav directions going nowhere is the anomaly.
+        if (name in NAV_INTENTS) {
+          warnDrop(`zone '${active}' has no '${name}' handler`, name);
+        }
+        return;
+      }
       for (const h of [...handlers]) h(e);
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [active],
   );
   useIntent('navigate_up', useCallback((e) => dispatch('navigate_up', e), [dispatch]));

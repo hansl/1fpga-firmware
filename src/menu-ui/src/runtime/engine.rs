@@ -112,6 +112,8 @@ fn engine_main(
     let mut event_buf: Vec<RawInputEvent> = Vec::new();
 
     let mut boxart_anim: u64 = 0;
+    // Stuck-flip warn throttle (see the loop-top check).
+    let mut last_flip_warn = Instant::now();
 
     /// Hardware overlay plane state (v1: the single scanout plane).
     ///
@@ -141,6 +143,11 @@ fn engine_main(
         idx: usize,
         x: i32,
         y: i32,
+        /// When the flip was armed — a healthy flip completes in
+        /// milliseconds (blit-only fence); staying pending for a
+        /// second means the fence is stuck, and that must be SAID in
+        /// the log rather than reconstructed from a video.
+        set_at: Instant,
     }
     struct PlaneHw {
         tex: [menu_core_host::texture::TextureHandle; 2],
@@ -225,6 +232,20 @@ fn engine_main(
         // compositor, so the write is tear-free) and enable on the
         // first flip. Runs every loop tick so it fires even when no
         // further packets arrive.
+        if let Some(hw) = plane_hw.as_mut()
+            && let Some(fl) = &hw.flip_after
+            && !device.fence_reached(fl.fence)
+            && fl.set_at.elapsed() > Duration::from_secs(1)
+            && last_flip_warn.elapsed() > Duration::from_secs(2)
+        {
+            last_flip_warn = Instant::now();
+            tracing::warn!(
+                "plane flip stuck: fence {} pending for {:.1?} (surface {})",
+                fl.fence,
+                fl.set_at.elapsed(),
+                fl.idx
+            );
+        }
         if let Some(hw) = plane_hw.as_mut()
             && let Some(fl) = &hw.flip_after
             && device.fence_reached(fl.fence)
@@ -517,6 +538,7 @@ fn engine_main(
                 idx: plane_back,
                 x: p.x,
                 y: p.y,
+                set_at: Instant::now(),
             });
         }
 
