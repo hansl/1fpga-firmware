@@ -10,7 +10,7 @@
 // recenters. Cards are keyed by uniqueName; the window base moves
 // with hysteresis so consecutive steps keep local positions stable.
 
-import { memo, useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import * as gui from '1fpga:gui';
 
@@ -240,6 +240,20 @@ export const CardCarousel = memo(function CardCarousel({
   // host partitions it out of the plane's pixels), so this fade is a
   // register ramp — zero re-renders — and doubles as the end-to-end
   // validation of the PLANE_ALPHA silicon.
+  //
+  // The initial 0 is set IMPERATIVELY, exactly once — never in JSX.
+  // commitUpdate REPLACES the node's style, so a static `opacity: 0`
+  // in the style object gets re-applied on every re-render whose
+  // props differ (the first arrow press changes translateX), snapping
+  // the plane invisible with nothing to re-arm the one-shot tween —
+  // HW test 14's "blanks out on first keypress". Declared BEFORE the
+  // tween effect so mount ordering gives the tween `from = 0`.
+  useLayoutEffect(() => {
+    if (ref.current != null) {
+      gui.updateStyle(ref.current, { opacity: 0 });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   useTween(ref, { opacity: 1.0 }, { duration: 140, easing: 'follow' });
 
   const hi = Math.min(systems.length - 1, base + PLANE_SLOTS - 1);
@@ -258,7 +272,7 @@ export const CardCarousel = memo(function CardCarousel({
         y={FRAME_TOP - FRAME_PAD}
         width={PLANE_SLOTS * SLOT}
         height={CARD_H + FRAME_PAD * 2}
-        style={{ translateX: targetLeft, opacity: 0 }}
+        style={{ translateX: targetLeft }}
       >
         {visible.map(({ system, slot }) => (
           <Card
