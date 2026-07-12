@@ -89,6 +89,9 @@ pub struct PlanePacket {
     pub y: i32,
     pub w: u16,
     pub h: u16,
+    /// Hardware plane alpha (see PlaneDL::alpha) — geometry-class:
+    /// changes are register writes, never re-renders.
+    pub alpha: u8,
 }
 
 /// One UI tick's output.

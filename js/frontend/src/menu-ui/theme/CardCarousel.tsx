@@ -236,6 +236,11 @@ export const CardCarousel = memo(function CardCarousel({
     { translateX: targetLeft },
     { duration: 110, easing: 'follow', snapBeyond: SLOT * 1.5 },
   );
+  // Portal fade-in on mount. Portal opacity is HARDWARE alpha (the
+  // host partitions it out of the plane's pixels), so this fade is a
+  // register ramp — zero re-renders — and doubles as the end-to-end
+  // validation of the PLANE_ALPHA silicon.
+  useTween(ref, { opacity: 1.0 }, { duration: 140, easing: 'follow' });
 
   const hi = Math.min(systems.length - 1, base + PLANE_SLOTS - 1);
   const visible: Array<{ system: SystemCard; slot: number }> = [];
@@ -253,7 +258,7 @@ export const CardCarousel = memo(function CardCarousel({
         y={FRAME_TOP - FRAME_PAD}
         width={PLANE_SLOTS * SLOT}
         height={CARD_H + FRAME_PAD * 2}
-        style={{ translateX: targetLeft }}
+        style={{ translateX: targetLeft, opacity: 0 }}
       >
         {visible.map(({ system, slot }) => (
           <Card

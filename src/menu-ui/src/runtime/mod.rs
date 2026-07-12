@@ -883,6 +883,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                 y: p.y,
                 w: p.w,
                 h: p.h,
+                alpha: p.alpha,
             })
             .collect();
         // Content-layer hash: the engine's per-FB-slot skip compares
@@ -904,6 +905,7 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
                 p.y.hash(&mut h);
                 p.w.hash(&mut h);
                 p.h.hash(&mut h);
+                p.alpha.hash(&mut h);
             }
             h.finish()
         };

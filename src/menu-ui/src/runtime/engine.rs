@@ -170,6 +170,8 @@ fn engine_main(
         x: i32,
         y: i32,
         enabled: bool,
+        /// Last alpha written to the register (reset value 0xFF).
+        alpha_reg: u8,
         flip_after: Option<PendingFlip>,
         /// A flip's base-register write only takes effect at the
         /// compositor's NEXT per-frame config latch — for up to a
@@ -348,6 +350,7 @@ fn engine_main(
                                 x: i32::MIN,
                                 y: i32::MIN,
                                 enabled: false,
+                                alpha_reg: 0xFF,
                                 flip_after: None,
                                 back_unsafe_until: None,
                             });
@@ -362,6 +365,15 @@ fn engine_main(
                     }
                 }
                 if let Some(hw) = plane_hw.as_mut() {
+                    // Alpha is geometry-class: frame-latched with the
+                    // rest of the config, coordinate-independent —
+                    // always an immediate register write. This is the
+                    // whole point of the PLANE_ALPHA primitive: a
+                    // portal fade is zero blits.
+                    if hw.alpha_reg != p.alpha {
+                        device.set_plane_alpha(p.alpha);
+                        hw.alpha_reg = p.alpha;
+                    }
                     plane_back = match &hw.flip_after {
                         Some(fl) => fl.idx,
                         None if hw.enabled => 1 - hw.front,

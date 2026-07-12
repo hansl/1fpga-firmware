@@ -156,6 +156,12 @@ pub struct PlaneDL {
     /// Surface size (untransformed layout box).
     pub w: u16,
     pub h: u16,
+    /// Hardware plane alpha: the portal's OWN accumulated opacity
+    /// (its style opacity × every ancestor's). Content inside the
+    /// plane renders at its LOCAL opacity product only — a portal
+    /// fade therefore never changes the plane's pixels, just this
+    /// value, which the engine turns into an alpha-register write.
+    pub alpha: u8,
 }
 
 /// [`build`]'s output: the content-layer display list plus any
@@ -285,6 +291,40 @@ pub fn build(
         let (tx, ty, _, _) = xf.apply_to_rect(lay.x, lay.y, lay.w, lay.h);
         let w = lay.w.round() as u16;
         let h = lay.h.round() as u16;
+        // The portal's accumulated opacity becomes the hardware
+        // alpha; the plane CONTENT uses a locally-resolved opacity
+        // map (product of style opacities strictly BELOW the portal),
+        // so fading the portal is a pure register change — content
+        // hashes stay put and nothing re-renders.
+        let alpha = opacities
+            .get(&pid)
+            .copied()
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0)
+            .mul_add(255.0, 0.5) as u8;
+        let mut local_opacities: HashMap<NodeId, f32> = HashMap::new();
+        fn resolve_local(
+            tree: &Tree,
+            id: NodeId,
+            acc: f32,
+            out: &mut HashMap<NodeId, f32>,
+        ) {
+            let Some(node) = tree.get(id) else { return };
+            let acc = acc * node.style.opacity.unwrap_or(1.0).clamp(0.0, 1.0);
+            out.insert(id, acc);
+            for &child in &node.children {
+                resolve_local(tree, child, acc, out);
+            }
+        }
+        // Portal itself enters at 1.0 — ITS opacity is the plane
+        // alpha, not a pixel factor. (Its own style.opacity must not
+        // double-apply, so seed children directly.)
+        local_opacities.insert(pid, 1.0);
+        if let Some(pnode) = tree.get(pid) {
+            for &child in &pnode.children {
+                resolve_local(tree, child, 1.0, &mut local_opacities);
+            }
+        }
         let mut plane_entries = Vec::new();
         walk(
             tree,
@@ -293,7 +333,7 @@ pub fn build(
             text_styles,
             text_cache,
             images,
-            opacities,
+            &local_opacities,
             transforms,
             // The engine clears the plane surface transparent before
             // replaying (via the background fill below) — pristine dst.
@@ -326,6 +366,7 @@ pub fn build(
             y: ty.round() as i32,
             w,
             h,
+            alpha,
         });
     }
 
@@ -1252,6 +1293,14 @@ mod tests {
             transforms.insert(portal, slid);
             transforms.insert(card, slid);
 
+            // Portal at half opacity: becomes HARDWARE alpha, must NOT
+            // bake into the plane's pixels (resolve_opacity would give
+            // the card 0.5 accumulated; the plane walk re-resolves
+            // locally below the portal).
+            let mut opacities = HashMap::new();
+            opacities.insert(portal, 0.5);
+            opacities.insert(card, 0.5);
+
             build(
                 &tree,
                 root,
@@ -1260,7 +1309,7 @@ mod tests {
                 &HashMap::new(),
                 &TextCache::new(),
                 &ImageRegistry::new(),
-                &HashMap::new(),
+                &opacities,
                 &transforms,
                 true,
             )
@@ -1281,6 +1330,15 @@ mod tests {
         assert_eq!((bbox.x, bbox.y, bbox.w, bbox.h), (200, 20, 280, 340));
         // The plane's background is the transparent clear.
         assert_eq!(p.dl.background.as_ref().unwrap().color, Rgba::TRANSPARENT);
+        // Portal opacity became hardware alpha; the card's pixels
+        // render at FULL local opacity (fill color alpha untouched).
+        assert_eq!(p.alpha, 128);
+        match p.dl.entries[0].op.as_ref().expect("card paints") {
+            DrawOp::Fill { color, .. } => {
+                assert_eq!(color.a, 255, "portal fade must not bake into plane pixels");
+            }
+            other => panic!("expected Fill, got {other:?}"),
+        }
 
         // Pure move: same content hash, different geometry.
         let moved = build_with_tx(-150.0);
