@@ -172,10 +172,13 @@ const Card = memo(function Card({
   );
 });
 
-/** Slots held by the plane surface. At 1080p that's 11 × s(324) =
- *  3564 px wide — under the plane's 4095 hardware cap, and wider than
- *  the screen: the slide reveals pre-rendered cards. */
-const PLANE_SLOTS = 11;
+/** Slots held by the plane surface. At 1080p that's 12 × s(324) =
+ *  3888 px wide — under the plane's 4095 hardware cap, and wider than
+ *  the screen: the slide reveals pre-rendered cards. 12 (was 11)
+ *  stretches the recenter interval to ~7 held steps — the recenter is
+ *  the most expensive reconcile we have (every card re-styled), and
+ *  its frequency set the freeze cadence under held keys. */
+const PLANE_SLOTS = 12;
 /** Recenter margin: shift the window when the selection gets this
  *  close to its edge. Between recenters, card LOCAL positions are
  *  stable, so a nav step's plane damage is just the two cards whose

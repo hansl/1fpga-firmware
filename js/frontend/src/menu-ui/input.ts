@@ -75,8 +75,20 @@ function snapshot<T>(list: T[] | undefined): T[] {
  *  arrives at ~30/sec on evdev; we cap it at ~15/sec which is fast
  *  enough to feel responsive and slow enough that a held-key sweep
  *  doesn't pin React to ~10 fps. Pressed/Released for human-paced
- *  taps are well under this threshold and pass through unchanged. */
-const COALESCE_MS = 66;
+ *  taps are well under this threshold and pass through unchanged.
+ *
+ *  ADAPTIVE: 66 ms is the floor, but the live window follows what
+ *  dispatch actually costs — React commits run synchronously inside
+ *  the intent handlers, so dispatch can time itself. With a fixed
+ *  window, one long reconcile (a carousel window recenter re-styles
+ *  every card) lets queued repeats keep the loop saturated and the
+ *  UI death-spirals into seconds-long freezes under a held key
+ *  (measured: ui fps 117 → 7.8 while holding right). Feeding the
+ *  measured cost back caps the intent rate at what the reconciler
+ *  can actually sustain. */
+const COALESCE_MS_MIN = 66;
+const COALESCE_MS_MAX = 250;
+let coalesceMs = COALESCE_MS_MIN;
 const lastIntentAt: Map<string, number> = new Map();
 
 function dispatch(events: gui.InputBatchEntry[]): void {
@@ -114,7 +126,7 @@ function dispatch(events: gui.InputBatchEntry[]): void {
       }
       const key = `${intent.name}:${intent.kind}`;
       const last = lastIntentAt.get(key);
-      if (last !== undefined && now - last < COALESCE_MS) {
+      if (last !== undefined && now - last < coalesceMs) {
         // Skip — same (name, kind) fired too recently.
         continue;
       }
@@ -131,6 +143,15 @@ function dispatch(events: gui.InputBatchEntry[]): void {
         console.warn(`intent handler '${intent.name}' threw:`, err);
       }
     }
+  }
+  // Adaptive backpressure: fold this dispatch's real cost (handlers +
+  // synchronous React commits) into the throttle window. Fast frames
+  // decay it back toward the floor.
+  if (intentsToFire.length > 0) {
+    const cost = Date.now() - now;
+    const target = Math.max(COALESCE_MS_MIN, Math.min(COALESCE_MS_MAX, cost * 2));
+    // One-pole smoothing: react quickly to slowdowns, relax gradually.
+    coalesceMs = target > coalesceMs ? target : coalesceMs * 0.8 + target * 0.2;
   }
 }
 
