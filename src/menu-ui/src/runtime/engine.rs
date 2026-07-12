@@ -143,6 +143,17 @@ fn engine_main(
         idx: usize,
         x: i32,
         y: i32,
+        /// Whether position must apply ATOMICALLY with this flip.
+        /// True when the render moved the plane's local coordinate
+        /// system (a recenter: damage covered most of the surface) —
+        /// applying the new position against the old front content
+        /// would jump the cards sideways. False for coordinate-
+        /// preserving content changes (selection tween: two cards'
+        /// damage), where position applies IMMEDIATELY per packet so
+        /// the slide never quantises to fence cadence — that
+        /// quantisation was the residual "flicker": the strip moved
+        /// in 30-70 ms jolts while content-change flips paced it.
+        coupled: bool,
         /// When the flip was armed — a healthy flip completes in
         /// milliseconds (blit-only fence); staying pending for a
         /// second means the fence is stuck, and that must be SAID in
@@ -250,15 +261,19 @@ fn engine_main(
             && let Some(fl) = &hw.flip_after
             && device.fence_reached(fl.fence)
         {
-            let (idx, fx, fy) = (fl.idx, fl.x, fl.y);
-            // Position + surface in the same compositor frame-latch
-            // generation: content and geometry stay coupled.
-            plane_pos_regs(&mut device, fx, fy);
+            let (idx, fx, fy, coupled) = (fl.idx, fl.x, fl.y, fl.coupled);
+            // Coupled flips write position + surface in the same
+            // compositor frame-latch generation (the render moved the
+            // plane's coordinate system); uncoupled flips already
+            // applied position per packet.
+            if coupled {
+                plane_pos_regs(&mut device, fx, fy);
+                hw.x = fx;
+                hw.y = fy;
+            }
             if let Err(e) = device.set_plane_surface(&hw.tex[idx]) {
                 tracing::error!("plane flip failed: {e}");
             }
-            hw.x = fx;
-            hw.y = fy;
             hw.front = idx;
             hw.flip_after = None;
             if !hw.enabled {
@@ -348,12 +363,14 @@ fn engine_main(
                     if plane_render && hw.flip_after.is_some() {
                         let fl = hw.flip_after.take().expect("just checked");
                         device.wait_fence(fl.fence, cfg.timeout)?;
-                        plane_pos_regs(&mut device, fl.x, fl.y);
+                        if fl.coupled {
+                            plane_pos_regs(&mut device, fl.x, fl.y);
+                            hw.x = fl.x;
+                            hw.y = fl.y;
+                        }
                         if let Err(e) = device.set_plane_surface(&hw.tex[fl.idx]) {
                             tracing::error!("plane flip failed: {e}");
                         }
-                        hw.x = fl.x;
-                        hw.y = fl.y;
                         hw.front = fl.idx;
                         if !hw.enabled {
                             device.set_plane_enabled(true);
@@ -363,16 +380,24 @@ fn engine_main(
                         plane_render = hw.hash[plane_back] != Some(p.scene_hash);
                     }
                     if let Some(fl) = hw.flip_after.as_mut() {
-                        // Content is in flight: geometry rides the
-                        // flip so front never shows mismatched pos.
                         fl.x = p.x;
                         fl.y = p.y;
+                        if !fl.coupled && (hw.x != p.x || hw.y != p.y) {
+                            // In-flight content is coordinate-
+                            // preserving: the slide applies NOW.
+                            plane_pos_regs(&mut device, p.x, p.y);
+                            hw.x = p.x;
+                            hw.y = p.y;
+                        }
                     } else if !plane_render && (hw.x != p.x || hw.y != p.y) {
                         // Pure move, nothing in flight: registers now.
                         plane_pos_regs(&mut device, p.x, p.y);
                         hw.x = p.x;
                         hw.y = p.y;
                     }
+                    // (plane_render with no pending flip: the render
+                    // block below decides — immediate pos for small
+                    // damage, ride-the-flip for a recenter.)
                     // Re-enable after a disable, when the front still
                     // holds this exact content: registers only.
                     if !hw.enabled
@@ -505,6 +530,20 @@ fn engine_main(
                 Some(prev) => Some(damage::compute_damage(prev, &new_scene)),
                 None => None, // fresh surface → full render
             };
+            // Coupled = the render rewrote most of the surface (a
+            // recenter shifted local coordinates, or first render):
+            // position must wait for the flip. Small damage preserves
+            // coordinates: position applies immediately below.
+            let plane_area = (p.w as u64) * (p.h as u64);
+            let coupled = match &plan {
+                Some(rects) => damage::total_area(rects) * 2 > plane_area,
+                None => true,
+            };
+            if !coupled && (hw.x != p.x || hw.y != p.y) {
+                plane_pos_regs(&mut device, p.x, p.y);
+                hw.x = p.x;
+                hw.y = p.y;
+            }
             let pf = device.begin_frame();
             let pf = {
                 let fonts = caches.fonts.lock().unwrap();
@@ -538,6 +577,7 @@ fn engine_main(
                 idx: plane_back,
                 x: p.x,
                 y: p.y,
+                coupled,
                 set_at: Instant::now(),
             });
         }

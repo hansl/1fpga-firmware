@@ -158,7 +158,16 @@ declare module '1fpga:gui' {
    * Easing curve names accepted by `startTween`. Defaults to
    * `'easeOut'` when omitted.
    */
-  export type Easing = 'linear' | 'easeIn' | 'easeOut' | 'easeInOut';
+  /**
+   * `'follow'` is not a curve: it is a rate-based exponential
+   * follower whose velocity is proportional to the remaining
+   * distance (`duration` acts as the time constant), and whose
+   * re-targets update the goal IN PLACE instead of restarting.
+   * Use it for values that re-target rapidly (held key-repeat
+   * scrolling) — timed easings either lag unboundedly there or,
+   * with `snapBeyond`, advance in visible jumps.
+   */
+  export type Easing = 'linear' | 'easeIn' | 'easeOut' | 'easeInOut' | 'follow';
 
   /** Animation options for `startTween`. */
   export interface TweenOpts {

@@ -688,25 +688,51 @@ pub fn run(cfg: RunConfig) -> Result<(), RuntimeError> {
         // 1. Resolve text style inheritance once for the frame.
         let text_styles = ui_state.with_tree(|tree| crate::text::resolve(tree, root));
 
-        // 2. Collect FONT needs (walk only — the engine rasterises +
-        //    uploads). Runtime warmup requests ride along.
-        let mut font_needs: Vec<FontNeed> = ui_state.with_tree(|tree| {
-            let mut needed: std::collections::HashMap<(String, u16), std::collections::HashSet<char>> =
-                std::collections::HashMap::new();
-            for (id, rs) in &text_styles {
-                let Some(node) = tree.get(*id) else { continue };
-                let NodeKind::Text { content } = &node.kind else { continue };
-                let key = (rs.font_name.clone(), rs.px_size.round() as u16);
-                let chars = needed.entry(key).or_default();
-                for ch in content.chars() {
-                    chars.insert(ch);
+        // 2. Collect FONT needs — MISSES ONLY (same rule as images
+        //    below: a satisfied need must not re-request, or
+        //    `has_requests` never goes false and the idle park never
+        //    engages — the log's persistent `fonts=9`). An atlas
+        //    covers a char if it was REQUESTED at build time, whether
+        //    or not the font could render it (`has_glyph` checks the
+        //    requested set), so unrenderable chars don't re-request
+        //    either. Runtime warmup requests ride along unfiltered.
+        let mut font_needs: Vec<FontNeed> = {
+            let fonts_l = caches.fonts.lock().unwrap();
+            ui_state.with_tree(|tree| {
+                let mut needed: std::collections::HashMap<
+                    (String, u16),
+                    std::collections::HashSet<char>,
+                > = std::collections::HashMap::new();
+                for (id, rs) in &text_styles {
+                    let Some(node) = tree.get(*id) else { continue };
+                    let NodeKind::Text { content } = &node.kind else { continue };
+                    let key = (rs.font_name.clone(), rs.px_size.round() as u16);
+                    let chars = needed.entry(key).or_default();
+                    for ch in content.chars() {
+                        chars.insert(ch);
+                    }
                 }
-            }
-            needed
-                .into_iter()
-                .map(|((family, px_size), chars)| FontNeed { family, px_size, chars })
-                .collect()
-        });
+                needed
+                    .into_iter()
+                    .filter_map(|((family, px_size), chars)| {
+                        match fonts_l.get(&family, px_size) {
+                            Some(cached) => {
+                                let missing: std::collections::HashSet<char> = chars
+                                    .into_iter()
+                                    .filter(|&c| !cached.atlas.has_glyph(c))
+                                    .collect();
+                                (!missing.is_empty()).then_some(FontNeed {
+                                    family,
+                                    px_size,
+                                    chars: missing,
+                                })
+                            }
+                            None => Some(FontNeed { family, px_size, chars }),
+                        }
+                    })
+                    .collect()
+            })
+        };
         for req in warmup_queue.drain() {
             font_needs.push(FontNeed {
                 family: req.family,

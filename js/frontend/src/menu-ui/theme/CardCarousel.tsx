@@ -211,15 +211,17 @@ export const CardCarousel = memo(function CardCarousel({
   // left and moves back and forth").
   const targetLeft = CENTRE_X - (selected + 0.5) * SLOT;
   const ref = useRef<gui.NodeId | null>(null);
-  // snapBeyond bounds re-target lag: a re-targeted ease glides FROM
-  // the current value, so held key-repeat used to leave the strip
-  // arbitrarily far behind the selection (ring off-screen), then
-  // catch up in one big slide on release. Capped at one slot, the
-  // strip tracks any repeat rate and still settles smoothly.
+  // 'follow' + snapBeyond: the strip chases the selection with
+  // velocity proportional to its lag — held key-repeat produces
+  // steady continuous motion (a re-targeted timed ease either lags
+  // unboundedly or, snap-capped, advances in whole-slot jolts that
+  // read as flicker); release settles with no discontinuity. The
+  // snap cap stays as the worst-case lag bound (ring never leaves
+  // the screen).
   useTween(
     ref,
     { translateX: targetLeft },
-    { duration: 260, easing: 'easeOut', snapBeyond: SLOT },
+    { duration: 110, easing: 'follow', snapBeyond: SLOT * 1.5 },
   );
 
   const hi = Math.min(systems.length - 1, base + PLANE_SLOTS - 1);

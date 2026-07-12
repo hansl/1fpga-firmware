@@ -126,6 +126,16 @@ pub enum Easing {
     EaseIn,
     EaseOut,
     EaseInOut,
+    /// Rate-based exponential follower, not a curve: the value chases
+    /// the target with velocity proportional to the remaining
+    /// distance (`duration` acts as the time constant), and a
+    /// re-target UPDATES THE TARGET IN PLACE instead of restarting.
+    /// This is the smooth-under-rapid-retarget mode: a duration-based
+    /// ease re-launched every key repeat either lags unboundedly or
+    /// (with snapBeyond) advances in visible jumps; a follower's
+    /// velocity is a continuous function of lag, so held-scroll
+    /// motion is steady and release settles without a discontinuity.
+    Follow,
 }
 
 impl Easing {
@@ -135,6 +145,7 @@ impl Easing {
             "ease-in" | "easeIn" => Some(Self::EaseIn),
             "ease-out" | "easeOut" => Some(Self::EaseOut),
             "ease-in-out" | "easeInOut" => Some(Self::EaseInOut),
+            "follow" => Some(Self::Follow),
             _ => None,
         }
     }
@@ -157,6 +168,9 @@ impl Easing {
                     1.0 - u * u / 2.0
                 }
             }
+            // Follow never samples a curve (Tween::advance handles it
+            // statefully); linear is a harmless fallback if it does.
+            Self::Follow => t,
         }
     }
 }
@@ -169,13 +183,30 @@ struct Tween {
     start: Instant,
     duration: Duration,
     easing: Easing,
+    /// Follow-mode state: the value as of `last` (advanced per tick).
+    /// Unused for timed easings (they are stateless in elapsed time).
+    value: f32,
+    last: Instant,
 }
 
 impl Tween {
-    /// Returns `(current_value, done)`. `done == true` means we've
-    /// reached or passed the end of the duration and the tween can
-    /// be retired.
-    fn sample(&self, now: Instant) -> (f32, bool) {
+    /// Advance to `now` and return `(current_value, done)`.
+    fn advance(&mut self, now: Instant) -> (f32, bool) {
+        if matches!(self.easing, Easing::Follow) {
+            // Exponential approach: value += (to - value) * (1 - e^(-dt/tau)).
+            let dt = now.duration_since(self.last).as_secs_f32();
+            self.last = now;
+            let tau = self.duration.as_secs_f32().max(0.001);
+            let k = 1.0 - (-dt / tau).exp();
+            self.value += (self.to - self.value) * k;
+            // Done when visually indistinguishable from the target
+            // (sub-pixel and sub-1% opacity alike).
+            if (self.to - self.value).abs() < 0.05 {
+                self.value = self.to;
+                return (self.to, true);
+            }
+            return (self.value, false);
+        }
         let elapsed = now.duration_since(self.start);
         if elapsed >= self.duration {
             (self.to, true)
@@ -229,6 +260,24 @@ impl AnimationManager {
         snap_beyond: Option<f32>,
     ) {
         let mut inner = self.inner.borrow_mut();
+        // Follow-mode re-target: update the target IN PLACE — the
+        // follower keeps its current value and velocity profile, so
+        // rapid re-targets (held key-repeat) produce continuous
+        // motion instead of restarted glides.
+        if matches!(easing, Easing::Follow)
+            && let Some(t) = inner.tweens.get_mut(&(node_id, prop))
+            && matches!(t.easing, Easing::Follow)
+        {
+            t.to = to;
+            t.duration = duration;
+            if let Some(sb) = snap_beyond
+                && sb > 0.0
+                && (to - t.value).abs() > sb
+            {
+                t.value = if to > t.value { to - sb } else { to + sb };
+            }
+            return;
+        }
         let mut from = match inner.last_values.get(&(node_id, prop)).copied() {
             Some(v) => v,
             None => ui_state.with_tree(|t| {
@@ -244,6 +293,8 @@ impl AnimationManager {
         // the retarget leaves `from` further than this from `to`, snap
         // to that distance and glide the rest. The animation stays
         // smooth per step but can never lag more than the cap.
+        // (Follow mode self-limits lag — velocity is proportional to
+        // it — but the cap still bounds the worst case.)
         if let Some(sb) = snap_beyond
             && sb > 0.0
             && (to - from).abs() > sb
@@ -261,12 +312,15 @@ impl AnimationManager {
             inner.last_values.insert((node_id, prop), to);
             return;
         }
+        let now = Instant::now();
         let tween = Tween {
             from,
             to,
-            start: Instant::now(),
+            start: now,
             duration,
             easing,
+            value: from,
+            last: now,
         };
         inner.tweens.insert((node_id, prop), tween);
     }
@@ -282,12 +336,12 @@ impl AnimationManager {
         // both the value to write and the value to cache as
         // `last_values` for the next tween that targets the same key.
         let samples: Vec<((NodeId, TweenProp), f32, bool)> = {
-            let inner = self.inner.borrow();
+            let mut inner = self.inner.borrow_mut();
             inner
                 .tweens
-                .iter()
+                .iter_mut()
                 .map(|(&key, tween)| {
-                    let (value, done) = tween.sample(now);
+                    let (value, done) = tween.advance(now);
                     (key, value, done)
                 })
                 .collect()
