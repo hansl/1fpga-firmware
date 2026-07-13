@@ -7,7 +7,7 @@
 // above CAROUSEL (cards, left/right + confirm opens the collection);
 // crossings are explicit moveFocus calls at cursor edges.
 
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 
 import { VW, VH, s } from '../scale';
@@ -17,7 +17,7 @@ import { useRouter } from '../router';
 import { globalGet } from '../services/db';
 import { listSystems, type SystemCard } from '../services/library';
 import { useAsync } from '../services/useAsync';
-import { CardCarousel } from '../theme/CardCarousel';
+import { CardCarousel, type CarouselHandle } from '../theme/CardCarousel';
 import { NewsTicker } from '../theme/NewsTicker';
 import { STATUS_ITEMS, StatusCluster } from '../theme/StatusCluster';
 
@@ -126,30 +126,32 @@ function StatusZone() {
   return <StatusCluster focused={focused} selected={sel} />;
 }
 
-/** Owns the card cursor; confirm opens the system's collection. */
+/** Owns the card cursor via the carousel's imperative handle —
+ * selection steps never re-render this zone (the whole point: a
+ * reconcile per held-key step was the 20 fps floor). Handlers are
+ * dependency-stable; current selection reads through the handle. */
 function CarouselZone({ systems }: { systems: SystemCard[] }) {
   const focus = useFocus();
   const router = useRouter();
-  const [sel, setSel] = useState(0);
+  const carousel = useRef<CarouselHandle>(null);
 
   useZoneIntent(
     'navigate_left',
     useCallback((e) => {
       if (e.kind === 'pressed' || e.kind === 'repeat') {
-        setSel((s) => Math.max(0, s - 1));
+        const c = carousel.current;
+        if (c) c.select(c.getSelected() - 1);
       }
     }, []),
   );
   useZoneIntent(
     'navigate_right',
-    useCallback(
-      (e) => {
-        if (e.kind === 'pressed' || e.kind === 'repeat') {
-          setSel((s) => Math.min(systems.length - 1, s + 1));
-        }
-      },
-      [systems.length],
-    ),
+    useCallback((e) => {
+      if (e.kind === 'pressed' || e.kind === 'repeat') {
+        const c = carousel.current;
+        if (c) c.select(c.getSelected() + 1);
+      }
+    }, []),
   );
   useZoneIntent(
     'navigate_up',
@@ -165,21 +167,21 @@ function CarouselZone({ systems }: { systems: SystemCard[] }) {
     useCallback(
       (e) => {
         if (e.kind === 'pressed' && systems.length > 0) {
-          const sys = systems[Math.min(sel, systems.length - 1)];
-          router.navigate(`/collections/${encodeURIComponent(sys.uniqueName)}`);
+          const c = carousel.current;
+          const sel = Math.min(c ? c.getSelected() : 0, systems.length - 1);
+          router.navigate(`/collections/${encodeURIComponent(systems[sel].uniqueName)}`);
         }
       },
-      [router, systems, sel],
+      [router, systems],
     ),
   );
 
   if (systems.length === 0) {
     return <div style={centerMsg}>No systems found on this card.</div>;
   }
-  const clamped = Math.min(sel, systems.length - 1);
   return (
     <>
-      <CardCarousel systems={systems} selected={clamped} />
+      <CardCarousel ref={carousel} systems={systems} />
       <ActionBar actions={CAROUSEL_ACTIONS} />
     </>
   );

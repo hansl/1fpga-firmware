@@ -3,6 +3,7 @@
 // "Ⓐ Select" on a gamepad and "↵ Select" on a keyboard, switching
 // live when the user touches a different device.
 
+import { memo } from 'react';
 import type { CSSProperties } from 'react';
 
 import { useInputSource } from '../hooks';
@@ -126,7 +127,11 @@ function Glyph({ spec }: { spec: GlyphSpec }) {
   return <div style={textGlyphStyle}>{spec.text}</div>;
 }
 
-export function ActionBar({ actions }: { actions: ActionBinding[] }) {
+export const ActionBar = memo(function ActionBar({
+  actions,
+}: {
+  actions: ActionBinding[];
+}) {
   const source = useInputSource();
   return (
     <div style={rootStyle}>
@@ -141,4 +146,4 @@ export function ActionBar({ actions }: { actions: ActionBinding[] }) {
       })}
     </div>
   );
-}
+});
